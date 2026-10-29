@@ -1,7 +1,10 @@
 # Changelog
 
-## 0.1.24 — 2026-10-29
+## 0.1.25 — 2026-10-29
 
+- Vendor `pi-antigravity-acp-provider 0.1.15` source under `extension/vendor/pi-antigravity-acp-provider` (MIT) instead of npm dependency. All imports, build and test scripts now point to local vendor for direct modification. Updated docs and added required runtime deps (`@agentclientprotocol/sdk`, `@modelcontextprotocol/sdk`, `unzipper`, `zod`).
+
+## 0.1.24 — 2026-10-29
 - Keep session ownership if ACP shutdown times out and release it only after the process actually exits. Add an offline regression for the timed-out shutdown and subsequent handoff.
 
 ## 0.1.23 — 2026-10-29
