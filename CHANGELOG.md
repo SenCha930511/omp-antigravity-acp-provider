@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.21 — 2026-10-29
+
+- Reject oversized ACP step text before inference so cold replay after plan refinement cannot silently lose the newest request or recent decisions. Keep the server step limit independent of model-window, wire and image budgets, and report context overflow for OMP's existing compaction recovery.
+- Persist a versioned in-flight marker before prompt dispatch and clear it only with a successful terminal checkpoint. Rebuild uncertain/legacy mappings, retire unknown prompt failures, preserve known-good sessions on local preflight failures, and prevent late dispatch after shutdown.
+- Claim tool and permission continuation ownership before asynchronous work so duplicate callers receive an explicit error instead of orphaning the first response stream.
+- Invalidate incomplete tool/permission-result fallbacks, conditionally remove old mappings, and prevent retiring turns from repersisting them while teardown completes.
+- Reconstruct when a retained completed assistant answer changes or disappears; preserve normal warm reuse and normalize empty completed-answer fingerprints.
+- Add built-runtime plan-refinement coverage and an optional offline integration with OMP's adaptive summary windows.
+
 ## 0.1.20 — 2026-10-21
 
 - Reconcile verified deleted OMP journals with owned ACP sessions: preserve live/moved/unknown sources, confirm absence across checks, remove mappings conditionally and honor cleanup off/conservative/timeout modes.

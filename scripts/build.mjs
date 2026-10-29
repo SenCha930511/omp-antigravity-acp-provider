@@ -101,16 +101,19 @@ const result = await build({
             replacement: [
               "if (isAbort(error) || binding.abortRequested) {",
               "\t\t\t\tabortTurn(binding);",
-              "\t\t\t\tif (binding.connection.process.alive && !binding.needsReconstruction &&",
+              "\t\t\t\tif (binding.connection.process.alive && !binding.ompInvalidated && !binding.needsReconstruction &&",
               "\t\t\t\t\t['cancelled', 'end_turn'].includes(binding.ompTerminalStopReason)) {",
               "\t\t\t\t\tbinding.messageCount = binding.pendingContextCount;",
               "\t\t\t\t\tbinding.historyFingerprint = binding.pendingContextFingerprint;",
               "\t\t\t\t\tbinding.expectedAssistantFingerprint = messageFingerprint((binding.writer ?? writer).message);",
               "\t\t\t\t\tbinding.ompCancelledCheckpoint = true;",
               "\t\t\t\t\tbinding.ompCancelledHadOutput = (binding.writer ?? writer).message.content.length > 0;",
-              "\t\t\t\t\tthis.persistBinding(binding);",
+              "\t\t\t\t\tbinding.ompExpectedAssistantHasOutput = binding.ompCancelledHadOutput;",
+              "\t\t\t\t\tbinding.ompInFlight = false;",
+              "\t\t\t\t\ttry { this.persistBinding(binding); } catch (checkpointError) { await this.invalidateBinding(binding); throw checkpointError; }",
               "\t\t\t\t} else await this.invalidateBinding(binding);",
-              "\t\t\t}",
+              "\t\t\t} else if (ompDispatched) await this.invalidateBinding(binding);",
+              "\t\t\telse binding.ompInFlight = false;",
             ].join("\n"),
           },
           {
@@ -124,13 +127,14 @@ const result = await build({
             replacement: "binding.ompTerminalStopReason = response.stopReason;\n\t\t\tif (binding.abortRequested) throw abortError();",
           },
           {
-            name: "cancelled partial output must match retained OMP history",
+            name: "generated assistant boundary must match retained OMP history",
             anchor: "binding.needsReconstruction || binding.mode !== this.permissionMode ||",
             replacement: [
               "binding.needsReconstruction ||",
-              "\t\t\t\t(binding.ompCancelledCheckpoint && (context.messages[binding.messageCount]?.role === 'assistant'",
-              "\t\t\t\t\t? messageFingerprint(context.messages[binding.messageCount]) !== binding.expectedAssistantFingerprint",
-              "\t\t\t\t\t: binding.ompCancelledHadOutput)) || binding.mode !== this.permissionMode ||",
+              "\t\t\t\t(binding.expectedAssistantFingerprint && context.messages[binding.messageCount]?.role === 'assistant' &&",
+              "\t\t\t\t\tmessageFingerprint(context.messages[binding.messageCount]) !== binding.expectedAssistantFingerprint) ||",
+              "\t\t\t\t((binding.ompExpectedAssistantHasOutput || (binding.ompCancelledCheckpoint && binding.ompCancelledHadOutput)) &&",
+              "\t\t\t\t\tcontext.messages[binding.messageCount]?.role !== 'assistant') || binding.mode !== this.permissionMode ||",
             ].join("\n"),
           },
           {
@@ -187,6 +191,93 @@ const result = await build({
           if (contents.split(anchor).length !== count + 1) throw new Error(`Pinned store call sites changed: ${anchor}`);
           contents = contents.replaceAll(anchor, replacement);
         }
+        // Continuity transactions are adapter-owned. Keep explicit pinned seams
+        // so an upstream update cannot silently bypass the write-ahead marker.
+        const continuityPatches = [
+          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean;'],
+          ['let completeTurn: (() => void) | undefined;', 'let ompDispatched = false;\n\t\tlet completeTurn: (() => void) | undefined;'],
+          ['if (existing) return existing;', `if (existing) {
+            const value = await existing;
+            if (!value.ompInvalidated) return value;
+            await value.ompDropPromise;
+            if (this.bindings.get(key) === existing) this.bindings.delete(key);
+            return this.getBinding(key, model, acpModelId, apiKey, writer, tools, signal);
+          }`],
+          ['if (value === createdBinding && this.bindings.get(key) === current) this.bindings.delete(key);',
+            'if (value === createdBinding && this.bindings.get(key) === current && !createdBinding.ompInvalidated) this.bindings.delete(key);'],
+          ['const saved = piSessionId ? await this.sessionStore?.get(piSessionId) : undefined;', `let saved = piSessionId ? await this.sessionStore?.get(piSessionId) : undefined;
+            if (saved && (saved.ompCheckpointVersion !== 1 || saved.ompInFlight !== false)) {
+              await connection.retireForReplacement?.(key, saved.acpSessionId);
+              await this.ompRemoveSaved(saved.piSessionId, saved.acpSessionId);
+              saved = undefined;
+            }`],
+          ['const createdBinding: Binding = {', `const createdBinding: Binding = {
+            ompInFlight: false, ompInvalidated: false,
+            ompExpectedAssistantHasOutput: restored && saved?.ompExpectedAssistantHasOutput === true,`],
+          ['const response = await binding.connection.prompt(', `if (options.signal?.aborted) throw abortError();
+            binding.ompInFlight = true;
+            await this.persistBinding(binding);
+            this.assertEpoch(epoch);
+            if (binding.ompInvalidated || !binding.connection.process.alive) throw new AntigravityAcpError('protocol', 'ACP session closed before prompt dispatch');
+            if (options.signal?.aborted) throw abortError();
+            ompDispatched = true;
+            const response = await binding.connection.prompt(`],
+          ['binding.expectedAssistantFingerprint = messageFingerprint(activeWriter.message);', `binding.expectedAssistantFingerprint = messageFingerprint(activeWriter.message.content.length
+              ? activeWriter.message : { ...activeWriter.message, content: [{ type: 'text', text: '' }] });
+            binding.ompExpectedAssistantHasOutput = activeWriter.message.content.some(block => block.type !== 'text' || block.text.length > 0);
+            binding.ompInFlight = false;`],
+          ['if (!binding.piSessionId) return;', 'if (!binding.piSessionId || binding.ompInvalidated) return;'],
+          ['acpModelId: binding.modelId,', 'acpModelId: binding.modelId,\n ompCheckpointVersion: 1, ompInFlight: binding.ompInFlight === true, ompExpectedAssistantHasOutput: binding.ompExpectedAssistantHasOutput === true,'],
+          ['if (binding.needsReconstruction) { await this.sessionStore?.remove(binding.piSessionId); return; }',
+            'if (binding.needsReconstruction) { await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId); return; }'],
+        ];
+        for (const [anchor, replacement] of continuityPatches) {
+          if (contents.split(anchor).length !== 2) throw new Error(`Pinned continuity seam changed: ${anchor}`);
+          contents = contents.replace(anchor, replacement);
+        }
+        // Fallbacks after incomplete tools/permissions must not reload the same
+        // backend. The two owning branches share this exact adjacent seam.
+        const fallback = 'await this.dropBinding(key, binding);\n\t\t\t\tbinding = await this.getBinding(';
+        if (contents.split(fallback).length !== 3) throw new Error('Pinned incomplete continuation fallbacks changed');
+        contents = contents.replaceAll(fallback, 'await this.invalidateBinding(binding);\n\t\t\t\tbinding = await this.getBinding(');
+        const claimStart = 'binding.writer = writer;\n\t\t\t\tconst continuationTurn = binding.turnCompletion;';
+        const claimEnd = 'await this.awaitContinuation(binding, options.signal);\n\t\t\t\treturn;';
+        if (contents.split(claimStart).length !== 3 || contents.split(claimEnd).length !== 3) throw new Error('Pinned continuation ownership seams changed');
+        contents = contents.replaceAll(claimStart, 'return await claimContinuation(binding, async () => {\n\t\t\t\t' + claimStart)
+          .replaceAll(claimEnd, 'await this.awaitContinuation(binding, options.signal);\n\t\t\t\t}, () => this.invalidateBinding(binding));');
+        const dropPattern = /\tprivate async dropBinding\([\s\S]*?\n\tprivate confirmedMode\(/g;
+        if ([...contents.matchAll(dropPattern)].length !== 1) throw new Error('Pinned binding teardown seam changed');
+        contents = contents.replace(dropPattern, `\tprivate async ompRemoveSaved(piSessionId: string, acpSessionId: string): Promise<void> {
+          if (typeof this.sessionStore?.removeIfMatches === 'function') await this.sessionStore.removeIfMatches(piSessionId, acpSessionId);
+          else await this.sessionStore?.remove(piSessionId);
+        }
+        private async dropBinding(key: string, binding: Binding, removeSaved = false): Promise<void> {
+          if (removeSaved) binding.ompInvalidated = true;
+          if (binding.ompDropPromise) {
+            await binding.ompDropPromise;
+            if (removeSaved && binding.piSessionId) await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId);
+            return;
+          }
+          const dropping = (async () => {
+            const current = this.bindings.get(key);
+            this.resolvedBindings.delete(binding);
+            cancelPermission(binding);
+            cancelPiTools(binding, 'Antigravity session closed before Pi returned the tool result');
+            const closing = Promise.allSettled([binding.connection.close(), binding.bridge?.close() ?? Promise.resolve()]);
+            try {
+              if (removeSaved) {
+                binding.connection.retireForReplacement?.(key, binding.session.sessionId);
+                if (binding.piSessionId) await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId);
+              }
+            } finally {
+              await closing;
+              if (current && (await current) === binding && this.bindings.get(key) === current) this.bindings.delete(key);
+            }
+          })();
+          binding.ompDropPromise = dropping;
+          await dropping;
+        }
+        private confirmedMode(`);
         const flushAnchor = "\n\tprivate async runQueued(";
         const beforeQueue = contents.slice(0, contents.indexOf(flushAnchor));
         const endClose = beforeQueue.lastIndexOf("\n\t}");
@@ -224,6 +315,7 @@ const result = await build({
           .replaceAll("binding.connection.confirmReplacement?.(", "await binding.connection.confirmReplacement?.(")
           .replaceAll("binding.connection.discardSession?.(", "await binding.connection.discardSession?.(");
         contents = `import { drainCancelledTurn } from ${JSON.stringify(path.join(root, "extension/turn-cancellation.ts"))};\n` + contents;
+        contents = `import { claimContinuation } from ${JSON.stringify(path.join(root, "extension/continuation-claim.ts"))};\n` + contents;
         contents = `import { createHistoryFingerprintMemo } from ${JSON.stringify(path.join(root, "extension/history-fingerprint.ts"))};\nconst ompMessageFingerprintMemo = createHistoryFingerprintMemo();\n` + contents;
         return { contents, loader: "ts" };
       });

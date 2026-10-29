@@ -26,6 +26,23 @@ export interface TransferContext {
   messages: TransferMessage[];
 }
 
+// The official harness applies a 64,000-token per-step conversion limit,
+// independently of the model window. Its overflow path keeps only the first
+// 192,000 UTF-8 bytes. Reserve room for USER_REQUEST/time metadata added by ACP;
+// otherwise a cold replay can silently lose its newest question at the tail.
+export const ACP_STEP_TEXT_BYTES = 188_000;
+
+export function promptTextBytes(prompt: TransferBlock[]): number {
+  let bytes = 0;
+  for (const block of prompt) {
+    if (block.type === "text") bytes += Buffer.byteLength(block.text ?? "", "utf8") + 2;
+    else if (block.type === "resource" && block.resource) {
+      bytes += Buffer.byteLength(`Embedded resource (${block.resource.uri}):\n${block.resource.text}`, "utf8") + 2;
+    }
+  }
+  return bytes;
+}
+
 export function currentSystemInstructions(context: TransferContext): string {
   const prompt = getCurrentSystemPrompt(context.messages as never) || context.systemPrompt || "";
   if (Buffer.byteLength(prompt, "utf8") > 134_217_728) throw new Error("OMP system instructions exceed the 128 MiB hard transfer ceiling; reduce them rather than truncating instructions");
@@ -144,6 +161,14 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
   const bytes = instructionsBytes + historyBytes + tailBytes + imageWireChars + imageCount * 10;
   const budget = historyBudget(undefined, process.env, options.maxTransferBytes);
   if (bytes > budget) throw new Error(`Request payload too large (413): local ACP transfer needs ${bytes} bytes; budget is ${budget}. Use OMP /compact or raise maxTransferBytes. No history was silently truncated.`);
+  const textBytes = promptTextBytes(prompt);
+  if (textBytes > ACP_STEP_TEXT_BYTES) {
+    // OMP recognizes this as context overflow, including inside its adaptive
+    // summary-window loop. Reject before session/prompt rather than letting the
+    // harness truncate and answer an older request. Never put request text in
+    // this error, and never let a user wire/window override disable this guard.
+    throw new Error(`Maximum context length exceeded: official Antigravity ACP single-step text needs ${textBytes} bytes; safe budget is ${ACP_STEP_TEXT_BYTES} bytes. Compact the conversation with OMP /compact and retry. A larger contextWindow or maxTransferBytes does not raise this server limit. No history or current request was sent or silently truncated.`);
+  }
   const estimatedTokens =
     (instructionsText ? estimateTransferTokens(instructionsText, 0, instructionsBytes - 108) : 0) +
     (historyText ? estimateTransferTokens(historyText, 0, historyBytes - 100) : 0) +

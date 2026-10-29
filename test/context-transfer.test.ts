@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPromptParts, historyBudget } from "../extension/context-transfer.ts";
+import { ACP_STEP_TEXT_BYTES, buildPromptParts, historyBudget, promptTextBytes } from "../extension/context-transfer.ts";
 
 const user = (content: any) => ({ role: "user", content, timestamp: 0 });
 // The official ACP parser appends embedded-resource text to its result and
@@ -41,6 +41,39 @@ test("warm new user turn has an explicit current-request boundary without replay
   assert.match(parsed, /# Current OMP user request\n\n[\s\S]*NEW_REQUEST$/);
   assert.ok(!parsed.includes("OLD_REQUEST"));
 });
+test("refining a completed plan rejects an oversized cold replay before the latest request can be truncated", () => {
+  const messages = [user("PLAN_DOCKER_GATEWAY"),
+    { role: "toolResult", toolName: "ask", toolCallId: "preferences", content: [{ type: "text", text: "User answers: Magpie; fixed upstream key; named tunnel" }] },
+    { role: "toolResult", toolName: "read", toolCallId: "source", content: [{ type: "text", text: "source ".repeat(100_000) }] },
+    { role: "assistant", content: [{ type: "text", text: "PLAN_COMPLETE" }] },
+    user("EXPLAIN_THE_APPROVED_ARCHITECTURE")];
+  assert.throws(() => buildPromptParts({ messages }, true, undefined, { contextWindow: 1_000_000 }),
+    /Maximum context length exceeded:.*single-step/s);
+});
+test("single-step protection counts UTF-8 text and cannot be bypassed by larger model or wire budgets", () => {
+  assert.throws(() => buildPromptParts({ messages: [user("中".repeat(64_000))] }, true, undefined,
+    { contextWindow: 1_000_000, policy: { maxTransferBytes: 134_217_728 } }), /single-step/);
+});
+test("single-step protection also rejects oversized warm deltas", () => {
+  assert.throws(() => buildPromptParts({ messages: [user("OLD"), user("x".repeat(200_000))] }, false, 1,
+    { contextWindow: 1_000_000 }), /single-step/);
+});
+test("single-step sizing includes embedded-resource labels and reserves room for official metadata", () => {
+  const prompt = [{ type: "resource", resource: { uri: "urn:fixture", mimeType: "text/plain", text: "中文" } },
+    { type: "text", text: "NEXT" }];
+  assert.ok(promptTextBytes(prompt) >= Buffer.byteLength(parsedText(prompt), "utf8"));
+  assert.ok(ACP_STEP_TEXT_BYTES <= 192_000 - 4000);
+  const context = { messages: [user("x".repeat(ACP_STEP_TEXT_BYTES - 1000))] };
+  assert.ok(buildPromptParts(context, true, undefined, { contextWindow: 1_000_000 }).prompt.length);
+  assert.throws(() => buildPromptParts({ messages: [user("x".repeat(ACP_STEP_TEXT_BYTES))] }, true, undefined,
+    { contextWindow: 1_000_000 }), /single-step/);
+});
+test("binary image payloads keep their independent budget instead of counting as rendered text", () => {
+  const output = buildPromptParts({ messages: [user([{ type: "image", data: "a".repeat(300_000), mimeType: "image/png" },
+    { type: "text", text: "DESCRIBE_IMAGE" }])] }, true, undefined, { contextWindow: 1_000_000 });
+  assert.ok(promptTextBytes(output.prompt) < 1000);
+  assert.equal(output.prompt.find(block => block.type === "image")?.data?.length, 300_000);
+});
 test("cold transfer retains old text beyond the former 32000-character cutoff", () => {
   const context = { systemPrompt: "RULES", messages: [user("EARLY_MARKER" + "x".repeat(80_000)), user("LATEST")] };
   const output = buildPromptParts(context, true, undefined, { contextWindow: 1_000_000 });
@@ -67,11 +100,11 @@ test("historical images remain actual attachments; thinking is not replayed as t
   assert.deepEqual(output.prompt.find(x => x.type === "image"), image);
   assert.ok(!JSON.stringify(output).includes("PRIVATE"));
 });
-test("byte budget is independent of token windows and can exceed the old 500KB limit", () => {
+test("wire budgets remain independent, but cannot bypass the official single-step text limit", () => {
   assert.equal(historyBudget(1_000_000, {}), 16_777_216);
   assert.equal(historyBudget(32_768, {}), 16_777_216);
   assert.equal(historyBudget(1_000_000, { OMP_ACP_HISTORY_BYTES: "33554432" }), 33_554_432);
   assert.throws(() => historyBudget(1_000_000, { OMP_ACP_HISTORY_BYTES: "NaN" }), /must be/);
-  const output = buildPromptParts({ messages: [user("x".repeat(1_200_000)), user("LATEST")] }, true, undefined, { contextWindow: 1_000_000 });
-  assert.ok(JSON.stringify(output).length > 1_200_000);
+  assert.throws(() => buildPromptParts({ messages: [user("x".repeat(1_200_000)), user("LATEST")] }, true, undefined,
+    { contextWindow: 1_000_000 }), /single-step/);
 });

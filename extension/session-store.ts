@@ -10,6 +10,7 @@ interface SavedSessionRecord {
   messageCount: number; historyFingerprint: string; lastActive: number;
   expectedAssistantFingerprint?: string;
   ompCancelledCheckpoint?: boolean; ompCancelledHadOutput?: boolean;
+  ompCheckpointVersion?: 1; ompInFlight?: boolean; ompExpectedAssistantHasOutput?: boolean;
 }
 const tails = new Map<string, Promise<unknown>>();
 
@@ -81,7 +82,10 @@ export class AcpSessionStore {
     return parsed.filter((record): record is SavedSessionRecord => Boolean(record) && typeof record === "object" &&
       ["piSessionId", "acpSessionId", "acpModelId", "cwd", "historyFingerprint"].every(key => typeof record[key] === "string") &&
       Number.isSafeInteger(record.messageCount) && record.messageCount >= 0 && Number.isFinite(record.lastActive) &&
-      (record.expectedAssistantFingerprint === undefined || typeof record.expectedAssistantFingerprint === "string"));
+      (record.expectedAssistantFingerprint === undefined || typeof record.expectedAssistantFingerprint === "string") &&
+      (record.ompCheckpointVersion === undefined || record.ompCheckpointVersion === 1) &&
+      ["ompInFlight", "ompExpectedAssistantHasOutput", "ompCancelledCheckpoint", "ompCancelledHadOutput"].every(key =>
+        record[key] === undefined || typeof record[key] === "boolean"));
   }
   private async write(records: SavedSessionRecord[]): Promise<void> {
     if (!records.length) { await fs.rm(this.file, { force: true }); return; }
