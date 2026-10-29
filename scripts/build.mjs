@@ -243,7 +243,14 @@ const result = await build({
           });
           try {
             if (key.startsWith('sid:') && typeof this.sessionStore?.acquireSessionLease === 'function') {
-              releaseLease = await this.sessionStore.acquireSessionLease(key.slice(4), () => { leaseLost = true; if (binding) binding.ompInvalidated = true; void connection.close().catch(() => {}); });
+              const releaseOwnedLease = await this.sessionStore.acquireSessionLease(key.slice(4), () => { leaseLost = true; if (binding) binding.ompInvalidated = true; void connection.close().catch(() => {}); });
+              releaseLease = async () => {
+                if (connection.process.alive) {
+                  void connection.process.exited.then(releaseOwnedLease).catch(() => {});
+                  return;
+                }
+                await releaseOwnedLease();
+              };
               this.assertEpoch(epoch);
             }
 \t\t\tconst initialize = await connection.initialize();`],

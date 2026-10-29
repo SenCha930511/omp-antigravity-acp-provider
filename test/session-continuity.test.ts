@@ -46,7 +46,8 @@ function fixture(leaseStore?: any) {
     runtime = new AntigravityRuntime((options: any) => {
       const exit = Promise.withResolvers<any>(), closed = Promise.withResolvers<any>();
       void closed.promise.catch(() => {});
-      const c: any = { process: { alive: true, exited: exit.promise }, prompts: [], resumed: [], seenCheckpoints: [],
+      const c: any = { process: { alive: true, exited: exit.promise }, prompts: [], resumed: [], seenCheckpoints: [], ignoreClose: false,
+        forceExit() { c.process.alive = false; closed.reject(new Error("synthetic transport closed")); exit.resolve({ code: 0 }); },
         async initialize() { return { protocolVersion: 1, agentCapabilities: {
           promptCapabilities: { embeddedContext: true }, sessionCapabilities: { resume: {} } } }; },
         async newSession() { c.id = randomUUID(); return { sessionId: c.id, modes, models }; },
@@ -80,8 +81,8 @@ function fixture(leaseStore?: any) {
           return { stopReason: "end_turn" };
         },
         async close() {
-          if (!c.process.alive) return;
-          c.process.alive = false; closed.reject(new Error("synthetic transport closed")); exit.resolve({ code: 0 });
+          if (!c.process.alive || c.ignoreClose) return;
+          c.forceExit();
         },
       };
       connections.push(c); return c;
@@ -139,6 +140,23 @@ test("lost session ownership closes an active prompt without saving a clean chec
     assert.equal(f.connections[0].process.alive, false);
     assert.notEqual(f.saved.get("chat")?.ompInFlight, false);
   } finally { await f.close(); }
+});
+
+test("a timed-out close keeps ownership until the actual ACP process exits", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lease-exit-"));
+  const f = fixture(new AcpSessionStore(path.join(root, "sessions.json")));
+  let connection: any;
+  try {
+    const a = f.create(), b = f.create(), first = user("FIRST");
+    const answer = f.reply(await f.run(a, [first]));
+    connection = f.connections[0]; connection.ignoreClose = true;
+    await a.close();
+    const blocked = await f.run(b, [first, answer, user("NEXT")]);
+    assert.match(blocked.find(e => e.type === "error")?.error.errorMessage, /already open/);
+    connection.forceExit();
+    await tick(); await tick();
+    assert.equal(f.reply(await f.run(b, [first, answer, user("NEXT")]))?.stopReason, "stop");
+  } finally { if (connection?.process.alive) connection.forceExit(); await f.close(); await fs.rm(root, { recursive: true, force: true }); }
 });
 
 test("ownership remains held while a retired binding removes its old mapping", async () => {

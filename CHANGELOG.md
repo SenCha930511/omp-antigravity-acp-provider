@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.24 — 2026-10-29
+
+- Keep session ownership if ACP shutdown times out and release it only after the process actually exits. Add an offline regression for the timed-out shutdown and subsequent handoff.
+
 ## 0.1.23 — 2026-10-29
 
 - Hold a cross-process session lease through restoration and warm runtime lifetime, preventing simultaneous ownership of a single OMP session. Losing the lease closes its ACP connection; restart all older OMP processes to participate in coordination.

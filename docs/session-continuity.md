@@ -8,7 +8,8 @@ accepted history matches OMP's retained transcript.
 
 Persistent sessions acquire a cross-process lease before reading a mapping or
 restoring ACP, and keep it while the warm runtime is alive. A competing runtime
-fails explicitly until the owner shuts down or its idle runtime is retired. A
+fails explicitly until the owner shuts down or its idle runtime is retired. If
+shutdown times out, ownership remains held until the ACP process actually exits. A
 compromised lease closes the connection and invalidates its binding. Processes
 running older adapter versions do not acquire this lease; restart them when upgrading.
 The session registry rejects malformed or unknown-version records without writing
