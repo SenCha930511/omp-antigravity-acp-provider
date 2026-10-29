@@ -1,4 +1,4 @@
-import { usageFromPrompt as upstreamUsage } from "pi-antigravity-acp-provider/src/stream/usage.ts";
+import { usageFromPrompt as upstreamUsage } from "./vendor/pi-antigravity-acp-provider/src/stream/usage.ts";
 
 // Named shape of the upstream usage projection (pi-ai Usage) plus this
 // adapter's contextTokens extension, so callers never depend on

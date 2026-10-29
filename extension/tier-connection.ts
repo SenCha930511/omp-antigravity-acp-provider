@@ -1,6 +1,6 @@
-// Compatibility seam for pi-antigravity-acp-provider 0.1.15 / ACP server 1.4.x.
-// OMP effort -> upstream advertised legacy ID -> official model/thought selectors.
-import { AntigravityAcpConnection } from "pi-antigravity-acp-provider/src/acp/connection.ts";
+// Compatibility seam for vendored pi-antigravity-acp-provider 0.1.15 / ACP server 1.4.x.
+// OMP effort -> vendored advertised legacy ID -> official model/thought selectors.
+import { AntigravityAcpConnection } from "./vendor/pi-antigravity-acp-provider/src/acp/connection.ts";
 import { choices, resolveSelection, selector } from "./selectors.ts";
 import { installSessionRouting, type NativeToolMode } from "./tool-routing.ts";
 import { showAcpUpdate } from "./activity-presentation.ts";

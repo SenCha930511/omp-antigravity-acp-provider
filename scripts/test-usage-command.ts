@@ -1,6 +1,6 @@
 // Offline control-flow regression. No constructor, process or authentication.
 import assert from "node:assert/strict";
-import { AntigravityAcpConnection } from "pi-antigravity-acp-provider/src/acp/connection.ts";
+import { AntigravityAcpConnection } from "../extension/vendor/pi-antigravity-acp-provider/src/acp/connection.ts";
 import { TierConnection } from "../extension/tier-connection.ts";
 const original = AntigravityAcpConnection.prototype.prompt;
 const zero = { input: 0, completion: 0, thinking: 0, cached: 0, total: 0 };

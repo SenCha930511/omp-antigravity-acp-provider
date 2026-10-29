@@ -1,12 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
-const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const upstream = path.dirname(require.resolve("pi-antigravity-acp-provider/package.json"));
+const upstream = path.join(root, "extension/vendor/pi-antigravity-acp-provider");
 const assets = path.join(root, "extension/assets");
 await fs.mkdir(path.join(assets, "src/acp"), { recursive: true });
 await fs.copyFile(path.join(upstream, "src/acp/supervisor.mjs"), path.join(assets, "src/acp/supervisor.mjs"));

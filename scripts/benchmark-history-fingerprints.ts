@@ -1,12 +1,13 @@
 // Read-only local CPU benchmark. Synthetic history only; no models or files of user data.
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 import { transformSync } from "esbuild";
 
-const require = createRequire(import.meta.url);
-const source = fs.readFileSync(require.resolve("pi-antigravity-acp-provider/src/runtime.ts"), "utf8");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const source = fs.readFileSync(path.join(root, "extension/vendor/pi-antigravity-acp-provider/src/runtime.ts"), "utf8");
 const start = source.indexOf("function messagesFingerprint(");
 const end = source.indexOf("function findToolResult(", start);
 assert.ok(start > 0 && end > start);

@@ -2,18 +2,16 @@ import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { createRequire } from "node:module";
 import { build } from "esbuild";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const require = createRequire(import.meta.url);
 // Compiled output must live inside the project so runtime resolution of the
 // externalized node_modules dependencies walks up to the project root.
 const output = path.join(root, ".test-build");
-// The pinned upstream ships TypeScript sources under node_modules, which Node
+// The vendored upstream ships TypeScript sources under extension/vendor, which Node
 // refuses to type-strip at runtime; those imports stay bundled while every
 // other package loads directly from the project's node_modules.
-const upstream = path.dirname(require.resolve("pi-antigravity-acp-provider/package.json"));
+const upstream = path.join(root, "extension/vendor/pi-antigravity-acp-provider");
 try {
   const entries = (await readdir(path.join(root, "test")))
     .filter(file => file.endsWith(".test.ts"))

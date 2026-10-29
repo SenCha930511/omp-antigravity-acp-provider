@@ -3,7 +3,7 @@ import afs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { lock } from "proper-lockfile";
-import { resolveAntigravityAcpDirectory } from "pi-antigravity-acp-provider/src/acp/antigravity.ts";
+import { resolveAntigravityAcpDirectory } from "./vendor/pi-antigravity-acp-provider/src/acp/antigravity.ts";
 import { isMissingFileError, writeJsonAtomic } from "./fs-atomic.ts";
 import { AcpSessionStore } from "./session-store.ts";
 import { sourceRoot, sourceId, findSources, type OmpSessionSource } from "./omp-session-source.ts";

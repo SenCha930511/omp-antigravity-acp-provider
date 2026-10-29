@@ -1,0 +1,86 @@
+{
+  "name": "pi-antigravity-acp-provider",
+  "version": "0.1.15",
+  "description": "First-class Google Antigravity ACP provider for Pi",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "zacbemis",
+    "url": "https://github.com/zacbemis"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zacbemis/pi-antigravity-acp-provider.git"
+  },
+  "homepage": "https://github.com/zacbemis/pi-antigravity-acp-provider#readme",
+  "bugs": {
+    "url": "https://github.com/zacbemis/pi-antigravity-acp-provider/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "gemini",
+    "antigravity",
+    "agy",
+    "acp",
+    "agent-client-protocol",
+    "provider"
+  ],
+  "files": [
+    "extensions",
+    "src",
+    "docs",
+    "runtime-manifest.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:real-acp": "PI_ANTIGRAVITY_ACP_REAL=1 vitest run test/real-cli.test.ts",
+    "test:real-cli": "npm run test:real-acp",
+    "test:live": "PI_ANTIGRAVITY_ACP_LIVE=1 vitest run test/live-authenticated.test.ts",
+    "test:qualify": "PI_ANTIGRAVITY_ACP_QUALIFY=1 vitest run test/live-qualification.test.ts",
+    "check": "npm run typecheck && npm test",
+    "pack:check": "npm pack --dry-run",
+    "test:packed": "node scripts/packed-install-smoke.mjs",
+    "refresh:runtime-manifest": "node scripts/refresh-runtime-manifest.mjs",
+    "sign:runtime-manifest": "node scripts/sign-runtime-manifest.mjs",
+    "prepublishOnly": "npm run check"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.8.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "proper-lockfile": "4.1.2",
+    "unzipper": "0.12.5",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@types/node": "24.19.2",
+    "@types/proper-lockfile": "4.1.4",
+    "@types/unzipper": "0.10.11",
+    "esbuild": "0.28.2",
+    "typebox": "1.3.36",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
+  }
+}

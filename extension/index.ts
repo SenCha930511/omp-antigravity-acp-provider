@@ -1,5 +1,5 @@
-// OMP 18.x adapter for pi-antigravity-acp-provider 0.1.15 (Pi 1.1 API).
-// Keep upstream code intact; translate only the provider registration contract.
+// OMP 18.x adapter for vendored pi-antigravity-acp-provider 0.1.15 (Pi 1.1 API).
+// Upstream source is vendored under ./vendor/pi-antigravity-acp-provider; keep it intact and translate only the provider registration contract.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

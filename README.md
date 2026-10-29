@@ -15,8 +15,7 @@ The original project's ACP transport, Google-managed authentication, runtime ins
 
 This derivative adds OMP-specific provider registration, confirmed model/thinking selectors, lazy catalog loading, OMP-first tool instructions, API-equivalent pricing and per-session runtime lifecycle fixes for planning/refinement.
 
-The repository keeps the OMP adapter sources separately and uses upstream version **0.1.15** as an unmodified, pinned build dependency. The standalone artifact bundles its runtime code, supervisor and signed runtime manifest; end users need no production npm dependencies. It does not contain a copy of upstream's Git history. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the original copyright and license notice.
-
+The repository vendors the upstream **0.1.15** source under `extension/vendor/pi-antigravity-acp-provider` (MIT, see `extension/vendor/pi-antigravity-acp-provider/LICENSE`). The standalone artifact bundles its runtime code, supervisor and signed runtime manifest; end users need no production npm dependencies. It does not contain a copy of upstream's Git history. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the original copyright and license notice.
 ## Status
 
 Version 0.1.24 protects cross-process session ownership even when ACP shutdown times out, isolates adapter state by OMP agent directory, and preserves registries with unsupported records. Restart all OMP processes after upgrading so they participate in session ownership.
@@ -379,6 +378,4 @@ The original local implementation also passed live Argon/Flash inference, effort
 
 The generic catalog implementation passed a live refresh and Argon Low/High inference. Claude, GPT-OSS and future IDs are covered by offline catalog/selector fixtures; live inference for those models remains unverified until the ACP server advertises them.
 
-## License and attribution
-
-MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Upstream source is installed as a pinned npm dependency rather than vendored or modified. Official Google executables and their licenses are separate.
+MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Upstream source is vendored under `extension/vendor/pi-antigravity-acp-provider` (MIT) and kept with attribution. Official Google executables and their licenses are separate.
