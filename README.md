@@ -19,9 +19,9 @@ The repository keeps the OMP adapter sources separately and uses upstream versio
 
 ## Status
 
-Version 0.1.22 fixes a 0.1.21 regression that rejected normal successive tool/permission batches as an already active continuation. It retains plan-refinement size protection, durable checkpoints and stale-session reconstruction. Restart OMP after upgrading to load the new code.
+Version 0.1.23 adds cross-process session ownership, isolates adapter state by OMP agent directory, and preserves registries with unsupported records. Restart all OMP processes after upgrading so they participate in session ownership.
 
-Version 0.1.22 supports all models advertised by the official ACP server. Earlier live inference was tested with macOS, OMP 18.12.5, upstream provider 0.1.15 and official ACP runtime 1.4.1. The 0.1.21–0.1.22 continuity fixes are verified offline, including OMP 18.13.3 catalog loading and the local OMP summarizer source. Other platforms and full interactive Refine plan behavior with a real model remain unverified.
+Version 0.1.23 supports all models advertised by the official ACP server. Earlier live inference was tested with macOS, OMP 18.12.5, upstream provider 0.1.15 and official ACP runtime 1.4.1. The 0.1.21–0.1.23 continuity fixes are verified offline, including OMP 18.13.3 catalog loading and the local OMP summarizer source. Other platforms and full interactive Refine plan behavior with a real model remain unverified.
 
 Google's consumer-plan policies can restrict third-party agent access even through the official CLI or ACP executable. An official transport does not establish permission to use a subscription in OMP. Check the current [Antigravity FAQ](https://www.antigravity.google/docs/faq/) and [terms](https://antigravity.google/terms) for your account.
 
@@ -58,7 +58,7 @@ Or, inside OMP:
 
 Select **omp-antigravity-acp-provider** in the browser, install it, and restart OMP to load the provider.
 
-OMP's marketplace installer currently copies Git content without installing npm dependencies. This marketplace therefore ships a small source launcher that retrieves the exact published **0.1.22** prebuilt npm adapter on first load. It disables npm install scripts and performs no local compilation. Node.js 22.19+ and npm must be on PATH. The standalone build bundles the required code and supervisor assets with no production dependencies: a clean test installation occupied approximately **2.6 MiB** (477 KiB tarball), down from roughly 150 MiB with the old dependency tree. This excludes the separately downloaded Google runtime. First preparation needs internet access; later loads reuse the installed cache without npm network access.
+OMP's marketplace installer currently copies Git content without installing npm dependencies. This marketplace therefore ships a small source launcher that retrieves the exact published **0.1.23** prebuilt npm adapter on first load. It disables npm install scripts and performs no local compilation. Node.js 22.19+ and npm must be on PATH. The standalone build bundles the required code and supervisor assets with no production dependencies: a clean test installation occupied approximately **2.6 MiB** (477 KiB tarball), down from roughly 150 MiB with the old dependency tree. This excludes the separately downloaded Google runtime. First preparation needs internet access; later loads reuse the installed cache without npm network access.
 
 The launcher stores its versioned dependencies in `.runtime/` inside the installed marketplace plugin's cache directory. Uninstalling the marketplace plugin removes that cache when it is no longer referenced by another scope. Google credentials and the separately downloaded official ACP runtime are unaffected.
 
@@ -82,7 +82,7 @@ omp plugin install npm:omp-antigravity-acp-provider
 To pin a specific release:
 
 ```sh
-omp plugin install npm:omp-antigravity-acp-provider@0.1.22
+omp plugin install npm:omp-antigravity-acp-provider@0.1.23
 ```
 
 Restart OMP after installation. The npm package includes the built adapter; users do not need esbuild or a manual build step. Disable any older ACP adapter for the same provider before loading this package.

@@ -49,8 +49,17 @@ interface OmpHostApi {
   registerCommand: (name: string, command: { description: string; handler: (args: string, ctx: OmpCommandContext) => Promise<void> }) => void;
 }
 
+export function resolveAdapterStateDir(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
+  // OMP sets this to the active named profile's agent directory during CLI
+  // bootstrap; it also honors an explicit default-profile override.
+  const configured = env.PI_CODING_AGENT_DIR?.trim();
+  const agentDir = configured ? configured === "~" ? home : configured.startsWith("~/") ? path.join(home, configured.slice(2)) : path.resolve(configured)
+    : path.join(home, env.PI_CONFIG_DIR || ".omp", "agent");
+  return path.join(agentDir, "antigravity-acp-provider");
+}
+
 export default async function (pi: OmpHostApi) {
-  return registerOmpAdapter(pi, path.join(os.homedir(), ".omp/agent/antigravity-acp-provider"));
+  return registerOmpAdapter(pi, resolveAdapterStateDir());
 }
 
 // Explicit state injection keeps command integration tests away from user data.

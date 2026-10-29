@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { lock } from "proper-lockfile";
 import { resolvePiAgentDir } from "pi-antigravity-acp-provider/src/config.ts";
@@ -28,6 +28,21 @@ export class AcpSessionStore {
     return result;
   }
   async flush(): Promise<void> { await tails.get(this.file); }
+  // Hold ownership across restoration, prompts and warm idle reuse. The
+  // registry write lock alone cannot prevent two processes restoring one ID.
+  async acquireSessionLease(id: string, compromised: () => void): Promise<() => Promise<void>> {
+    const directory = path.join(path.dirname(this.file), "session-leases");
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const target = path.join(directory, createHash("sha256").update(id).digest("hex"));
+    try {
+      const release = await lock(target, { realpath: false, stale: 30_000, retries: 0, onCompromised: compromised });
+      let done: Promise<void> | undefined;
+      return () => done ??= release();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ELOCKED") throw new Error("This OMP session is already open in another ACP runtime. Close the other OMP session and retry.");
+      throw error;
+    }
+  }
   get(id: string): Promise<SavedSessionRecord | undefined> {
     return this.enqueue(async () => (await this.read()).find(record => record.piSessionId === id &&
       Date.now() - record.lastActive <= 30 * 24 * 60 * 60_000));
@@ -79,13 +94,15 @@ export class AcpSessionStore {
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) throw new Error("Invalid ACP session registry; refusing to overwrite it");
-    return parsed.filter((record): record is SavedSessionRecord => Boolean(record) && typeof record === "object" &&
+    const valid = (record: any): record is SavedSessionRecord => Boolean(record) && typeof record === "object" &&
       ["piSessionId", "acpSessionId", "acpModelId", "cwd", "historyFingerprint"].every(key => typeof record[key] === "string") &&
       Number.isSafeInteger(record.messageCount) && record.messageCount >= 0 && Number.isFinite(record.lastActive) &&
       (record.expectedAssistantFingerprint === undefined || typeof record.expectedAssistantFingerprint === "string") &&
       (record.ompCheckpointVersion === undefined || record.ompCheckpointVersion === 1) &&
       ["ompInFlight", "ompExpectedAssistantHasOutput", "ompCancelledCheckpoint", "ompCancelledHadOutput"].every(key =>
-        record[key] === undefined || typeof record[key] === "boolean"));
+        record[key] === undefined || typeof record[key] === "boolean");
+    if (!parsed.every(valid)) throw new Error("Invalid or unsupported ACP session registry record; refusing to overwrite it");
+    return parsed;
   }
   private async write(records: SavedSessionRecord[]): Promise<void> {
     if (!records.length) { await fs.rm(this.file, { force: true }); return; }

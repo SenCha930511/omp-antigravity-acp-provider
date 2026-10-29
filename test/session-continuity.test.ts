@@ -2,7 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { setImmediate as tick } from "node:timers/promises";
-import { AntigravityRuntime, PERMISSION_RESULT_KIND, PERMISSION_TOOL_NAME } from "../extension/runtime.mjs";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { AcpSessionStore, AntigravityRuntime, PERMISSION_RESULT_KIND, PERMISSION_TOOL_NAME } from "../extension/runtime.mjs";
 
 const model = { id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp", provider: "antigravity-acp",
   contextWindow: 524288, maxTokens: 32000, reasoning: false, input: ["text"],
@@ -13,13 +16,14 @@ const user = (content: string) => ({ role: "user", content, timestamp: 1 });
 type ContinuationKind = "tools" | "permission";
 type Action = "plain" | ContinuationKind | "fail" | "empty" | ContinuationKind[];
 
-function fixture() {
+function fixture(leaseStore?: any) {
   const saved = new Map<string, any>(), connections: any[] = [], runtimes: any[] = [], actions: Action[] = [];
   const keepAlive = setTimeout(() => {}, 10_000);
   let failSave: "none" | "before" | "terminal" = "none", failRemove = false;
   let checkpointGate: { entered: ReturnType<typeof Promise.withResolvers<void>>; release: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
   let retirementGate: { entered: ReturnType<typeof Promise.withResolvers<void>>; release: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
   const store = {
+    ...(leaseStore ? { acquireSessionLease: leaseStore.acquireSessionLease.bind(leaseStore) } : {}),
     async get(id: string) { return structuredClone(saved.get(id)); },
     async save(record: any) {
       if (failSave === "before" || (failSave === "terminal" && !record.ompInFlight && record.messageCount > 1)) {
@@ -105,6 +109,55 @@ function fixture() {
     async close() { checkpointGate?.release.resolve(); retirementGate?.release.resolve(); failSave = "none"; failRemove = false; clearTimeout(keepAlive); for (const r of runtimes) await r.close(); },
   };
 }
+
+test("separate runtimes cannot restore the same session until its owner closes", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lease-runtime-"));
+  const f = fixture(new AcpSessionStore(path.join(root, "sessions.json")));
+  try {
+    const a = f.create(), b = f.create(), first = user("FIRST");
+    const answer = f.reply(await f.run(a, [first]));
+    const id = f.connections[0].id;
+    const blocked = await f.run(b, [first, answer, user("NEXT")]);
+    assert.match(blocked.find(e => e.type === "error")?.error.errorMessage, /already open/);
+    assert.equal(f.connections.at(-1).prompts.length, 0);
+    assert.equal(f.saved.get("chat").acpSessionId, id);
+    await a.close();
+    assert.equal(f.reply(await f.run(b, [first, answer, user("NEXT")]))?.stopReason, "stop");
+    assert.deepEqual(f.connections.at(-1).resumed, [id]);
+  } finally { await f.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("lost session ownership closes an active prompt without saving a clean checkpoint", async () => {
+  let compromise: () => void = () => {};
+  const f = fixture({ async acquireSessionLease(_id: string, callback: () => void) { compromise = callback; return async () => {}; } });
+  try {
+    const r = f.create(); f.actions.push("tools");
+    assert.equal(f.reply(await f.run(r, [user("WAIT_FOR_TOOLS")]))?.stopReason, "toolUse");
+    assert.equal(f.saved.get("chat").ompInFlight, true);
+    compromise();
+    await tick(); await tick();
+    assert.equal(f.connections[0].process.alive, false);
+    assert.notEqual(f.saved.get("chat")?.ompInFlight, false);
+  } finally { await f.close(); }
+});
+
+test("ownership remains held while a retired binding removes its old mapping", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lease-retirement-"));
+  const f = fixture(new AcpSessionStore(path.join(root, "sessions.json")));
+  try {
+    const a = f.create(), b = f.create(), first = user("FIRST");
+    const answer = f.reply(await f.run(a, [first]));
+    answer.content = [{ type: "text", text: "EDITED" }];
+    const next = [first, answer, user("NEXT")], gate = f.blockRetirement();
+    const rebuilding = f.run(a, next);
+    await gate.entered.promise;
+    await tick();
+    const blocked = await f.run(b, next);
+    assert.match(blocked.find(e => e.type === "error")?.error.errorMessage, /already open/);
+    gate.release.resolve();
+    await rebuilding;
+  } finally { await f.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
 
 test("dispatch persists an in-flight marker and completed turns clear it before warm restoration", async () => {
   const f = fixture();

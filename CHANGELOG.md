@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.23 — 2026-10-29
+
+- Hold a cross-process session lease through restoration and warm runtime lifetime, preventing simultaneous ownership of a single OMP session. Losing the lease closes its ACP connection; restart all older OMP processes to participate in coordination.
+- Use OMP's active agent directory for adapter state, so named profiles and custom agent directories do not share mappings or settings. Existing default state remains in place; other profiles reconstruct mappings from their OMP history on first use and use their own settings.
+- Refuse to read or overwrite a registry containing malformed or unsupported individual records, preserving the original file for recovery.
+- Add offline regressions for separate-process lease exclusion, runtime handoff and lost ownership, profile paths, and unsupported records.
+
 ## 0.1.22 — 2026-10-29
 
 - Fix a regression in 0.1.21 that held continuation ownership until the entire ACP prompt finished, rejecting normal later tool/permission batches as already in progress. Release ownership after attaching the writer and delivering the current batch, while retaining protection against overlapping duplicate callers.

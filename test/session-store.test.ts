@@ -76,3 +76,24 @@ test("corrupt/failed registry writes preserve data, clean temporary files, and d
   await store.save(record("recovered")); await store.flush();
   assert.ok(await store.get("recovered"));
 }));
+
+test("unknown or malformed individual records cannot be silently dropped by a write", async () => fixture(async file => {
+  const original = JSON.stringify([record("valid"), { ...record("future"), ompCheckpointVersion: 2 }]);
+  await fs.writeFile(file, original);
+  const store = new AcpSessionStore(file);
+  await assert.rejects(store.get("valid"), /unsupported ACP session registry record/);
+  await assert.rejects(store.save(record("new")), /unsupported ACP session registry record/);
+  await assert.rejects(store.remove("valid"), /unsupported ACP session registry record/);
+  assert.equal(await fs.readFile(file, "utf8"), original);
+}));
+
+test("session ownership excludes another process until the owner releases it", async () => fixture(async file => {
+  const owner = new AcpSessionStore(file), release = await owner.acquireSessionLease("chat", () => {});
+  const bundle = pathToFileURL(path.resolve("extension/runtime.mjs")).href;
+  const script = `const {AcpSessionStore}=await import(${JSON.stringify(bundle)}); const s=new AcpSessionStore(process.argv[1]);
+    try { const release=await s.acquireSessionLease('chat',()=>{}); await release(); process.exit(0); }
+    catch(e) { if (!/already open/.test(e.message)) process.exit(2); process.exit(3); }`;
+  const child = () => spawn(process.execPath, ["--input-type=module", "-e", script, file], { stdio: "ignore" });
+  try { assert.equal((await once(child(), "exit"))[0], 3); } finally { await release(); }
+  assert.equal((await once(child(), "exit"))[0], 0);
+}));

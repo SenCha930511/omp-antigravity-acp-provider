@@ -6,6 +6,20 @@ accepted history matches OMP's retained transcript.
 
 ## Checkpoints
 
+Persistent sessions acquire a cross-process lease before reading a mapping or
+restoring ACP, and keep it while the warm runtime is alive. A competing runtime
+fails explicitly until the owner shuts down or its idle runtime is retired. A
+compromised lease closes the connection and invalidates its binding. Processes
+running older adapter versions do not acquire this lease; restart them when upgrading.
+The session registry rejects malformed or unknown-version records without writing
+over them.
+
+Adapter state follows OMP's active agent directory. Earlier releases stored all
+profiles in the default agent directory. That existing directory remains intact;
+named profiles and custom agent directories start with their own settings and
+reconstruct their mappings from their retained OMP history on first use. Copy
+specific settings files manually if needed; do not copy shared session mappings.
+
 1. Validate the context and local transfer limits before changing the durable
    accepted boundary. A locally rejected prompt must not discard a known-good
    warm session.

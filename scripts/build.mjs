@@ -124,7 +124,7 @@ const result = await build({
           {
             name: "record official terminal reason before abort handling",
             anchor: "if (binding.abortRequested) throw abortError();",
-            replacement: "binding.ompTerminalStopReason = response.stopReason;\n\t\t\tif (binding.abortRequested) throw abortError();",
+            replacement: "if (binding.ompInvalidated) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost');\n\t\t\tbinding.ompTerminalStopReason = response.stopReason;\n\t\t\tif (binding.abortRequested) throw abortError();",
           },
           {
             name: "generated assistant boundary must match retained OMP history",
@@ -194,7 +194,7 @@ const result = await build({
         // Continuity transactions are adapter-owned. Keep explicit pinned seams
         // so an upstream update cannot silently bypass the write-ahead marker.
         const continuityPatches = [
-          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean;'],
+          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompReleaseLease?: () => Promise<void>;'],
           ['let completeTurn: (() => void) | undefined;', 'let ompDispatched = false;\n\t\tlet completeTurn: (() => void) | undefined;'],
           ['if (existing) return existing;', `if (existing) {
             const value = await existing;
@@ -213,6 +213,7 @@ const result = await build({
             }`],
           ['const createdBinding: Binding = {', `const createdBinding: Binding = {
             ompInFlight: false, ompInvalidated: false,
+            ompReleaseLease: releaseLease,
             ompExpectedAssistantHasOutput: restored && saved?.ompExpectedAssistantHasOutput === true,`],
           ['const response = await binding.connection.prompt(', `if (options.signal?.aborted) throw abortError();
             binding.ompInFlight = true;
@@ -233,6 +234,33 @@ const result = await build({
         ];
         for (const [anchor, replacement] of continuityPatches) {
           if (contents.split(anchor).length !== 2) throw new Error(`Pinned continuity seam changed: ${anchor}`);
+          contents = contents.replace(anchor, replacement);
+        }
+        const leasePatches = [
+          ['const connection = this.createConnection({\n\t\t\tcwd,', 'let leaseLost = false;\n\t\tlet releaseLease: (() => Promise<void>) | undefined;\n\t\tconst connection = this.createConnection({\n\t\t\tcwd,'],
+          ['onPermission: (request) => this.requestPermission(binding, request),\n\t\t\t},\n\t\t});\n\t\ttry {\n\t\t\tconst initialize = await connection.initialize();', `onPermission: (request) => this.requestPermission(binding, request),
+            },
+          });
+          try {
+            if (key.startsWith('sid:') && typeof this.sessionStore?.acquireSessionLease === 'function') {
+              releaseLease = await this.sessionStore.acquireSessionLease(key.slice(4), () => { leaseLost = true; if (binding) binding.ompInvalidated = true; void connection.close().catch(() => {}); });
+              this.assertEpoch(epoch);
+            }
+\t\t\tconst initialize = await connection.initialize();`],
+          ['void connection.process.exited.then(() => {\n\t\t\t\tcancelPermission(createdBinding);', `void connection.process.exited.then(() => {
+            const completion = createdBinding.turnCompletion;
+            const retiring = createdBinding.ompDropPromise;
+            void Promise.resolve(retiring ?? completion).then(() => createdBinding.ompReleaseLease?.()).catch(() => {});
+\t\t\t\tcancelPermission(createdBinding);`],
+          ['binding = createdBinding;\n\t\t\tawait this.persistBinding(createdBinding);', `binding = createdBinding;
+            if (leaseLost) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost during initialization');
+\t\t\tawait this.persistBinding(createdBinding);`],
+          ['await Promise.allSettled([connection.close(), bridge?.close() ?? Promise.resolve()]);\n\t\t\tthrow error;', `await Promise.allSettled([connection.close(), bridge?.close() ?? Promise.resolve()]);
+            await releaseLease?.();
+\t\t\tthrow error;`],
+        ];
+        for (const [anchor, replacement] of leasePatches) {
+          if (contents.split(anchor).length !== 2) throw new Error(`Pinned session lease seam changed: ${anchor}`);
           contents = contents.replace(anchor, replacement);
         }
         // Fallbacks after incomplete tools/permissions must not reload the same
@@ -271,6 +299,7 @@ const result = await build({
               }
             } finally {
               await closing;
+              await binding.ompReleaseLease?.();
               if (current && (await current) === binding && this.bindings.get(key) === current) this.bindings.delete(key);
             }
           })();
@@ -283,7 +312,7 @@ const result = await build({
         const endClose = beforeQueue.lastIndexOf("\n\t}");
         // Await active turns' checkpoint writes, not queued callers which may
         // themselves be waiting for this permission-mode change to complete.
-        contents = contents.slice(0, endClose) + "\n\t\tawait Promise.allSettled(closingTurns);\n\t\tawait this.sessionStore?.flush?.();" + contents.slice(endClose);
+        contents = contents.slice(0, endClose) + "\n\t\tawait Promise.allSettled(closingTurns);\n\t\tawait Promise.allSettled(pending.map(async value => (await value).ompReleaseLease?.()));\n\t\tawait this.sessionStore?.flush?.();" + contents.slice(endClose);
         const classStart = contents.indexOf("export class AntigravityRuntime {");
         const helpersStart = contents.indexOf("\nfunction messagesFingerprint(");
         if (classStart < 0 || helpersStart < classStart) throw new Error("Pinned runtime class seam changed");
