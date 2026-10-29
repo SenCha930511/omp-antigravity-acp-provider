@@ -75,6 +75,7 @@ export interface CommandControllerDeps {
   setPermissionModeState: (mode: string) => void;
   getLastToolAudit: () => ToolAuditSummary | undefined;
   getRuntimeForSession: (sessionId?: string) => RuntimeBundleView;
+  acquireRuntimeForSession?: (sessionId?: string) => { value: RuntimeBundleView; release: () => void };
   peekRuntimeForSession: (sessionId?: string) => RuntimeBundleView | undefined;
   getSavedSessionCount: () => number;
   getPermissionMode: () => string;
@@ -185,19 +186,24 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       await deps.auth.beginFreshGoogleLogin();
       // Direct Antigravity Google login through the command UI. OMP's /login
       // runs the same flow and additionally stores the provider marker.
-      await deps.getRuntimeForSession().provider.auth.oauth.login({
-        signal: undefined,
-        notify(event) {
-          const link = event.links?.[0];
-          if (link) ctx.ui.notify(`${event.message ?? "Open this URL to authorize:"}\n${link.url}`, "info");
-          else if (event.message) ctx.ui.notify(event.message, "info");
-        },
-        prompt: async (request) => {
-          const answer = await ctx.ui.input?.(request.message, request.placeholder);
-          if (!answer?.trim()) throw new Error("Antigravity OAuth login cancelled");
-          return answer;
-        },
-      });
+      const lease = deps.acquireRuntimeForSession ? deps.acquireRuntimeForSession() : { value: deps.getRuntimeForSession(), release: () => {} };
+      try {
+        await lease.value.provider.auth.oauth.login({
+          signal: undefined,
+          notify(event) {
+            const link = event.links?.[0];
+            if (link) ctx.ui.notify(`${event.message ?? "Open this URL to authorize:"}\n${link.url}`, "info");
+            else if (event.message) ctx.ui.notify(event.message, "info");
+          },
+          prompt: async (request) => {
+            const answer = await ctx.ui.input?.(request.message, request.placeholder);
+            if (!answer?.trim()) throw new Error("Antigravity OAuth login cancelled");
+            return answer;
+          },
+        });
+      } finally {
+        lease.release();
+      }
       const auth = inspectAntigravityAuth();
       const email = antigravityAccountEmail();
       ctx.ui.notify(`Antigravity Google login finished${email ? ` as ${email}` : ""} — fresh sign-in; ACP auth: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}.`, "info");

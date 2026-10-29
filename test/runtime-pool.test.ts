@@ -90,3 +90,29 @@ test("global shutdown clears all ownership even when disposal rejects", async ()
   await pool.closeAll();
   assert.deepEqual(pool.values(), []);
 });
+
+test("closeIdle closes idle runtime but preserves leased or busy entry", async () => {
+  let busy = true;
+  const disposed: number[] = [];
+  let serial = 0;
+  const pool = new SessionRuntimePool(() => ({ id: ++serial }), async e => { disposed.push(e.id); },
+    { canDispose: () => !busy });
+
+  // 1. leased entry
+  const leased = pool.acquire();
+  assert.equal(await pool.closeIdle(), false);
+  assert.deepEqual(disposed, []);
+  leased.release();
+
+  // 2. busy entry
+  assert.equal(await pool.closeIdle(), false);
+  assert.deepEqual(disposed, []);
+
+  // 3. idle entry
+  busy = false;
+  assert.equal(await pool.closeIdle(), true);
+  assert.deepEqual(disposed, [leased.value.id]);
+
+  // 4. missing entry
+  assert.equal(await pool.closeIdle("non-existent"), false);
+});

@@ -145,7 +145,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
   pi.on("session_shutdown", async (_event: unknown, ctx: OmpCommandContext) => {
     const sessionId = sessionIdOf(ctx);
     if (sessionId) {
-      await Promise.all([runtimes.close(sessionId), runtimes.close()]);
+      await Promise.all([runtimes.close(sessionId), runtimes.closeIdle()]);
     } else {
       await runtimes.closeAll();
     }
@@ -195,8 +195,8 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
       const request = runtimes.values().map(bundle => bundle.runtime.getPermission(params.requestId)).find(Boolean);
       if (!request) throw new Error("Permission request expired or missing");
       const labels = request.options.map((option: { label: string }) => option.label);
-      const selected = await ctx.ui.select!(request.title, labels);
-      const optionId = request.options[labels.indexOf(selected)]?.id;
+      const selected = await ctx.ui.select?.(request.title, labels);
+      const optionId = selected !== undefined ? request.options[labels.indexOf(selected)]?.id : undefined;
       return {
         content: [{ type: "text", text: optionId ? `Permission: ${selected}` : "Permission denied." }],
         details: { kind: PERMISSION_RESULT_KIND, requestId: request.id, optionId, cancelled: !optionId },
@@ -231,6 +231,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
       setPermissionModeState: mode => { permissionMode = mode; },
       getLastToolAudit: () => lastToolAudit,
       getRuntimeForSession: sessionId => runtimes.get(sessionId),
+      acquireRuntimeForSession: sessionId => runtimes.acquire(sessionId),
       peekRuntimeForSession: sessionId => runtimes.peek(sessionId),
       getSavedSessionCount: savedSessionCount,
       getPermissionMode: () => permissionMode,
@@ -346,19 +347,24 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
             // Always offer a fresh Google sign-in; without this a new server
             // process silently reuses the saved login and keeps the old account.
             await auth.beginFreshGoogleLogin();
-            const result = await runtimes.get().provider.auth.oauth.login({
-              signal: callbacks.signal,
-              notify(event: { message?: string; links?: Array<{ url: string }> }) {
-                if (event.links?.length) {
-                  for (const link of event.links) callbacks.onAuth({ url: link.url, instructions: event.message });
-                } else callbacks.onProgress?.(event.message);
-              },
-              prompt: (request: { message: string; placeholder?: string }) => callbacks.onPrompt({ message: request.message, placeholder: request.placeholder }),
-            });
-            // Record the signed-in account on the marker credential so OMP's
-            // account list can label it; the email is identity data, not a secret.
-            const email = antigravityAccountEmail();
-            return email ? { ...result, email } : result;
+            const lease = runtimes.acquire();
+            try {
+              const result = await lease.value.provider.auth.oauth.login({
+                signal: callbacks.signal,
+                notify(event: { message?: string; links?: Array<{ url: string }> }) {
+                  if (event.links?.length) {
+                    for (const link of event.links) callbacks.onAuth({ url: link.url, instructions: event.message });
+                  } else callbacks.onProgress?.(event.message);
+                },
+                prompt: (request: { message: string; placeholder?: string }) => callbacks.onPrompt({ message: request.message, placeholder: request.placeholder }),
+              });
+              // Record the signed-in account on the marker credential so OMP's
+              // account list can label it; the email is identity data, not a secret.
+              const email = antigravityAccountEmail();
+              return email ? { ...result, email } : result;
+            } finally {
+              lease.release();
+            }
           },
           refreshToken: (credentials: unknown) => runtimes.get().provider.auth.oauth.refresh(credentials),
           getApiKey: () => MARKER,

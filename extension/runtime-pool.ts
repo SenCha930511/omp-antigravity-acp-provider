@@ -79,6 +79,13 @@ export class SessionRuntimePool<T> {
     return [...this.entries.values()];
   }
 
+  async closeIdle(sessionId?: string): Promise<boolean> {
+    const entry = this.entries.get(sessionId);
+    if (!entry || this.leases.has(entry) || this.idle.canDispose?.(entry) === false) return false;
+    await this.close(sessionId);
+    return true;
+  }
+
   async close(sessionId?: string): Promise<void> {
     const entry = this.entries.get(sessionId);
     // Detach before awaiting teardown so a new turn cannot reuse a closed runtime.

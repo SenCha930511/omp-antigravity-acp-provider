@@ -18,9 +18,9 @@ This derivative adds OMP-specific provider registration, confirmed model/thinkin
 The repository vendors the upstream **0.1.15** source under `extension/vendor/pi-antigravity-acp-provider` (MIT, see `extension/vendor/pi-antigravity-acp-provider/LICENSE`). The standalone artifact bundles its runtime code, supervisor and signed runtime manifest; end users need no production npm dependencies. It does not contain a copy of upstream's Git history. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the original copyright and license notice.
 ## Status
 
-Version 0.1.25 vendors `pi-antigravity-acp-provider 0.1.15` source for direct local modification while keeping the 0.1.24 session-ownership and profile-isolation fixes. Restart all OMP processes after upgrading so they participate in session ownership.
+Version 0.1.26 waits for ACP process exit during session lease handoff and isolates idle runtimes while keeping the 0.1.24 session-ownership and profile-isolation fixes. Restart all OMP processes after upgrading so they participate in session ownership.
 
-Version 0.1.25 supports all models advertised by the official ACP server. Earlier live inference was tested with macOS, OMP 18.12.5, upstream provider 0.1.15 and official ACP runtime 1.4.1. The 0.1.21–0.1.24 continuity fixes are verified offline, including OMP 18.13.3 catalog loading and the local OMP summarizer source. Other platforms and full interactive Refine plan behavior with a real model remain unverified.
+Version 0.1.26 supports all models advertised by the official ACP server. Earlier live inference was tested with macOS, OMP 18.12.5, upstream provider 0.1.15 and official ACP runtime 1.4.1. The 0.1.21–0.1.24 continuity fixes are verified offline, including OMP 18.13.3 catalog loading and the local OMP summarizer source. Other platforms and full interactive Refine plan behavior with a real model remain unverified.
 
 Google's consumer-plan policies can restrict third-party agent access even through the official CLI or ACP executable. An official transport does not establish permission to use a subscription in OMP. Check the current [Antigravity FAQ](https://www.antigravity.google/docs/faq/) and [terms](https://antigravity.google/terms) for your account.
 
@@ -57,7 +57,7 @@ Or, inside OMP:
 
 Select **omp-antigravity-acp-provider** in the browser, install it, and restart OMP to load the provider.
 
-OMP's marketplace installer currently copies Git content without installing npm dependencies. This marketplace therefore ships a small source launcher that retrieves the exact published **0.1.25** prebuilt npm adapter on first load. It disables npm install scripts and performs no local compilation. Node.js 22.19+ and npm must be on PATH. The standalone build bundles the required code and supervisor assets with no production dependencies: a clean test installation occupied approximately **2.6 MiB** (477 KiB tarball), down from roughly 150 MiB with the old dependency tree. This excludes the separately downloaded Google runtime. First preparation needs internet access; later loads reuse the installed cache without npm network access.
+OMP's marketplace installer currently copies Git content without installing npm dependencies. This marketplace therefore ships a small source launcher that retrieves the exact published **0.1.26** prebuilt npm adapter on first load. It disables npm install scripts and performs no local compilation. Node.js 22.19+ and npm must be on PATH. The standalone build bundles the required code and supervisor assets with no production dependencies: a clean test installation occupied approximately **2.6 MiB** (477 KiB tarball), down from roughly 150 MiB with the old dependency tree. This excludes the separately downloaded Google runtime. First preparation needs internet access; later loads reuse the installed cache without npm network access.
 
 The launcher stores its versioned dependencies in `.runtime/` inside the installed marketplace plugin's cache directory. Uninstalling the marketplace plugin removes that cache when it is no longer referenced by another scope. Google credentials and the separately downloaded official ACP runtime are unaffected.
 
@@ -81,7 +81,7 @@ omp plugin install npm:omp-antigravity-acp-provider
 To pin a specific release:
 
 ```sh
-omp plugin install npm:omp-antigravity-acp-provider@0.1.25
+omp plugin install npm:omp-antigravity-acp-provider@0.1.26
 ```
 
 Restart OMP after installation. The npm package includes the built adapter; users do not need esbuild or a manual build step. Disable any older ACP adapter for the same provider before loading this package.

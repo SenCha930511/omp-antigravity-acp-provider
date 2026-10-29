@@ -192,7 +192,7 @@ const result = await build({
         // Continuity transactions are adapter-owned. Keep explicit pinned seams
         // so an upstream update cannot silently bypass the write-ahead marker.
         const continuityPatches = [
-          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompReleaseLease?: () => Promise<void>;'],
+          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompReleaseLease?: (wait?: boolean) => Promise<void>;'],
           ['let completeTurn: (() => void) | undefined;', 'let ompDispatched = false;\n\t\tlet completeTurn: (() => void) | undefined;'],
           ['if (existing) return existing;', `if (existing) {
             const value = await existing;
@@ -242,12 +242,25 @@ const result = await build({
           try {
             if (key.startsWith('sid:') && typeof this.sessionStore?.acquireSessionLease === 'function') {
               const releaseOwnedLease = await this.sessionStore.acquireSessionLease(key.slice(4), () => { leaseLost = true; if (binding) binding.ompInvalidated = true; void connection.close().catch(() => {}); });
-              releaseLease = async () => {
+              let releaseDone: Promise<void> | undefined;
+              const releaseOwned = async () => {
+                if (releaseDone) return releaseDone;
+                releaseDone = releaseOwnedLease().catch(() => {});
+                return releaseDone;
+              };
+              releaseLease = async (wait = false) => {
                 if (connection.process.alive) {
-                  void connection.process.exited.then(releaseOwnedLease).catch(() => {});
-                  return;
+                  if (wait) {
+                    await Promise.race([
+                      connection.process.exited,
+                      new Promise(resolve => setTimeout(resolve, 2000)),
+                    ]).catch(() => {});
+                  } else {
+                    void connection.process.exited.then(releaseOwned).catch(() => {});
+                    return;
+                  }
                 }
-                await releaseOwnedLease();
+                await releaseOwned();
               };
               this.assertEpoch(epoch);
             }
@@ -304,7 +317,7 @@ const result = await build({
               }
             } finally {
               await closing;
-              await binding.ompReleaseLease?.();
+              await binding.ompReleaseLease?.(true);
               if (current && (await current) === binding && this.bindings.get(key) === current) this.bindings.delete(key);
             }
           })();

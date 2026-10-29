@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.26 — 2026-10-29
+
+- Wait for the retiring ACP process to exit during binding drop before releasing the session lease, preventing lock contention (`This OMP session is already open in another ACP runtime`) during history compaction or reconstruction.
+- Memoize lease releases to ensure idempotent cleanup.
+- Add `closeIdle` runtime cleanup and protect OAuth login bindings with session lease.
+- Add offline regression tests for compaction lease handoff and idle runtime cleanup.
+
 ## 0.1.25 — 2026-10-29
 
 - Vendor `pi-antigravity-acp-provider 0.1.15` source under `extension/vendor/pi-antigravity-acp-provider` (MIT) instead of npm dependency. All imports, build and test scripts now point to local vendor for direct modification. Updated docs and added required runtime deps (`@agentclientprotocol/sdk`, `@modelcontextprotocol/sdk`, `unzipper`, `zod`).

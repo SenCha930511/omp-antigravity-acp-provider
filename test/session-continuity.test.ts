@@ -177,6 +177,26 @@ test("ownership remains held while a retired binding removes its old mapping", a
   } finally { await f.close(); await fs.rm(root, { recursive: true, force: true }); }
 });
 
+test("compaction or reconstructed history handoff waits for process exit and succeeds without lease error", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lease-reconstruct-"));
+  const f = fixture(new AcpSessionStore(path.join(root, "sessions.json")));
+  try {
+    const r = f.create(), first = user("FIRST");
+    const answer = f.reply(await f.run(r, [first]));
+    assert.equal(answer?.stopReason, "stop");
+
+    f.connections[0].close = async function() {
+      setTimeout(() => { this.forceExit(); }, 15);
+    };
+
+    const compacted = [user("Summary: previous conversation. COMPACT_DONE.")];
+    const events = await f.run(r, compacted);
+    const err = events.find((e: any) => e.type === "error");
+    assert.equal(err, undefined, "Compaction reconstruction must not fail with already open lease error");
+    assert.equal(f.reply(events)?.stopReason, "stop");
+  } finally { await f.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test("dispatch persists an in-flight marker and completed turns clear it before warm restoration", async () => {
   const f = fixture();
   try {
