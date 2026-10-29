@@ -10,7 +10,8 @@ const model = { id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp", p
 const modes = { currentModeId: "yolo", availableModes: [{ id: "yolo", name: "Yolo" }] };
 const models = { currentModelId: model.id, availableModels: [{ modelId: model.id, name: "Flash" }] };
 const user = (content: string) => ({ role: "user", content, timestamp: 1 });
-type Action = "plain" | "tools" | "permission" | "fail" | "empty";
+type ContinuationKind = "tools" | "permission";
+type Action = "plain" | ContinuationKind | "fail" | "empty" | ContinuationKind[];
 
 function fixture() {
   const saved = new Map<string, any>(), connections: any[] = [], runtimes: any[] = [], actions: Action[] = [];
@@ -58,13 +59,16 @@ function fixture() {
           c.seenCheckpoints.push(structuredClone(saved.get("chat")));
           const action = actions.shift() ?? "plain";
           const binding = [...runtime.resolvedBindings].find((b: any) => b.session.sessionId === c.id) as any;
-          if (action === "tools") {
-            await Promise.race([Promise.all(["one", "two"].map(id => runtime.requestPiTool(binding,
-              { id, name: "read", arguments: {} }))), closed.promise]);
-          } else if (action === "permission") {
-            await Promise.race([runtime.requestPermission(binding, { sessionId: c.id,
-              toolCall: { toolCallId: "permit", title: "Allow fixture" },
-              options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] }), closed.promise]);
+          const steps = Array.isArray(action) ? action : [action];
+          for (const [index, step] of steps.entries()) {
+            if (step === "tools") {
+              await Promise.race([Promise.all(["one", "two"].map(id => runtime.requestPiTool(binding,
+                { id: Array.isArray(action) ? `${index}-${id}` : id, name: "read", arguments: {} }))), closed.promise]);
+            } else if (step === "permission") {
+              await Promise.race([runtime.requestPermission(binding, { sessionId: c.id,
+                toolCall: { toolCallId: "permit", title: "Allow fixture" },
+                options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] }), closed.promise]);
+            }
           }
           if (action !== "empty") options.handlers.onUpdate({ sessionId: c.id,
             update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ANSWER" } } });
@@ -80,16 +84,17 @@ function fixture() {
     }, "yolo", store);
     runtimes.push(runtime); return runtime;
   }
-  async function run(runtime: any, messages: any[]) {
+  async function run(runtime: any, messages: any[], settle = true) {
     const events: any[] = [];
     for await (const event of runtime.stream(model, { messages, tools: [] }, { sessionId: "chat" }).stream) {
       events.push(structuredClone(event));
     }
-    await tick(); return events;
+    if (settle) await tick();
+    return events;
   }
   const reply = (events: any[]) => events.find(e => e.type === "done")?.message;
   const results = (kind: "tools" | "permission", message: any) => kind === "tools"
-    ? ["one", "two"].map(id => ({ role: "toolResult", toolName: "read", toolCallId: id,
+    ? message.content.filter((block: any) => block.type === "toolCall").map((block: any) => ({ role: "toolResult", toolName: "read", toolCallId: block.id,
         content: [{ type: "text", text: "RESULT" }], timestamp: 2 }))
     : [{ role: "toolResult", toolName: PERMISSION_TOOL_NAME, toolCallId: message.content[0].id, content: [],
         details: { kind: PERMISSION_RESULT_KIND, requestId: message.content[0].id, optionId: "allow", cancelled: false }, timestamp: 2 }];
@@ -249,6 +254,32 @@ for (const kind of ["tools", "permission"] as const) {
       assert.equal(f.connections.length, 1);
       assert.equal(f.connections[0].prompts.length, 1);
     } finally { one?.fail(new Error("fixture cleanup")); two?.fail(new Error("fixture cleanup")); await f.close(); }
+  });
+}
+
+for (const sequence of [
+  ["tools", "tools"], ["permission", "permission"],
+  ["tools", "permission", "tools"], ["permission", "tools", "permission"],
+] satisfies ContinuationKind[][]) {
+  test(`one ACP prompt accepts successive continuation batches: ${sequence.join(" → ")}`, { timeout: 3000 }, async () => {
+    const f = fixture();
+    try {
+      const r = f.create(), history: any[] = [user("MULTI_STEP_TASK")];
+      f.actions.push(sequence);
+      let events = await f.run(r, history, false);
+      for (const kind of sequence) {
+        assert.equal(events.some(e => e.type === "error"), false, "A normal next batch must not be rejected as a duplicate");
+        const answer = f.reply(events);
+        assert.equal(answer?.stopReason, "toolUse");
+        history.push(answer, ...f.results(kind, answer));
+        events = await f.run(r, history, false);
+      }
+      assert.equal(events.some(e => e.type === "error"), false);
+      assert.equal(f.reply(events)?.stopReason, "stop");
+      assert.equal(f.connections.length, 1);
+      assert.equal(f.connections[0].prompts.length, 1, "Every batch resumes the original prompt");
+      assert.equal(f.saved.get("chat").ompInFlight, false);
+    } finally { await f.close(); }
   });
 }
 

@@ -10,7 +10,7 @@
       "name": "omp-antigravity-acp-provider",
       "description": "Google Antigravity ACP provider for OMP, derived from zacbemis/pi-antigravity-acp-provider",
       "source": "./marketplace/antigravity-acp",
-      "version": "0.1.21",
+      "version": "0.1.22",
       "category": "development",
       "author": { "name": "SenCha930511" },
       "homepage": "https://github.com/SenCha930511/omp-antigravity-acp-provider"

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.22 — 2026-10-29
+
+- Fix a regression in 0.1.21 that held continuation ownership until the entire ACP prompt finished, rejecting normal later tool/permission batches as already in progress. Release ownership after attaching the writer and delivering the current batch, while retaining protection against overlapping duplicate callers.
+- Add built-runtime regressions for consecutive tool batches, consecutive permissions and mixed tool/permission sequences within one prompt, including immediate continuation without an event-loop delay.
+
 ## 0.1.21 — 2026-10-29
 
 - Reject oversized ACP step text before inference so cold replay after plan refinement cannot silently lose the newest request or recent decisions. Keep the server step limit independent of model-window, wire and image budgets, and report context overflow for OMP's existing compaction recovery.

@@ -243,8 +243,8 @@ const result = await build({
         const claimStart = 'binding.writer = writer;\n\t\t\t\tconst continuationTurn = binding.turnCompletion;';
         const claimEnd = 'await this.awaitContinuation(binding, options.signal);\n\t\t\t\treturn;';
         if (contents.split(claimStart).length !== 3 || contents.split(claimEnd).length !== 3) throw new Error('Pinned continuation ownership seams changed');
-        contents = contents.replaceAll(claimStart, 'return await claimContinuation(binding, async () => {\n\t\t\t\t' + claimStart)
-          .replaceAll(claimEnd, 'await this.awaitContinuation(binding, options.signal);\n\t\t\t\t}, () => this.invalidateBinding(binding));');
+        contents = contents.replaceAll(claimStart, 'await claimContinuation(binding, async () => {\n\t\t\t\t' + claimStart)
+          .replaceAll(claimEnd, '}, () => this.invalidateBinding(binding));\n\t\t\t\tawait this.awaitContinuation(binding, options.signal);\n\t\t\t\treturn;');
         const dropPattern = /\tprivate async dropBinding\([\s\S]*?\n\tprivate confirmedMode\(/g;
         if ([...contents.matchAll(dropPattern)].length !== 1) throw new Error('Pinned binding teardown seam changed');
         contents = contents.replace(dropPattern, `\tprivate async ompRemoveSaved(piSessionId: string, acpSessionId: string): Promise<void> {

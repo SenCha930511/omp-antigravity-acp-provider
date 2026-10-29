@@ -3,6 +3,9 @@ const owners = new WeakSet<object>();
 // Tool/permission continuations must run while the original prompt is waiting
 // for them, so they cannot use that prompt's queue. Claim before the first await
 // instead; a duplicate caller must never replace the owner's response writer.
+// Only attach the writer and deliver this batch's results inside work. Waiting
+// for the ACP prompt to finish belongs outside the claim: it may request more
+// tools/permissions, and those later batches must be allowed to attach a writer.
 export async function claimContinuation(
   binding: object,
   work: () => Promise<void>,

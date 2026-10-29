@@ -29,7 +29,9 @@ Normal shutdown retains clean completed checkpoints.
 An active ACP prompt waits for its bridged tool/permission result. These
 continuations cannot wait behind that prompt's queue without deadlocking. A
 synchronous ownership claim instead allows one continuation to attach its writer
-and release pending results. An overlapping duplicate fails explicitly without
+and release pending results. The claim ends after delivering that batch, before
+waiting for the ACP prompt to finish, so subsequent tool/permission batches can
+attach their own writers. An overlapping duplicate fails explicitly without
 touching the owner's writer. Failed owner processing invalidates the old turn.
 
 Missing tool/permission results invalidate the old binding before reconstruction;
@@ -51,6 +53,7 @@ the event writer emits. Unchanged completions retain warm reuse.
 transport and an in-memory store. It covers clean restoration, prompt failure,
 pre-dispatch and terminal-save failure, failed removal, shutdown during a blocked
 checkpoint, legacy migration, local size rejection, incomplete tools and
-permissions, duplicate continuation ownership and completed assistant edits,
+permissions, duplicate continuation ownership, successive and mixed continuation
+batches within one prompt, and completed assistant edits,
 removal and empty responses. Existing graceful-cancellation and cleanup
 integration scripts remain required. These tests perform no model inference.
