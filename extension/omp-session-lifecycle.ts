@@ -115,8 +115,12 @@ export class OmpSessionLifecycle {
   closeSession(id: RoutingId, released = false): Promise<void> {
     for (const ticket of [...this.tickets.get(id) ?? []]) { ticket.closed = true; ticket.scope.retainedIds.delete(id); this.forget(ticket); }
     const previous = this.closing.get(id), closed = this.closeRuntime(id), teardown = this.closing.get(id);
-    const pending = Promise.all([previous, closed, teardown]).then(async () => {
+    const pending = Promise.allSettled([previous, closed, teardown]).then(async results => {
+      // Teardown failures must not skip unbinding: a leaked release keeps the
+      // one-shot mapping alive and the cleanup registry out of sync.
       if (released) await this.releaseRuntime(id);
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failure) throw failure.reason;
     });
     // Reusing an ID must also wait for removal of its prior one-shot mapping.
     this.closing.set(id, pending);

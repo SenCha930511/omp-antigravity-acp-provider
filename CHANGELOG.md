@@ -4,6 +4,9 @@
 ## Unreleased
 
 - Let `balanced` cleanup reclaim a still-mapped conversation once its last activity exceeds `idleDays`, after proving unique ownership and removing the mapping first; the next turn rebuilds from OMP history. `conservative` and `timeout` keep mapped sessions, and live leases or ambiguous mappings still preserve them.
+- Keep cleanup working when one OMP journal is unreadable: an empty or truncated `.jsonl` now marks the relocation scan incomplete instead of aborting it for every session, and an incomplete scan can never prove a missing source was deleted.
+- Always release a session's one-shot registration when its runtime teardown fails, instead of skipping the unbind because one closing promise rejected.
+- Strip every advertised effort suffix (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) before API cost lookup, from the same shared list the catalog uses, so `-max` and `-minimal` variants are no longer unpriced.
 
 ## 0.1.28 — 2026-10-30
 

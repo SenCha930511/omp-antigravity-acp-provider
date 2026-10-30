@@ -6,6 +6,7 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { SessionCleanup, saveCleanupPolicy } from "../extension/session-cleanup.ts";
 import { AcpSessionStore } from "../extension/session-store.ts";
+import { findSources } from "../extension/omp-session-source.ts";
 
 function fixture(t: any) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-acp-cleanup-")));
@@ -65,7 +66,7 @@ test("closing, moving, restoring or unmounting an OMP source never proves deleti
   assert.ok(fs.existsSync(source.mappingFile));
 });
 
-test("off preserves deleted OMP sources and malformed relocation scans fail closed", async t => {
+test("off preserves deleted OMP sources and malformed relocation scans stay conservative", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   const source = await trackedSource(f, id);
@@ -74,7 +75,7 @@ test("off preserves deleted OMP sources and malformed relocation scans fail clos
   f.cleaner.configure("conservative");
   fs.writeFileSync(path.join(source.root, "broken.jsonl"), "not-json");
   await f.cleaner.collect(); f.advance(10); await f.cleaner.collect(); assert.ok(f.exists(id));
-  assert.ok(f.cleaner.status().failures > 0);
+  assert.equal(f.cleaner.status().failures, 0, "an unreadable journal is not a scan failure");
 });
 
 test("deleted-source reconciliation recovers after mapping removal without losing ownership proof", async t => {
@@ -608,4 +609,36 @@ test("trackSource scans mappings once and stamps only mapped owned records", asy
   const scanned = reads.piSessionId;
   await f.cleaner.trackSource("omp-chat", file);
   assert.equal(reads.piSessionId, scanned, "an empty mapping list performs no property scans");
+});
+
+test("an unreadable journal marks the scan incomplete instead of failing it", async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-source-scan-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "workspace"));
+  fs.writeFileSync(path.join(root, "workspace", "good.jsonl"), JSON.stringify({ type: "session", id: "good" }) + "\n");
+  assert.deepEqual([...(await findSources(root)).sources.keys()], ["good"]);
+  assert.equal((await findSources(root)).complete, true);
+  fs.writeFileSync(path.join(root, "workspace", "empty.jsonl"), "");
+  const scan = await findSources(root);
+  assert.deepEqual([...scan.sources.keys()], ["good"], "readable headers are still indexed");
+  assert.equal(scan.complete, false);
+  fs.writeFileSync(path.join(root, "workspace", "empty.jsonl"), '{"type":"session","id":"half');
+  assert.equal((await findSources(root)).complete, false, "a truncated header is equally unprovable");
+});
+
+test("a corrupt sibling journal cannot prove a missing source was deleted", async t => {
+  const f = fixture(t), id = f.session();
+  const token = await f.cleaner.acquire(id, true, 987654);
+  const source = await trackedSource(f, id);
+  await f.cleaner.release(token);
+  const corrupt = path.join(source.root, "workspace", "empty.jsonl");
+  fs.writeFileSync(corrupt, "");
+  fs.unlinkSync(source.file);
+  f.advance(1); assert.equal(await f.cleaner.collect(), 0);
+  f.advance(1); assert.equal(await f.cleaner.collect(), 0, "an unreadable header leaves absence unproven");
+  assert.ok(f.exists(id)); assert.equal(f.cleaner.status().failures, 0, "one bad journal is not a scan failure");
+  fs.unlinkSync(corrupt);
+  await f.cleaner.collect();
+  f.advance(1); assert.equal(await f.cleaner.collect(), 1);
+  assert.equal(f.exists(id), false);
 });

@@ -36,11 +36,18 @@ export async function sourceId(file: string): Promise<string> {
   } finally { await handle.close(); }
 }
 
+export interface OmpSourceScan {
+  sources: Map<string, string>;
+  // False when some journal header could not be read. Absence then proves
+  // nothing: the missing session may live in a file this scan could not parse.
+  complete: boolean;
+}
+
 // Missing files may have moved between workspace buckets. Search only the
 // known managed root, with bounded work and no symlinks; any ambiguity preserves
 // the ACP session. Called only after a tracked file disappears.
-export async function findSources(root: string): Promise<Map<string, string>> {
-  let entries = 0;
+export async function findSources(root: string): Promise<OmpSourceScan> {
+  let entries = 0, complete = true;
   const sources = new Map<string, string>();
   async function visit(dir: string, depth: number): Promise<void> {
     if (depth > 4) throw new Error("OMP source scan depth exceeded");
@@ -52,9 +59,15 @@ export async function findSources(root: string): Promise<Map<string, string>> {
         // Only journal buckets, not the adjacent per-session artifact trees.
         if (/^\d{4}-\d\d-\d\d.*_[\da-f-]+$/i.test(item.name)) continue;
         await visit(file, depth + 1);
-      } else if (item.isFile() && item.name.endsWith(".jsonl")) sources.set(await sourceId(file), file);
+      } else if (item.isFile() && item.name.endsWith(".jsonl")) {
+        // A crashed writer can leave an empty or truncated journal. That file
+        // proves nothing about its own session, but it must not blind the scan
+        // for every other one, so it only marks the scan incomplete.
+        try { sources.set(await sourceId(file), file); }
+        catch { complete = false; }
+      }
     }
   }
   await visit(root, 0);
-  return sources;
+  return { sources, complete };
 }

@@ -6,7 +6,7 @@ import { lock } from "proper-lockfile";
 import { resolveAntigravityAcpDirectory } from "./vendor/pi-antigravity-acp-provider/src/acp/antigravity.ts";
 import { isMissingFileError, writeJsonAtomic } from "./fs-atomic.ts";
 import { AcpSessionStore } from "./session-store.ts";
-import { sourceRoot, sourceId, findSources, type OmpSessionSource } from "./omp-session-source.ts";
+import { sourceRoot, sourceId, findSources, type OmpSessionSource, type OmpSourceScan } from "./omp-session-source.ts";
 export type CleanupMode = "off" | "conservative" | "timeout" | "balanced";
 export interface CleanupPolicy { mode: CleanupMode; idleDays: number; maxSessions?: number; maxBytes?: number; orphanGraceDays?: number; recoveryDays?: number; batchSize?: number }
 const DEFAULT: CleanupPolicy = { mode: "conservative", idleDays: 7 };
@@ -188,7 +188,7 @@ export class SessionCleanup {
       const report = { owned: 0, active: 0, mapped: 0, unmapped: 0, ownedBytes: 0, overBudget: false, removed: 0, removedMapped: 0, reclaimedBytes: 0, retainedForRecovery: 0, failures: this.report.failures, deferred: 0 };
       let dirs: { conversations: string; brain: string } | undefined;
       const owned = [];
-      const sourceScans = new Map<string, Promise<Map<string, string>>>();
+      const sourceScans = new Map<string, Promise<OmpSourceScan>>();
       for (const v of registry.sessions) {
         v.leases = v.leases.filter(l => this.isLive(l.pid) || this.isLive(l.serverPid)); if (!v.owned) continue;
         if (policy.mode !== "off" && v.ompSource && !v.leases.length) {
@@ -206,21 +206,24 @@ export class SessionCleanup {
             if (!missing) { delete source.missingSince; }
             else {
               if (!sourceScans.has(root)) sourceScans.set(root, findSources(root));
-              const moved = (await sourceScans.get(root)!).get(source.id);
+              const scan = await sourceScans.get(root)!;
+              const moved = scan.sources.get(source.id);
               if (moved) { source.file = moved; delete source.missingSince; }
-              else if (source.missingSince === undefined) source.missingSince = this.now();
-              else if (this.now() - source.missingSince >= 60000) {
-                const finalRoot = await sourceRoot(root);
-                if (finalRoot.dev !== source.device || finalRoot.ino !== source.inode) throw new Error("OMP storage changed during scan");
-                let restored = false;
-                try { await afs.lstat(source.file); restored = true; delete source.missingSince; }
-                catch (e) { if (!isMissingFileError(e)) throw e; }
-                if (!restored) {
-                  // Recheck under the mapping store's own lock. A newer ACP
-                  // binding must never be removed by an old cleanup snapshot.
-                  await this.sessionStore.removeIfMatches(source.id, v.id);
-                  const latest = await this.sessionStore.list();
-                  if (!latest.some(m => m.acpSessionId === v.id)) { mapped.delete(v.id); v.sourceDeleted = true; }
+              else if (scan.complete) {
+                if (source.missingSince === undefined) source.missingSince = this.now();
+                else if (this.now() - source.missingSince >= 60000) {
+                  const finalRoot = await sourceRoot(root);
+                  if (finalRoot.dev !== source.device || finalRoot.ino !== source.inode) throw new Error("OMP storage changed during scan");
+                  let restored = false;
+                  try { await afs.lstat(source.file); restored = true; delete source.missingSince; }
+                  catch (e) { if (!isMissingFileError(e)) throw e; }
+                  if (!restored) {
+                    // Recheck under the mapping store's own lock. A newer ACP
+                    // binding must never be removed by an old cleanup snapshot.
+                    await this.sessionStore.removeIfMatches(source.id, v.id);
+                    const latest = await this.sessionStore.list();
+                    if (!latest.some(m => m.acpSessionId === v.id)) { mapped.delete(v.id); v.sourceDeleted = true; }
+                  }
                 }
               }
             }

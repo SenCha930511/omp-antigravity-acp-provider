@@ -1,8 +1,10 @@
+import { splitLegacyEffort } from "./efforts.ts";
+
 // USD per 1M tokens, Gemini Developer API Standard tier.
 // Source: https://ai.google.dev/gemini-api/docs/pricing (checked 2026-10-19).
 // These are API-equivalent estimates, not Antigravity subscription charges.
 export function officialApiCost(modelId: string, at = Date.now()) {
-  const id = modelId.replace(/-(low|medium|high)$/, "");
+  const id = splitLegacyEffort(modelId)?.base ?? modelId;
   if (id === "gemini-4-argon") {
     // Use the undiscounted list price, ignoring introductory rates.
     return { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 };

@@ -1,5 +1,6 @@
 // Public OMP models are derived only from server-advertised IDs and choices.
-export const EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+import { EFFORTS, splitLegacyEffort } from "./efforts.ts";
+export { EFFORTS, splitLegacyEffort };
 export interface AdvertisedModel {
   modelId: string;
   name: string;
@@ -22,12 +23,7 @@ export interface PublicCatalogModel {
   thinking?: { mode: "effort"; efforts: string[]; defaultLevel?: string };
 }
 const ROUTE_PREFIX = "__omp_acp_thought__:";
-// Single source for the legacy "<base>-<effort>" advertised ID suffix.
-const LEGACY_EFFORT_SUFFIX = new RegExp(`^(.+)-(${EFFORTS.join("|")})$`);
-export function splitLegacyEffort(modelId: string): { base: string; effort: string } | undefined {
-  const match = modelId.match(LEGACY_EFFORT_SUFFIX);
-  return match ? { base: match[1]!, effort: match[2]! } : undefined;
-}
+// The legacy "<base>-<effort>" suffix lives in efforts.ts so pricing agrees.
 export function validId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 256 &&
     value === value.trim() && !/[\u0000-\u001f\u007f]/u.test(value);

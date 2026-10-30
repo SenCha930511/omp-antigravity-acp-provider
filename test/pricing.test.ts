@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { officialApiCost, applyApiCostEstimate } from "../extension/pricing.ts";
 
 test("Argon uses undiscounted list prices for all effort variants", () => {
-  for (const id of ["gemini-4-argon", "gemini-4-argon-high"]) {
+  for (const id of ["gemini-4-argon", "gemini-4-argon-off", "gemini-4-argon-minimal", "gemini-4-argon-low",
+    "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon-xhigh", "gemini-4-argon-max"]) {
     assert.deepEqual(officialApiCost(id), { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 });
   }
 });

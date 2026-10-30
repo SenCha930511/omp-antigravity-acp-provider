@@ -153,3 +153,14 @@ test("OMP tool host state and cycles cannot change accepted history, but schema 
     assert.deepEqual(Object.keys(toolDeclarations([tool])[0]), ["name", "description", "parameters"]);
   } finally { await runtime.close(); }
 });
+
+test("a failed runtime teardown still releases the one-shot registration", async () => {
+  const f = fixture(), scope = f.scope();
+  f.bind("sid", scope);
+  const gate = Promise.withResolvers<void>();
+  f.gates.set("sid", gate.promise);
+  const closing = f.lifecycle.closeSession("sid", true);
+  gate.reject(new Error("synthetic teardown failure"));
+  await assert.rejects(closing, /synthetic teardown failure/);
+  assert.deepEqual(f.released, ["sid"], "unbinding must not depend on teardown success");
+});
