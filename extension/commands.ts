@@ -105,8 +105,8 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         deps.cleanup.budget(Number(parts[2]), Number(parts[3]) * 1024 * 1024);
       } else
       if (value) {
-        if (!["off", "conservative", "timeout"].includes(value) || parts.length > 3 || (parts[2] !== undefined && value !== "timeout")) {
-          throw new Error("Usage: /antigravity-acp cleanup [off|conservative|timeout [DAYS]]");
+        if (!["off", "conservative", "timeout", "balanced"].includes(value) || parts.length > 3 || (parts[2] !== undefined && !["timeout", "balanced"].includes(value))) {
+          throw new Error("Usage: /antigravity-acp cleanup [off|conservative|timeout|balanced [DAYS]]");
         }
         deps.cleanup.configure(value as CleanupMode, parts[2] === undefined ? undefined : Number(parts[2]));
         deps.cleanup.start();
@@ -150,7 +150,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     }
 
     if (command === "usage" && value) {
-      if (value !== "auto" && value !== "off") throw new Error("Usage: /antigravity-acp usage [auto|off]");
+      if (parts.length !== 2 || (value !== "auto" && value !== "off")) throw new Error("Usage: /antigravity-acp usage [auto|off]");
       const next = updateContextSettings(deps.getContextSettings(), "default", "usageMode", value);
       saveContextSettings(deps.contextPath, next);
       deps.setContextSettings(next);
@@ -160,7 +160,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     }
 
     if (command === "debug") {
-      if (value !== "on" && value !== "off") throw new Error("Usage: /antigravity-acp debug on|off");
+      if (parts.length !== 2 || (value !== "on" && value !== "off")) throw new Error("Usage: /antigravity-acp debug on|off");
       const enabled = value === "on";
       const next = { ...deps.getToolPolicy(), debugToolUpdates: enabled };
       saveToolPolicy(deps.toolPolicyPath, next);
@@ -171,10 +171,11 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     }
 
     if (command === "native-tools") {
+      if (parts.length !== 2) throw new Error("Usage: /antigravity-acp native-tools prefer|disabled");
       const mode: NativeToolMode = parseNativeToolMode(value);
-      await deps.closeAllRuntimes();
       const next = { ...deps.getToolPolicy(), nativeTools: mode };
       saveToolPolicy(deps.toolPolicyPath, next);
+      await deps.closeAllRuntimes();
       deps.setToolPolicy(next);
       ctx.ui.notify(`Native tools: ${mode}. ACP connections will be recreated on the next request with the new policy.`, "info");
       return;
@@ -204,6 +205,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       } finally {
         lease.release();
       }
+      deps.auth.noteLoginSucceeded?.();
       const auth = inspectAntigravityAuth();
       const email = antigravityAccountEmail();
       ctx.ui.notify(`Antigravity Google login finished${email ? ` as ${email}` : ""} — fresh sign-in; ACP auth: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}.`, "info");
@@ -276,9 +278,9 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         throw new Error("Usage: /antigravity-acp permissions default|auto-edit|yolo");
       }
       const mode = value.replace("-", "_");
+      savePermissionMode(mode, deps.configPath);
       deps.setPermissionModeState(mode);
       await Promise.all(deps.getAllRuntimes().map(bundle => bundle.runtime.setPermissionMode(mode)));
-      savePermissionMode(mode, deps.configPath);
     }
     const usageError = "Usage: /antigravity-acp [status|account|login|logout|tools|usage|context|cleanup|diagnostics|debug|native-tools|permissions|refresh]";
     if (command && command !== "status" && command !== "tools" && command !== "permissions") {

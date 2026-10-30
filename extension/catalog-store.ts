@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { writeJsonAtomic } from "./fs-atomic.ts";
-import { resolveContextOptions, type ContextOptions, type ContextSettings, type ResolvedContextOptions } from "./context-settings.ts";
+import { resolveContextOptions, type ContextSettings, type ResolvedContextOptions } from "./context-settings.ts";
 import { EFFORTS, projectCatalog, readModels, type AdvertisedModel, type PublicCatalogModel } from "./model-catalog.ts";
 import { officialApiCost } from "./pricing.ts";
 import { advertisedRecord, choices, selector } from "./selectors.ts";
@@ -14,7 +14,8 @@ export interface ConfiguredCatalogModel extends PublicCatalogModel {
 export class CatalogStore {
   readonly upstreamModels = new Map<string, ConfiguredCatalogModel>();
   currentModels: ConfiguredCatalogModel[] = [];
-  private dynamicCache?: { mtimeMs: number; size: number; settings: ContextSettings; models: ConfiguredCatalogModel[] };
+  private sourceModels: PublicCatalogModel[] = [];
+  private dynamicCache?: { stamp?: string; settings: string; models: ConfiguredCatalogModel[] };
   private discovery?: Promise<AdvertisedModel[]>;
   private refreshing?: Promise<ConfiguredCatalogModel[]>;
   private latestSettings?: ContextSettings;
@@ -27,8 +28,12 @@ export class CatalogStore {
   ) {}
 
   projectWithSettings(models: PublicCatalogModel[], settings: ContextSettings): ConfiguredCatalogModel[] {
-    this.latestSettings = settings;
-    this.upstreamModels.clear();
+    const projected = this.project(models, settings);
+    this.install(projected, models, settings);
+    return projected;
+  }
+
+  private project(models: PublicCatalogModel[], settings: ContextSettings): ConfiguredCatalogModel[] {
     return models.map(source => {
       const limits = resolveContextOptions(source, settings);
       const model: ConfiguredCatalogModel = {
@@ -42,9 +47,19 @@ export class CatalogStore {
       if (efforts.length && !model.thinking) {
         model.thinking = { mode: "effort", efforts, defaultLevel: efforts.includes("high") ? "high" : efforts[0]! };
       }
-      this.upstreamModels.set(model.id, model);
       return model;
     });
+  }
+
+  private install(models: ConfiguredCatalogModel[], sources: PublicCatalogModel[], settings: ContextSettings) {
+    // Publish only after every model validates. Preserve source limits so a
+    // removed override does not inherit the previous projected values.
+    this.sourceModels = sources;
+    this.latestSettings = settings;
+    this.currentModels = models;
+    this.dynamicCache = undefined;
+    this.upstreamModels.clear();
+    for (const model of models) this.upstreamModels.set(model.id, model);
   }
 
   readCachedCatalog(): AdvertisedModel[] {
@@ -65,27 +80,24 @@ export class CatalogStore {
   // OMP's host may call fetchDynamicModels on every startup pass; stat-based
   // reuse avoids re-reading and re-projecting an unchanged cache file.
   getDynamicModels(settings: ContextSettings): ConfiguredCatalogModel[] {
+    let stamp: string | undefined;
     try {
       const stat = fs.statSync(this.cachePath);
-      if (this.dynamicCache && this.currentModels.length > 0 &&
-          this.dynamicCache.mtimeMs === stat.mtimeMs && this.dynamicCache.size === stat.size &&
-          this.dynamicCache.settings === settings) {
-        return this.dynamicCache.models;
-      }
+      stamp = `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`;
     } catch { /* Missing or unreadable cache: fall through to a fresh read. */ }
+    const settingsKey = JSON.stringify(settings);
+    if (this.dynamicCache && this.dynamicCache.stamp === stamp && this.dynamicCache.settings === settingsKey) {
+      return this.dynamicCache.models;
+    }
     const cached = this.readCachedCatalog();
     const base = cached.length ? projectCatalog(cached) : this.fallbackModels();
     const models = this.projectWithSettings(base, settings);
-    try {
-      const stat = fs.statSync(this.cachePath);
-      this.dynamicCache = { mtimeMs: stat.mtimeMs, size: stat.size, settings, models };
-    } catch { /* No cache file yet; nothing to key reuse on. */ }
+    this.dynamicCache = { stamp, settings: settingsKey, models };
     return models;
   }
 
   reconfigure(settings: ContextSettings): ConfiguredCatalogModel[] {
-    this.currentModels = this.projectWithSettings(this.currentModels, settings);
-    return this.currentModels;
+    return this.projectWithSettings(this.sourceModels, settings);
   }
 
   async discoverModels(): Promise<AdvertisedModel[]> {
@@ -131,14 +143,15 @@ export class CatalogStore {
   }
   private async refreshOnce(): Promise<ConfiguredCatalogModel[]> {
     const models = await this.discoverModels();
-    this.upstreamModels.clear();
-    const registered = this.projectWithSettings(projectCatalog(models), this.latestSettings ?? { defaults: {}, models: {} });
-    this.currentModels = registered;
+    const sources = projectCatalog(models);
+    const settings = this.latestSettings ?? { defaults: {}, models: {} };
+    const registered = this.project(sources, settings);
     writeJsonAtomic(this.cachePath, {
       schemaVersion: 2,
       discoveredAt: new Date().toISOString(),
       models,
     });
+    this.install(registered, sources, settings);
     return registered;
   }
 }

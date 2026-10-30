@@ -165,6 +165,7 @@ After upgrading from an older adapter, run `/antigravity-acp refresh` once to re
 | `/antigravity-acp cleanup` | Show cleanup mode/deadline and check eligible local sessions |
 | `/antigravity-acp cleanup off` | Disable automatic session-file deletion |
 | `/antigravity-acp cleanup conservative` | Delete confirmed replaced/disposable sessions only (default) |
+| `/antigravity-acp cleanup balanced [DAYS]` | Keep recovery copies for 1 day, expire unmapped data after 7 days, and set soft 50-session/512-MiB defaults |
 | `/antigravity-acp cleanup timeout DAYS` | Also delete inactive unmapped owned sessions after DAYS (default 7) |
 | `/antigravity-acp cleanup budget MAX_SESSIONS MAX_MIB` | Set soft session-count/size budgets; `0` disables each limit |
 | `/antigravity-acp diagnostics [on\|off\|reset]` | Show bounded timing samples, enable/disable collection, or clear samples (default off) |
@@ -224,6 +225,8 @@ New user requests supersede an interrupted ACP turn, including pending tool call
 
 The cancellation checkpoint records the accepted message boundary and the partial assistant output fingerprint, including across idle shutdown/resume. If cancellation is unacknowledged, the process fails, the history is edited/compacted, or previously emitted partial output is missing or changed in OMP, the adapter reconstructs from retained history instead. Thus Esc does not always create a new ACP session, but reuse is conditional rather than guaranteed. Cancelled turns skip supplemental `/usage` queries while retaining any ACP context-occupancy update. History is explicitly separated from the current request after official ACP text conversion; cold tool handoffs resume from completed results rather than restarting prior actions. Preserving a session avoids unnecessary replay but does not guarantee a backend cache hit. See the [Flash cancellation/cache research and implementation checks](docs/cache-cancellation-research.md).
 
+Routing uses the provider request's `sessionId`, independently of shared prompt-cache keys and the UI transcript ID. OMP's provider-state close/release hooks cover `/fresh`, reset and side-request lifetimes; old deferred requests cannot dispatch after closure, and replacement requests wait for teardown. Duplicate/ambiguous mappings are rebuilt, and a fresh Google login clears previous-account mappings. Concurrent identical input snapshots are rejected instead of dispatched twice; the same text in a distinct later user turn remains valid. Only tool names, descriptions and schemas enter ACP history fingerprints, excluding mutable OMP host objects. See the [source review and transition coverage](docs/session-transition-audit-2026-10-30.md). Run `npm run test:omp-sessions` for an isolated offline integration with the installed OMP CLI and a fake ACP transport; it creates no Google sessions and performs no inference.
+
 The adapter transfers complete replay history within bounded budgets, including historical image attachments. It does not silently keep only a history tail. The official harness also has a per-step text conversion limit independent of its model window: the inspected configuration limits a step to 64,000 tokens and truncates oversized text to its first 192,000 UTF-8 bytes. A large cold replay after **Refine plan** can therefore lose the latest question at the tail even when the advertised model window has room. The adapter rejects rendered prompt text above 188,000 bytes before `session/prompt`, leaving 4,000 bytes for official wrapping/metadata. The context-overflow error lets OMP use its existing compaction/retry flow; OMP's adaptive summary windows can split oversized summary input too. If compaction is disabled or cannot reduce the request, use `/compact` or reduce the input before retrying. The adapter itself neither summarizes nor adds inference. See [step-limit behavior and offline validation](docs/plan-refinement-step-limit.md).
 
 Token budgets, wire payload size and the per-step text limit are independent. The default wire payload limit is 16 MiB, configurable up to 128 MiB; raising it or `contextWindow` does not bypass the per-step text guard. Image data additionally defaults to an 8 MiB decoded payload limit and is not counted as rendered text. The automatic input-token budget is `contextWindow - maxTokens - reserveTokens`, where reserve defaults to the smaller of 16,384 and 5% of the window. A lightweight Unicode-aware estimate checks serialized text plus approximately 4,096 tokens per image. This is not a Gemini tokenizer, cannot guarantee exact token counts and does not include every hidden server instruction.
@@ -266,18 +269,20 @@ Active sessions are reused. After five idle minutes, the adapter closes its ACP 
 
 ### Local ACP session cleanup
 
-Session-file deletion is separate from the five-minute idle process shutdown. Configure one of three modes:
+Session-file deletion is separate from the five-minute idle process shutdown. Configure one of four modes:
 
 | Mode | Behavior |
 | --- | --- |
 | `off` | Keep session files, including replaced sessions. Ownership/lease bookkeeping remains enabled so cleanup can be enabled later. |
-| `conservative` (default) | Remove an old session after its OMP history is rebuilt (for example after `/compact`), a replacement successfully completes a turn, and all registered users of the old session have released it. Disposable model-discovery sessions are also removed after their connection exits. Ordinary shutdown and idle eviction preserve resumable sessions. |
+| `conservative` (default) | Remove an old session after its OMP history is rebuilt (for example after `/compact`), a replacement successfully completes a turn, and all registered users of the old session have released it. Disposable model-discovery sessions and explicitly released one-shot side requests are also removed after their connection exits. Ordinary shutdown and idle eviction preserve resumable sessions. |
+| `balanced` | Keep unmapped replacement/one-shot copies for at least `recoveryDays` (default 1 day), including under quota pressure. Expire other unmapped owned data after `idleDays` (default 7 days) measured from the later of last use and first observation without a mapping. Above a soft budget, evict eligible unmapped data in activity order after the orphan grace (default 1 day). Saved OMP mappings, active sessions and OMP journals remain protected. |
 | `timeout` | Conservative cleanup plus removal of unmapped owned sessions whose last activity exceeds `idleDays`, or eligible unmapped sessions above a configured soft budget after the orphan grace period. Default 7 days; accepts fractional days (for example `0.5` for 12 hours), with a minimum of one hour and a maximum of 3650 days. Saved OMP mappings and live leases always override deletion. |
 
 ```text
 /antigravity-acp cleanup
 /antigravity-acp cleanup off
 /antigravity-acp cleanup conservative
+/antigravity-acp cleanup balanced
 /antigravity-acp cleanup timeout 7
 /antigravity-acp cleanup budget 50 512
 ```
@@ -288,15 +293,25 @@ Settings persist in `~/.omp/agent/antigravity-acp-provider/cleanup.json`:
 { "mode": "conservative", "idleDays": 7, "maxSessions": 0, "maxBytes": 0, "orphanGraceDays": 1, "batchSize": 8 }
 ```
 
-The optional budgets default to disabled (`0`); the command accepts MiB and saves bytes. Size accounting uses logical file sizes rather than allocated APFS space. In `off` and `conservative`, exceeding a budget only produces a status warning. In `timeout`, budget eviction uses least-recent activity among unmapped, unleased owned sessions after `orphanGraceDays` (default 1 day, range 1 hour–3650 days). Mapped and active sessions can keep usage above the budget. The grace period applies to budget eviction; confirmed replacement and ordinary idle expiry have their own eligibility rules.
+The optional budgets default to disabled (`0`); the command accepts MiB and saves bytes. `cleanup balanced` sets missing budgets to 50 sessions and 512 MiB, resets ordinary orphan retention to 7 days (or the supplied DAYS), and supplies a 1-day orphan grace and recovery window. Existing explicit budgets, including disabled (`0`) limits, are preserved. The default remains `conservative`; installing an update does not switch an existing policy.
+
+For example, the balanced preset without prior overrides saves:
+
+```json
+{ "mode": "balanced", "idleDays": 7, "maxSessions": 50, "maxBytes": 536870912, "orphanGraceDays": 1, "recoveryDays": 1 }
+```
+
+Size accounting uses logical file sizes rather than allocated APFS space. In `off` and `conservative`, exceeding a budget only produces a status warning. In `timeout` and `balanced`, budget eviction uses least-recent activity among unmapped, unleased owned sessions after `orphanGraceDays` (default 1 day, range 1 hour–3650 days). Mapped and active sessions can keep usage above the budget. The balanced recovery window cannot be bypassed by either quota pressure or ordinary idle expiry; `recoveryDays` accepts 1 hour–3650 days. Explicitly deleted OMP journals retain their separate deletion-confirmation rules.
 
 Commands take effect immediately; direct file edits are read on the next cleanup check. Checks run when the cleanup service starts, after replacement/release, on the inspection command, and every 15 minutes while the service is running. Replacement/release persists bookkeeping before scheduling file cleanup in the background. Each batch removes at most `batchSize` sessions (default 8, range 1–100); eligible overflow schedules another batch after one second. OMP must be running for timed checks; the deadline is not an exact scheduled deletion time. No additional model requests, tokenizer downloads or background worker processes are used.
 
-Only sessions created and registered by this adapter version onward are eligible. Pre-existing/unidentified ACP sessions are preserved. All cleanup modes protect IDs in saved `sessions.json` mappings. The registry is separated by the resolved ACP storage root, and tracks both OMP and ACP supervisor PIDs across participating processes. Resume/load acquires a lease before replay; the cross-process lease lock remains held during asynchronous deletion. Busy/corrupt registries, malformed mappings and unsafe paths defer deletion. Failed lifecycle updates remain in a bounded in-memory retry queue (1024 entries) until the next successful transaction; a process crash can lose queued intentions, so deletion is never guaranteed. The status shows mapped/unmapped/active counts, logical bytes, deferred work, failures and pending updates. Restart older OMP instances when upgrading: clients that do not implement these leases, or external clients manually opening the same session, are outside this coordination mechanism.
+Only sessions created and registered by this adapter version onward are eligible. Pre-existing/unidentified ACP sessions are preserved. All cleanup modes protect IDs in saved `sessions.json` mappings. The registry is separated by the resolved ACP storage root, and tracks both OMP and ACP supervisor PIDs across participating processes. Resume/load acquires a lease before replay; the cross-process lease lock remains held during asynchronous deletion. Busy/corrupt registries, malformed mappings and unsafe paths defer deletion. Failed lifecycle updates remain in a bounded in-memory retry queue (1024 entries) until the next successful transaction; a process crash can lose queued intentions, so deletion is never guaranteed. The status shows mapped/unmapped/active counts, logical bytes, bytes reclaimed in the latest batch, copies retained for recovery, deferred work, failures and pending updates. Restart older OMP instances when upgrading: clients that do not implement these leases, or external clients manually opening the same session, are outside this coordination mechanism.
+
+OMP explicitly releases routing IDs for final one-shot side requests. After runtime teardown, the adapter persists a disposable marker and conditionally removes only that request's matching owned mapping; newer, duplicated or shared mappings are preserved. A reused routing ID waits for this cleanup before dispatch. This also works after idle runtime eviction. If a process exits between marking and unmapping, later collection repairs the interruption; restoration refuses a finally released ACP ID. Generic provider close, process shutdown, switching sessions, and reusable side conversations do not mark their mappings disposable. Balanced mode retains the released ACP files as a temporary recovery copy; it does not add them to OMP history or expose a recovery UI.
 
 Cleanup targets only the registered UUID's `.db`, SQLite journal/WAL/SHM files, `.meta`, and `brain/<UUID>` directory under the ACP storage root (normally `~/.gemini/antigravity-acp/`; respects `GEMINI_HOME`). Symlinked targets are preserved. Credentials, global settings, shared artifacts, workspace files and OMP's own conversation history are untouched. Local deletion is permanent and does not request deletion of Google's server-side logs. The current official ACP runtime does not advertise session deletion, so this uses the inspected local layout rather than an unsupported RPC.
 
-Timeout cleanup sacrifices ACP-only reasoning/checkpoint state for eligible unmapped sessions. If that session is later requested through another history source, the adapter reconstructs it from OMP's retained history and can incur replay latency and a different token count. Cache expiry is not assumed or guaranteed. Ordinary mapped conversations remain resumable in every mode; budgets cannot bound the number of mapped OMP conversations you keep.
+Timeout and balanced cleanup sacrifice ACP-only reasoning/checkpoint state for eligible unmapped sessions. If that session is later requested through another history source, the adapter reconstructs it from OMP's retained history and can incur replay latency and a different token count. Cache expiry is not assumed or guaranteed. Ordinary mapped conversations remain resumable in every mode; budgets cannot bound the number of mapped OMP conversations you keep.
 
 ### Deleting an OMP conversation
 
@@ -317,7 +332,7 @@ Optional environment settings, applied when OMP starts:
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `OMP_ACP_HISTORY_BYTES` | context.json or 16 MiB | Optional byte-limit override, 64 KiB–128 MiB; independent of token window |
-| `OMP_ACP_IDLE_TIMEOUT_MS` | `300000` | Idle runtime reclamation; `0` disables it, positive values must be at least `1000` |
+| `OMP_ACP_IDLE_TIMEOUT_MS` | `300000` | Idle runtime reclamation; `0` disables it, otherwise `1000`–`2147483647` (Node timer range) |
 | `OMP_ACP_MAX_IDLE_RUNTIMES` | `2` | Per-process idle runtime LRU limit; `0` disables the limit. Busy/leased runtimes remain protected |
 | `OMP_ACP_USAGE` | context.json or auto | `off` forces supplemental queries off, including when the saved option is auto |
 

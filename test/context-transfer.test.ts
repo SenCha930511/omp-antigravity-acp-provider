@@ -108,3 +108,27 @@ test("wire budgets remain independent, but cannot bypass the official single-ste
   assert.throws(() => buildPromptParts({ messages: [user("x".repeat(1_200_000)), user("LATEST")] }, true, undefined,
     { contextWindow: 1_000_000 }), /single-step/);
 });
+
+test("oversized history stops serialization before inspecting later tool payloads", () => {
+  let inspected = false;
+  const messages = [user("x".repeat(2_000_000)),
+    { role: "assistant", content: [{ type: "toolCall", id: "later", name: "read", arguments: {
+      toJSON() { inspected = true; throw new Error("Later payload must not be inspected"); },
+    } }] }, user("LATEST")];
+  assert.throws(() => buildPromptParts({ messages }, true, undefined, { contextWindow: 1_000_000 }), /single-step/);
+  assert.equal(inspected, false);
+});
+
+test("many content blocks receive the size error instead of overflowing the call stack", () => {
+  const content = Array.from({ length: 150_000 }, () => ({ type: "text", text: "" }));
+  assert.throws(() => buildPromptParts({ messages: [user(content)] }, true, undefined,
+    { contextWindow: 1_000_000 }), /single-step/);
+});
+
+test("wire budget counts escaped embedded history and resource envelopes", () => {
+  const messages = [user('"'.repeat(19_000)), user("LATEST")];
+  const large = buildPromptParts({ messages }, true, undefined, { contextWindow: 1_000_000 });
+  assert.ok(Buffer.byteLength(JSON.stringify(large.prompt), "utf8") > 65536);
+  assert.throws(() => buildPromptParts({ messages }, true, undefined,
+    { contextWindow: 1_000_000, policy: { maxTransferBytes: 65536 } }), /transfer needs/);
+});

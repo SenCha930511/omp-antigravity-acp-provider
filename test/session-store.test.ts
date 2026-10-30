@@ -97,3 +97,21 @@ test("session ownership excludes another process until the owner releases it", a
   try { assert.equal((await once(child(), "exit"))[0], 3); } finally { await release(); }
   assert.equal((await once(child(), "exit"))[0], 0);
 }));
+
+test("ambiguous mappings never restore another OMP conversation's ACP session", async () => fixture(async file => {
+  const store = new AcpSessionStore(file);
+  await fs.writeFile(file, JSON.stringify([record("A"), { ...record("B"), acpSessionId: "A" }]));
+  assert.equal(await store.get("A"), undefined);
+  assert.equal(await store.get("B"), undefined);
+  await store.save({ ...record("A"), acpSessionId: "fresh-A" });
+  assert.equal((await store.get("A"))?.acpSessionId, "fresh-A");
+  assert.equal((await store.get("B"))?.acpSessionId, "A");
+  await assert.rejects(store.save({ ...record("C"), acpSessionId: "A" }), /another OMP session/);
+  assert.equal(await store.get("C"), undefined);
+}));
+
+test("duplicate records for one OMP identity force reconstruction instead of selecting the first record", async () => fixture(async file => {
+  const store = new AcpSessionStore(file);
+  await fs.writeFile(file, JSON.stringify([record("A"), { ...record("A"), acpSessionId: "other-A" }]));
+  assert.equal(await store.get("A"), undefined);
+}));

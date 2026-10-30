@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.27 — 2026-10-30
+
+- Add an optional balanced cleanup preset with orphan retention, minimum recovery windows, soft budgets and reclaimed-byte reporting; preserve the existing default policy and OMP history.
+- Retire saved owned one-shot mappings only on OMP's explicit final release, after runtime teardown, including after idle eviction; preserve newer/shared mappings and gate reused routing IDs through cleanup.
+- Honor OMP provider close/release hooks across fresh routing IDs, side requests and adapter reloads; wait for teardown and block stale deferred dispatch.
+- Project OMP tool declarations before hashing so mutable host state cannot trigger history replay; preserve array system-prompt paragraphs.
+- Prevent concurrent identical transcript snapshots from dispatching twice while allowing identical text in a later user turn.
+- Rebuild ambiguous session mappings, clear previous-account mappings on fresh login, and rebuild when cwd or a parked prompt's model changes.
+- Add built-runtime transition regressions and an optional offline integration using real OMP RPC and process restart. See [session transition audit](docs/session-transition-audit-2026-10-30.md).
+- Preserve warm idle runtimes when acquiring active work, reduce LRU temporary allocations, and await teardown across concurrent global shutdowns.
+- Validate complete checkpoint mappings before cleanup and release obsolete in-memory activity entries.
+- Keep catalog projections, settings and lookups consistent; restore source limits when overrides are removed and publish refreshes only after successful persistence. Reuse fallback catalogs when the cache is absent.
+- Reject oversized history during serialization, avoid argument-spread stack overflows, and count escaped resource text in wire budgets without copying image base64.
+- Reject overflowing idle timers, surplus command arguments and inherited context-setting keys; safely handle model names that match object methods.
+- Add offline regressions and a before/after resource benchmark with 256 equivalent prompt fixtures. See [the audit](docs/resource-code-audit-2026-10-30.md) for measurements and limits.
+- Cancel any pending followed logout when a fresh Google login succeeds and restore the config apiKey fallback, so command-driven re-login cannot be undone by a stale deferred logout; make login and command logout remove the macOS keychain credential durably.
+- Close five conservative-mode session leaks: discard discovery/login/verify sessions, retire replaced, unrestorable and mode-mismatched saved mappings, and release pre-acquired cleanup leases when session restore fails, while keeping usage baselines while prompts are active.
+- Wait for in-flight teardown of previously visited sessions in the same scope during `session_shutdown`, so a synchronous OMP close cannot outlive the final registry flush.
+- Persist permission and native-tools settings before mutating live state or closing runtimes, so a failed disk write cannot desynchronize runtime and on-disk configuration.
+- Skip background cleanup scans when a turn confirmed nothing for replacement, avoiding a full directory walk after every ordinary response.
+- Publish a slimmer npm tarball (37 files instead of 75) by excluding vendored sources and build scripts from the package.
+
 ## 0.1.26 — 2026-10-29
 
 - Wait for the retiring ACP process to exit during binding drop before releasing the session lease, preventing lock contention (`This OMP session is already open in another ACP runtime`) during history compaction or reconstruction.

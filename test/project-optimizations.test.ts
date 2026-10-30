@@ -77,6 +77,66 @@ test("shared refresh uses the latest settings and removes stale model entries", 
   } finally { await fs.rm(state, { recursive: true, force: true }); }
 });
 
+test("catalog reads and reconfiguration keep current models and lookup state consistent", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-catalog-state-"));
+  try {
+    const file = path.join(state, "models.json");
+    await fs.writeFile(file, JSON.stringify({ schemaVersion: 2, models: [{ modelId: "custom", name: "Custom" }] }));
+    const store = new CatalogStore(file, {} as any, async () => {}, () => []);
+    const defaults = { defaults: {}, models: {} };
+    store.loadInitialOrCached(defaults);
+    const original = store.getDynamicModels(defaults);
+    const changed = store.reconfigure({ defaults: { contextWindow: 65536 }, models: {} });
+    assert.equal(changed[0].contextWindow, 65536);
+    assert.equal(store.getDynamicModels(defaults)[0].contextWindow, 32768);
+    assert.equal(store.currentModels, store.getDynamicModels(defaults));
+    assert.equal(store.upstreamModels.get("custom"), store.currentModels[0]);
+    store.reconfigure({ defaults: { contextWindow: 65536 }, models: {} });
+    assert.equal(store.reconfigure(defaults)[0].contextWindow, original[0].contextWindow,
+      "Removing an override restores the source model limits");
+
+    const before = store.currentModels;
+    assert.throws(() => store.projectWithSettings([
+      ...before, { ...before[0], id: "invalid", contextWindow: 4096, maxTokens: 8192 },
+    ], defaults), /Invalid token budgets/);
+    assert.equal(store.currentModels, before);
+    assert.equal(store.upstreamModels.size, 1, "Failed projection cannot partially replace the live catalog");
+  } finally { await fs.rm(state, { recursive: true, force: true }); }
+});
+
+test("catalog cache notices in-place settings changes and reuses missing-file fallbacks", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-catalog-fallback-"));
+  try {
+    let reads = 0;
+    const store = new CatalogStore(path.join(state, "missing.json"), {} as any, async () => {}, () => {
+      reads++;
+      return [{ id: "custom", contextWindow: 32768, maxTokens: 8192 } as any];
+    });
+    const settings = { defaults: { contextWindow: 65536 }, models: {} };
+    const first = store.getDynamicModels(settings);
+    assert.equal(store.getDynamicModels(settings), first);
+    assert.equal(reads, 1);
+    settings.defaults.contextWindow = 131072;
+    assert.equal(store.getDynamicModels(settings)[0].contextWindow, 131072);
+  } finally { await fs.rm(state, { recursive: true, force: true }); }
+});
+
+test("failed catalog persistence leaves the live catalog intact", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-catalog-commit-"));
+  try {
+    const file = path.join(state, "models.json");
+    const store = new CatalogStore(file, {} as any, async () => {}, () => []);
+    const original = store.projectWithSettings([{ id: "old", contextWindow: 32768, maxTokens: 8192 } as any],
+      { defaults: {}, models: {} });
+    store.discoverModels = async () => [{ modelId: "new", name: "New" }];
+    await fs.mkdir(file);
+    await assert.rejects(store.refresh({ defaults: {}, models: {} }));
+    assert.equal(store.currentModels, original);
+    assert.deepEqual([...store.upstreamModels.keys()], ["old"]);
+    assert.deepEqual((await fs.readdir(state)).filter(name => name.endsWith(".tmp")), []);
+  } finally { await fs.rm(state, { recursive: true, force: true }); }
+});
+
 test("global shutdown waits for a detached runtime teardown", async () => {
   const gate = Promise.withResolvers<void>();
   const pool = new SessionRuntimePool(() => ({}), () => gate.promise);
@@ -101,4 +161,18 @@ test("diagnostics defaults off, bounds samples, persists only enablement and cle
     assert.equal(new Diagnostics(file).status().enabled, true);
     d.configure(false); assert.equal(d.status().samples, 0);
   } finally { await fs.rm(state, { recursive: true, force: true }); }
+});
+
+test("idle timeout rejects values that Node would turn into a one-millisecond timer", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-timeout-range-"));
+  const previous = process.env.OMP_ACP_IDLE_TIMEOUT_MS;
+  try {
+    process.env.OMP_ACP_IDLE_TIMEOUT_MS = "2147483648";
+    await assert.rejects(registerOmpAdapter({ on() {}, registerTool() {}, registerProvider() {}, registerCommand() {} }, state),
+      /OMP_ACP_IDLE_TIMEOUT_MS/);
+  } finally {
+    if (previous === undefined) delete process.env.OMP_ACP_IDLE_TIMEOUT_MS;
+    else process.env.OMP_ACP_IDLE_TIMEOUT_MS = previous;
+    await fs.rm(state, { recursive: true, force: true });
+  }
 });

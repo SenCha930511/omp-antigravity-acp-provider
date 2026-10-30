@@ -34,3 +34,20 @@ test("invalid token combinations are rejected rather than silently changing the 
   assert.throws(() => resolveContextOptions({ id: "x", contextWindow: 32768, maxTokens: 8192 }, { defaults: { inputTokenBudget: 100000 }, models: {} }), /must fit/);
   assert.ok(estimateTransferTokens("中文".repeat(100)) > estimateTransferTokens("aa".repeat(100)));
 });
+
+test("setting validation rejects inherited keys and model names never mutate inherited functions", () => {
+  for (const key of ["constructor", "toString", "hasOwnProperty"]) {
+    assert.throws(() => updateContextSettings({ defaults: {}, models: {} }, "default", key, 12345), /Invalid/);
+  }
+  const method = Object.prototype.toString;
+  const before = Object.getOwnPropertyDescriptor(method, "contextWindow");
+  try {
+    const next = updateContextSettings({ defaults: {}, models: {} }, "toString", "contextWindow", 65536);
+    assert.ok(Object.hasOwn(next.models, "toString"));
+    assert.deepEqual(next.models.toString, { contextWindow: 65536 });
+    assert.deepEqual(Object.getOwnPropertyDescriptor(method, "contextWindow"), before);
+  } finally {
+    if (before) Object.defineProperty(method, "contextWindow", before);
+    else Reflect.deleteProperty(method, "contextWindow");
+  }
+});

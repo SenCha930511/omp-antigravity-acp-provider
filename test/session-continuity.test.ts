@@ -267,6 +267,33 @@ test("shutdown during the pre-dispatch checkpoint cannot send a late prompt", as
   } finally { await f.close(); }
 });
 
+test("concurrent identical user snapshots dispatch once without replacing the first response", async () => {
+  const f = fixture();
+  try {
+    const r = f.create(), messages = [user("SAME_ADMITTED_REQUEST")];
+    const [one, two] = await Promise.all([f.run(r, messages), f.run(r, messages)]);
+    const events = [...one, ...two];
+    assert.equal(events.filter(e => e.type === "done").length, 1);
+    assert.match(events.find(e => e.type === "error")?.error.errorMessage, /already.*(?:processed|progress)/i);
+    assert.equal(f.connections.reduce((sum, c) => sum + c.prompts.length, 0), 1);
+  } finally { await f.close(); }
+});
+
+test("a duplicate arriving during a blocked checkpoint cannot fail the owner or send a second prompt", async () => {
+  const f = fixture();
+  try {
+    const r = f.create(), gate = f.blockDispatch(), messages = [user("BLOCKED_DUPLICATE")];
+    const owner = f.run(r, messages);
+    await gate.entered.promise;
+    const duplicate = f.run(r, messages);
+    gate.release.resolve();
+    const [one, two] = await Promise.all([owner, duplicate]);
+    assert.ok(one.some(e => e.type === "done"));
+    assert.match(two.find(e => e.type === "error")?.error.errorMessage, /already.*(?:processed|progress)/i);
+    assert.equal(f.connections.reduce((sum, c) => sum + c.prompts.length, 0), 1);
+  } finally { await f.close(); }
+});
+
 test("legacy mappings without a durable dispatch marker are rebuilt once", async () => {
   const f = fixture();
   try {

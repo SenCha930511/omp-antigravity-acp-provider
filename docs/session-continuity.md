@@ -1,5 +1,41 @@
 # Session continuity invariants
 
+Safety takes precedence over ACP ID reuse. When accepted history or ownership
+is uncertain, reconstruct from the OMP transcript. A cold reconstruction may
+include prior conversation as reference data; it must not promote old requests
+to the current request or reuse another OMP conversation's ACP mapping.
+
+## OMP host boundaries
+
+Provider routing follows `options.sessionId`, not `promptCacheKey`,
+`parentSessionId`, or the session manager's visible transcript ID. OMP can keep
+the transcript file while rotating provider identity (`/fresh`, reset), and
+side/speculative requests use independent routing IDs with a shared prefix.
+The adapter registers `close()` / `releaseSession()` in OMP's provider-state
+map, cancels deferred work belonging to a closed scope, and waits for earlier
+teardown before dispatching a replacement. Planning and main scopes remain
+independent. Adapter replacement closes the previous scope rather than
+silently overwriting its lifecycle owner.
+
+OMP AgentTool wrappers contain mutable host objects. Only the bridge's tool
+declarations (name, description and schema) enter the normalized context and
+fingerprints, including system tool deltas. Host counters, session objects,
+closures and cycles cannot change accepted history. Array system prompts keep
+their paragraph boundaries. Actual schema and instruction changes still
+invalidate reuse.
+
+Concurrent identical admitted input snapshots cannot dispatch twice or replace
+the first writer. An input already completed by the preceding queued turn is
+rejected before the assistant-boundary reconstruction path. This is scoped to
+concurrent snapshots; a later user turn with the same text remains valid.
+
+Duplicate rows or cross-linked ACP IDs are not restoration proof. The mapping
+store returns no saved candidate for ambiguous identities and refuses to save
+an ACP ID already mapped to a different OMP ID. Fresh login clears mappings
+before authenticating a potentially different Google account. Workspace
+changes and model changes during a parked ACP prompt reconstruct rather than
+continue with the old workspace/model.
+
 Version 0.1.21 adds a versioned dispatch checkpoint to the adapter's session
 registry. The model context window does not establish whether an ACP session's
 accepted history matches OMP's retained transcript.
@@ -72,3 +108,8 @@ permissions, duplicate continuation ownership, successive and mixed continuation
 batches within one prompt, and completed assistant edits,
 removal and empty responses. Existing graceful-cancellation and cleanup
 integration scripts remain required. These tests perform no model inference.
+
+`npm run test:omp-sessions` additionally drives actual OMP RPC operations and
+process restart against the real adapter/built runtime with an isolated fake
+ACP transport. See [the transition audit](session-transition-audit-2026-10-30.md)
+for the source revision, exact coverage and remaining limits.

@@ -44,13 +44,25 @@ export class AcpSessionStore {
     }
   }
   get(id: string): Promise<SavedSessionRecord | undefined> {
-    return this.enqueue(async () => (await this.read()).find(record => record.piSessionId === id &&
-      Date.now() - record.lastActive <= 30 * 24 * 60 * 60_000));
+    return this.enqueue(async () => {
+      const records = await this.read(), matches = records.filter(record => record.piSessionId === id);
+      if (matches.length !== 1) return undefined;
+      const record = matches[0]!;
+      // A duplicated/cross-linked mapping proves no exclusive conversation
+      // ownership. Reconstruct from OMP instead of picking an arbitrary row.
+      if (records.some(other => other !== record && other.acpSessionId === record.acpSessionId)) return undefined;
+      return Date.now() - record.lastActive <= 30 * 24 * 60 * 60_000 ? record : undefined;
+    });
   }
+  list(): Promise<SavedSessionRecord[]> { return this.enqueue(() => this.read()); }
   save(record: SavedSessionRecord): Promise<void> {
     const captured = { ...record };
     return this.update(async () => {
-      const records = (await this.read()).filter(value => value.piSessionId !== captured.piSessionId);
+      const existing = await this.read();
+      if (existing.some(value => value.piSessionId !== captured.piSessionId && value.acpSessionId === captured.acpSessionId)) {
+        throw new Error("ACP session is already mapped to another OMP session; refusing to share conversation state");
+      }
+      const records = existing.filter(value => value.piSessionId !== captured.piSessionId);
       records.push(captured);
       records.sort((a, b) => b.lastActive - a.lastActive);
       await this.write(records.slice(0, 256));

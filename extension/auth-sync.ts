@@ -178,19 +178,42 @@ export class OmpAuthCoordinator {
   // /login must mean a fresh Google sign-in: drop stored credentials (and this
   // process's old-account servers) so a new server cannot silently reuse the
   // saved login and keep the previous account.
+  noteLoginSucceeded(): void {
+    clearTimeout(this.followTimer);
+    this.followTimer = undefined;
+    clearTimeout(this.followRetry);
+    this.followRetry = undefined;
+    this.suppressFollow = false;
+    if (!this.apiKeyFallback) {
+      this.apiKeyFallback = true;
+      this.deps.onSyncProvider();
+    }
+  }
+
   async beginFreshGoogleLogin(): Promise<void> {
     if (this.deps.isPoolBusy()) {
       throw new Error("Wait for active Antigravity requests to finish before logging in.");
     }
+    clearTimeout(this.followTimer);
+    this.followTimer = undefined;
+    clearTimeout(this.followRetry);
+    this.followRetry = undefined;
     await this.deps.closeAllRuntimes();
+    // A different Google login must not restore the previous account's ACP
+    // mappings. OMP retains its transcript for a fresh backend reconstruction.
+    await this.deps.logoutAllRuntimes();
     clearAntigravityCredentials();
-    keychain.remove();
+    await this.removeKeychainCredentialDurably();
   }
 
   async performCommandLogout(ctx: OmpCommandContext): Promise<{ keychainRemoved: boolean | undefined; ompMarker: "removed" | "absent" | "unavailable" }> {
     if (this.deps.isPoolBusy()) {
       throw new Error("Wait for active Antigravity requests to finish before logging out.");
     }
+    clearTimeout(this.followTimer);
+    this.followTimer = undefined;
+    clearTimeout(this.followRetry);
+    this.followRetry = undefined;
     await this.deps.logoutAllRuntimes();
     await this.deps.closeAllRuntimes();
     const keychainRemoved = await this.removeKeychainCredentialDurably();

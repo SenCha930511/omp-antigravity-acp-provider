@@ -7,19 +7,20 @@ import { resolveAntigravityAcpDirectory } from "./vendor/pi-antigravity-acp-prov
 import { isMissingFileError, writeJsonAtomic } from "./fs-atomic.ts";
 import { AcpSessionStore } from "./session-store.ts";
 import { sourceRoot, sourceId, findSources, type OmpSessionSource } from "./omp-session-source.ts";
-export type CleanupMode = "off" | "conservative" | "timeout";
-export interface CleanupPolicy { mode: CleanupMode; idleDays: number; maxSessions?: number; maxBytes?: number; orphanGraceDays?: number; batchSize?: number }
+export type CleanupMode = "off" | "conservative" | "timeout" | "balanced";
+export interface CleanupPolicy { mode: CleanupMode; idleDays: number; maxSessions?: number; maxBytes?: number; orphanGraceDays?: number; recoveryDays?: number; batchSize?: number }
 const DEFAULT: CleanupPolicy = { mode: "conservative", idleDays: 7 };
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 interface Lease { token: string; pid: number; serverPid: number }
-interface Record { id: string; owned: boolean; lastUsed: number; leases: Lease[]; retiredFor?: string; replaced?: boolean; orphanedAt?: number; ompSource?: OmpSessionSource; sourceDeleted?: boolean }
+interface Record { id: string; owned: boolean; lastUsed: number; leases: Lease[]; retiredFor?: string; replaced?: boolean; disposableAt?: number; disposableFor?: string; confirmedAt?: number; orphanedAt?: number; ompSource?: OmpSessionSource; sourceDeleted?: boolean }
 interface Registry { version: 1; sessions: Record[] }
 const tails = new Map<string, Promise<unknown>>();
 function validate(p: CleanupPolicy): CleanupPolicy {
-  if (!p || !["off", "conservative", "timeout"].includes(p.mode) || !Number.isFinite(p.idleDays) || p.idleDays < 1 / 24 || p.idleDays > 3650) throw new Error("Cleanup requires off|conservative|timeout and idleDays between 1/24 and 3650");
+  if (!p || !["off", "conservative", "timeout", "balanced"].includes(p.mode) || !Number.isFinite(p.idleDays) || p.idleDays < 1 / 24 || p.idleDays > 3650) throw new Error("Cleanup requires off|conservative|timeout|balanced and idleDays between 1/24 and 3650");
   for (const k of ["maxSessions", "maxBytes", "batchSize"] as const) if (p[k] !== undefined && (!Number.isSafeInteger(p[k]) || p[k]! < (k === "batchSize" ? 1 : 0) || (k === "batchSize" && p[k]! > 100))) throw new Error(`Invalid cleanup ${k}`);
   if (p.orphanGraceDays !== undefined && (!Number.isFinite(p.orphanGraceDays) || p.orphanGraceDays < 1 / 24 || p.orphanGraceDays > 3650)) throw new Error("Invalid orphanGraceDays");
-  return { mode: p.mode, idleDays: p.idleDays, ...Object.fromEntries(["maxSessions", "maxBytes", "orphanGraceDays", "batchSize"].filter(k => p[k as keyof CleanupPolicy] !== undefined).map(k => [k, p[k as keyof CleanupPolicy]])) };
+  if (p.recoveryDays !== undefined && (!Number.isFinite(p.recoveryDays) || p.recoveryDays < 1 / 24 || p.recoveryDays > 3650)) throw new Error("Invalid recoveryDays");
+  return { mode: p.mode, idleDays: p.idleDays, ...Object.fromEntries(["maxSessions", "maxBytes", "orphanGraceDays", "recoveryDays", "batchSize"].filter(k => p[k as keyof CleanupPolicy] !== undefined).map(k => [k, p[k as keyof CleanupPolicy]])) };
 }
 export function loadCleanupPolicy(file: string): CleanupPolicy { try { return validate(JSON.parse(fs.readFileSync(file, "utf8"))); } catch (e) { if (isMissingFileError(e)) return { ...DEFAULT }; throw e; } }
 export function saveCleanupPolicy(file: string, p: CleanupPolicy) { writeJsonAtomic(file, validate(p), false); }
@@ -31,17 +32,24 @@ const group = (key: string) => createHash("sha256").update(key).digest("hex");
 export class SessionCleanup {
   readonly policyPath: string;
   private readonly registryPath: string;
+  private readonly sessionStore: AcpSessionStore;
   private timer?: NodeJS.Timeout;
   private nextBatch?: NodeJS.Timeout;
   private collecting?: Promise<number>;
   private readonly touched = new Map<string, number>();
   private readonly intents: Array<(r: Registry) => void> = [];
-  private report = { owned: 0, active: 0, mapped: 0, unmapped: 0, ownedBytes: 0, overBudget: false, removed: 0, failures: 0, deferred: 0 };
+  private report = { owned: 0, active: 0, mapped: 0, unmapped: 0, ownedBytes: 0, overBudget: false, removed: 0, reclaimedBytes: 0, retainedForRecovery: 0, failures: 0, deferred: 0 };
   constructor(private readonly stateDir: string, readonly acpDir = resolveAntigravityAcpDirectory(), private readonly now = Date.now, private readonly isLive = live) {
     this.policyPath = path.join(stateDir, "cleanup.json");
+    this.sessionStore = new AcpSessionStore(path.join(stateDir, "sessions.json"));
     this.registryPath = path.join(stateDir, `cleanup-sessions-${createHash("sha256").update(path.resolve(acpDir)).digest("hex").slice(0, 16)}.json`);
   }
-  configure(mode: CleanupMode, idleDays = loadCleanupPolicy(this.policyPath).idleDays) { saveCleanupPolicy(this.policyPath, { ...loadCleanupPolicy(this.policyPath), mode, idleDays }); }
+  configure(mode: CleanupMode, idleDays?: number) {
+    const policy = loadCleanupPolicy(this.policyPath);
+    saveCleanupPolicy(this.policyPath, { ...policy, mode, idleDays: idleDays ?? (mode === "balanced" ? 7 : policy.idleDays),
+      ...(mode === "balanced" ? { maxSessions: policy.maxSessions ?? 50, maxBytes: policy.maxBytes ?? 512 * 1024 * 1024,
+        orphanGraceDays: policy.orphanGraceDays ?? 1, recoveryDays: policy.recoveryDays ?? 1 } : {}) });
+  }
   budget(maxSessions: number, maxBytes: number) { saveCleanupPolicy(this.policyPath, { ...loadCleanupPolicy(this.policyPath), maxSessions, maxBytes }); }
   async trackSource(id: string, file: string) {
     // A managed root independent of cwd also covers OMP named profiles.
@@ -51,8 +59,7 @@ export class SessionCleanup {
     const stat = await sourceRoot(root);
     if (await sourceId(file) !== id) return;
     await this.transaction(async registry => {
-      const mappings = JSON.parse(await afs.readFile(path.join(this.stateDir, "sessions.json"), "utf8"));
-      if (!Array.isArray(mappings)) throw new Error("Invalid mappings");
+      const mappings = await this.sessionStore.list();
       for (const record of registry.sessions) if (record.owned && mappings.some(m => m.piSessionId === id && m.acpSessionId === record.id)) {
         record.ompSource = { id, file: path.resolve(file), root, device: stat.dev, inode: stat.ino };
         delete record.sourceDeleted;
@@ -71,15 +78,21 @@ export class SessionCleanup {
         try { r = JSON.parse(await afs.readFile(this.registryPath, "utf8")); } catch (e) { if (!isMissingFileError(e)) throw e; }
         if (r.version !== 1 || !Array.isArray(r.sessions) || !r.sessions.every(v => UUID.test(v.id) && typeof v.owned === "boolean" && Number.isFinite(v.lastUsed) && Array.isArray(v.leases) &&
           (v.replaced === undefined || typeof v.replaced === "boolean") && (v.orphanedAt === undefined || Number.isFinite(v.orphanedAt)) && (v.retiredFor === undefined || /^[a-f0-9]{64}$/.test(v.retiredFor)) &&
+          (v.disposableAt === undefined || Number.isFinite(v.disposableAt)) && (v.confirmedAt === undefined || Number.isFinite(v.confirmedAt)) &&
+          (v.disposableFor === undefined || (typeof v.disposableFor === "string" && /^[a-f0-9]{64}$/.test(v.disposableFor) && Number.isFinite(v.disposableAt))) &&
           (v.sourceDeleted === undefined || typeof v.sourceDeleted === "boolean") &&
           (v.ompSource === undefined || (typeof v.ompSource.id === "string" && typeof v.ompSource.file === "string" && typeof v.ompSource.root === "string" && Number.isFinite(v.ompSource.device) && Number.isFinite(v.ompSource.inode) && (v.ompSource.missingSince === undefined || Number.isFinite(v.ompSource.missingSince)))) &&
           v.leases.every(l => typeof l.token === "string" && Number.isSafeInteger(l.pid) && l.pid > 0 && Number.isSafeInteger(l.serverPid) && l.serverPid > 0))) throw new Error("Invalid ACP cleanup registry; refusing deletion");
+        if (new Set(r.sessions.map(v => v.id.toLowerCase())).size !== r.sessions.length) throw new Error("Duplicate ACP cleanup ownership; refusing deletion");
         const actions = this.intents.slice(); for (const apply of actions) apply(r);
         for (const v of r.sessions) if (this.touched.has(v.id)) v.lastUsed = Math.max(v.lastUsed, this.touched.get(v.id)!);
         const result = await action(r), tmp = this.registryPath + "." + randomUUID() + ".tmp";
         try { await afs.writeFile(tmp, JSON.stringify(r), { mode: 0o600, flag: "wx" }); await afs.rename(tmp, this.registryPath); }
         finally { await afs.rm(tmp, { force: true }); }
-        this.intents.splice(0, actions.length); return result;
+        this.intents.splice(0, actions.length);
+        const retained = new Set(r.sessions.map(v => v.id));
+        for (const id of this.touched.keys()) if (!retained.has(id)) this.touched.delete(id);
+        return result;
       } finally { await release(); }
     });
     tails.set(this.registryPath, pending);
@@ -91,6 +104,7 @@ export class SessionCleanup {
     return this.transaction(r => {
       let v = r.sessions.find(v => v.id === id);
       if (!v) { v = { id, owned, lastUsed: this.now(), leases: [] }; r.sessions.push(v); }
+      if (v.disposableFor) throw new Error("ACP session was finally released; reconstruct a new session from OMP history");
       const token = randomUUID(); v.leases.push({ token, pid: process.pid, serverPid }); v.lastUsed = this.now(); delete v.orphanedAt;
       this.touched.set(id, v.lastUsed); return token;
     });
@@ -101,8 +115,37 @@ export class SessionCleanup {
   }
   async release(token: string, background = false) { await this.intent(r => { for (const v of r.sessions) v.leases = v.leases.filter(l => l.token !== token); }); if (background) { void this.collect(); return 0; } return this.collect(); }
   async touch(id: string) { const last = this.touched.get(id); this.touched.set(id, this.now()); if (last !== undefined && this.now() - last < 60_000) return; await this.transaction(() => {}); }
-  retire(key: string, id: string) { return this.intent(r => { const v = r.sessions.find(v => v.id === id); if (v?.owned) { v.retiredFor = group(key); v.replaced = false; } }); }
-  async confirm(key: string, replacement: string, background = false) { await this.intent(r => { for (const v of r.sessions) if (v.id !== replacement && v.retiredFor === group(key)) v.replaced = true; }); if (background) { void this.collect(); return 0; } return this.collect(); }
+  retire(key: string, id: string) { return this.intent(r => { const v = r.sessions.find(v => v.id === id); if (v?.owned) { v.retiredFor = group(key); v.replaced = false; delete v.confirmedAt; } }); }
+  async confirm(key: string, replacement: string, background = false) { let confirmed = false; await this.intent(r => { for (const v of r.sessions) if (v.id !== replacement && v.retiredFor === group(key)) { confirmed = true; v.replaced = true; v.confirmedAt ??= this.now(); } }); if (background) { if (confirmed || this.report.deferred > 0) void this.collect(); return 0; } return this.collect(); }
+  // OMP explicitly releases one-shot routing IDs after their final request.
+  // Never infer disposability from an ID suffix or a generic runtime shutdown.
+  async releaseSession(id: string) {
+    const mappings = await this.sessionStore.list();
+    const released = mappings.filter(m => m.piSessionId === id);
+    if (released.length !== 1 || mappings.filter(m => m.acpSessionId === released[0]!.acpSessionId).length !== 1) return;
+    await this.intent(registry => {
+      for (const mapping of released) {
+        const record = registry.sessions.find(v => v.owned && v.id === mapping.acpSessionId);
+        if (!record) continue;
+        // Persist the recovery marker before unmapping: after a crash either
+        // a mapping still protects it, or the marker authorizes later cleanup.
+        record.disposableAt ??= this.now();
+        record.disposableFor = group(id);
+      }
+    });
+    await this.transaction(registry => this.unmapReleased(registry));
+    void this.collect();
+  }
+  private async unmapReleased(registry: Registry) {
+    const mappings = await this.sessionStore.list();
+    for (const record of registry.sessions) {
+      if (!record.owned || !record.disposableFor || record.leases.some(l => this.isLive(l.pid) || this.isLive(l.serverPid))) continue;
+      const matches = mappings.filter(m => m.acpSessionId === record.id);
+      if (matches.length !== 1 || group(matches[0]!.piSessionId) !== record.disposableFor ||
+        mappings.filter(m => m.piSessionId === matches[0]!.piSessionId).length !== 1) continue;
+      for (const match of matches) await this.sessionStore.removeIfMatches(match.piSessionId, record.id);
+    }
+  }
   collect(): Promise<number> {
     if (this.collecting) return this.collecting;
     const pending = this.collectOnce().catch(() => { this.report.failures++; return 0; }); this.collecting = pending;
@@ -116,10 +159,14 @@ export class SessionCleanup {
   private async collectOnce() {
     const policy = loadCleanupPolicy(this.policyPath);
     return this.transaction(async registry => {
-      let mappings: Array<{ piSessionId: string; acpSessionId: string }> = [];
-      try { const p = JSON.parse(await afs.readFile(path.join(this.stateDir, "sessions.json"), "utf8")); if (!Array.isArray(p)) throw new Error("Invalid mappings"); mappings = p; } catch (e) { if (!isMissingFileError(e)) throw e; }
+      // Use the same complete validation as checkpoint restoration. An array
+      // alone cannot prove that a damaged mapping no longer protects data.
+      // Durable final-release evidence also repairs a crash between registry
+      // persistence and conditional mapping removal, including in off mode.
+      if (registry.sessions.some(v => v.disposableFor)) await this.unmapReleased(registry);
+      const mappings = await this.sessionStore.list();
       const mapped = new Set(mappings.map(v => v.acpSessionId));
-      const report = { owned: 0, active: 0, mapped: 0, unmapped: 0, ownedBytes: 0, overBudget: false, removed: 0, failures: this.report.failures, deferred: 0 };
+      const report = { owned: 0, active: 0, mapped: 0, unmapped: 0, ownedBytes: 0, overBudget: false, removed: 0, reclaimedBytes: 0, retainedForRecovery: 0, failures: this.report.failures, deferred: 0 };
       let dirs: { conversations: string; brain: string } | undefined;
       const owned = [];
       const sourceScans = new Map<string, Promise<Map<string, string>>>();
@@ -152,9 +199,8 @@ export class SessionCleanup {
                 if (!restored) {
                   // Recheck under the mapping store's own lock. A newer ACP
                   // binding must never be removed by an old cleanup snapshot.
-                  await new AcpSessionStore(path.join(this.stateDir, "sessions.json")).removeIfMatches(source.id, v.id);
-                  const latest = JSON.parse(await afs.readFile(path.join(this.stateDir, "sessions.json"), "utf8").catch(e => { if (isMissingFileError(e)) return "[]"; throw e; }));
-                  if (!Array.isArray(latest)) throw new Error("Invalid mappings");
+                  await this.sessionStore.removeIfMatches(source.id, v.id);
+                  const latest = await this.sessionStore.list();
                   if (!latest.some(m => m.acpSessionId === v.id)) { mapped.delete(v.id); v.sourceDeleted = true; }
                 }
               }
@@ -170,15 +216,23 @@ export class SessionCleanup {
       report.overBudget = over();
       if (policy.mode !== "off") for (const { v, size } of owned.sort((a, b) => a.v.lastUsed - b.v.lastUsed)) {
         if (mapped.has(v.id) || v.leases.length) continue;
-        const expired = policy.mode === "timeout" && (this.now() - v.lastUsed >= policy.idleDays * 86_400_000 || (over() && this.now() - v.orphanedAt! >= (policy.orphanGraceDays ?? 1) * 86_400_000));
-        if (!v.replaced && !v.sourceDeleted && !expired) continue;
+        const recoverable = v.replaced || v.disposableAt !== undefined;
+        // Legacy replacement records start their recovery window on the first
+        // balanced sweep. Pressure never bypasses that minimum retention.
+        if (policy.mode === "balanced" && v.replaced) v.confirmedAt ??= this.now();
+        const recovering = policy.mode === "balanced" && recoverable && this.now() - Math.max(v.confirmedAt ?? 0, v.disposableAt ?? 0, v.lastUsed) < (policy.recoveryDays ?? 1) * 86_400_000;
+        if (recovering && !v.sourceDeleted) { report.retainedForRecovery++; continue; }
+        const timeout = policy.mode === "timeout" || policy.mode === "balanced";
+        const idleSince = policy.mode === "balanced" ? Math.max(v.lastUsed, v.orphanedAt!) : v.lastUsed;
+        const expired = timeout && (this.now() - idleSince >= policy.idleDays * 86_400_000 || (over() && this.now() - v.orphanedAt! >= (policy.orphanGraceDays ?? 1) * 86_400_000));
+        if (!recoverable && !v.sourceDeleted && !expired) continue;
         if (report.removed >= (policy.batchSize ?? 8)) { report.deferred++; continue; }
         try {
           dirs ??= await this.verifyRoot(); const targets = this.targets(v.id, dirs);
           for (const target of targets) await this.inspect(target);
           for (const target of targets) await afs.rm(target, { recursive: true, force: true });
           registry.sessions = registry.sessions.filter(r => r !== v); this.touched.delete(v.id);
-          report.removed++; report.owned--; report.unmapped--; report.ownedBytes -= size;
+          report.removed++; report.owned--; report.unmapped--; report.ownedBytes -= size; report.reclaimedBytes += size;
         } catch { report.failures++; }
       }
       registry.sessions = registry.sessions.filter(v => v.owned || v.leases.length);

@@ -108,7 +108,14 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageCommands?.delete(id);
   }
   async retireForReplacement(key: string, id: string) {
-    this.dropSessionState(id);
+    const unloaded = !Object.keys(this.getSessionState(id)).length;
+    if (!this.activePrompts) this.dropSessionState(id);
+    if (unloaded) {
+      const token = this.cleanupLeases?.get(id);
+      if (token) {
+        try { await this.cleanup?.release(token, true); this.cleanupLeases.delete(id); } catch { /* Retry on close. */ }
+      }
+    }
     try { await this.cleanup?.retire(key, id); } catch { /* Retried by the cleanup ledger. */ }
   }
   async confirmReplacement(key: string, id: string) {

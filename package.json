@@ -1,6 +1,6 @@
 {
   "name": "omp-antigravity-acp-provider",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "ompAcpBundle": 1,
   "description": "Google Antigravity ACP provider for Oh My Pi (OMP), with tool bridging and per-model thinking; derived from zacbemis/pi-antigravity-acp-provider",
   "type": "module",
@@ -22,7 +22,7 @@
   },
   "files": [
     "extension/",
-    "scripts/build.mjs",
+    "!extension/vendor/",
     "licenses/",
     "README.md",
     "LICENSE",
@@ -44,7 +44,8 @@
     "test:cleanup": "node scripts/test-cleanup-runtime.ts",
     "test:continuity": "node scripts/test-request-continuity.ts && node scripts/test-graceful-cancellation.ts",
     "test:omp-compaction": "bun scripts/test-omp-compaction.ts",
-    "check": "npm run build && npm test && npm run test:cleanup && npm run test:continuity && npm run test:graph && npm run test:commands",
+    "test:omp-sessions": "node scripts/test-omp-session-switch.ts",
+    "check": "npm run build && npm test && npm run test:cleanup && npm run test:continuity && npm run test:graph && npm run test:commands && npm run test:auth",
     "prepack": "npm run build",
     "prepublishOnly": "npm run check",
     "test:graph": "bun scripts/test-load-graph.ts"

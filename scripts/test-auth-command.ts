@@ -122,6 +122,8 @@ try {
   assert.ok(loginNotice.includes("Antigravity Google login finished — fresh sign-in"), notices.join(" | "));
   assert.ok(loginNotice.includes("fresh sign-in"), notices.join(" | "));
   await assert.rejects(fs.access(path.join(geminiHome, "antigravity-acp", "acp_token.json")));
+  await assert.rejects(fs.access(path.join(stateDir, "sessions.json")),
+    "Fresh login must not restore ACP mappings owned by the previous Google account");
   assert.equal(JSON.parse(await fs.readFile(path.join(geminiHome, "antigravity-acp", "settings.json"), "utf8").catch(() => "{}")).auth, undefined);
   assert.ok(keychainCalls.includes("remove"), "Login must clear stored credentials for a fresh sign-in");
   // login must refuse while an Antigravity request is active.
@@ -211,6 +213,17 @@ try {
   await settle();
   assert.equal(followNotices().length, 1, "A quick re-login must cancel the followed logout");
 
+
+  // Command-driven /antigravity-acp login after a logout cancels any pending
+  // followed logout and restores the config apiKey fallback.
+  storeMarker();
+  const pendingRemove = credentialStore.remove("antigravity-acp");
+  await pendingRemove;
+  assert.equal(registrations[registrations.length - 1], false);
+  await command.handler("login", context);
+  assert.equal(registrations[registrations.length - 1], true, "Command login must restore the config apiKey fallback");
+  await settle();
+  assert.equal(followNotices().length, 1, "Command login must cancel any pending followed logout");
   // OMP_ACP_FOLLOW_LOGOUT=0 keeps OMP /logout marker-only.
   process.env.OMP_ACP_FOLLOW_LOGOUT = "0";
   storeMarker();

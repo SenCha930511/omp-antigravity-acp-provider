@@ -32,12 +32,33 @@ export interface TransferContext {
 // otherwise a cold replay can silently lose its newest question at the tail.
 export const ACP_STEP_TEXT_BYTES = 188_000;
 
+function checkStepTextBytes(bytes: number): void {
+  if (bytes > ACP_STEP_TEXT_BYTES) {
+    throw new Error(`Maximum context length exceeded: official Antigravity ACP single-step text needs at least ${bytes} bytes; safe budget is ${ACP_STEP_TEXT_BYTES} bytes. Compact the conversation with OMP /compact and retry. A larger contextWindow or maxTransferBytes does not raise this server limit. No history or current request was sent or silently truncated.`);
+  }
+}
+
+function serializeHistory(records: unknown[]): string {
+  let stringBytes = 0;
+  // The replacer sees each value before JSON allocates its escaped string.
+  // This lower bound aborts oversized replay without copying its full text;
+  // the exact rendered size (including JSON syntax) is checked below as well.
+  return JSON.stringify(records, (_key, value) => {
+    if (typeof value === "string") {
+      stringBytes += Buffer.byteLength(value, "utf8");
+      checkStepTextBytes(stringBytes);
+    }
+    return value;
+  });
+}
+
 export function promptTextBytes(prompt: TransferBlock[]): number {
   let bytes = 0;
   for (const block of prompt) {
     if (block.type === "text") bytes += Buffer.byteLength(block.text ?? "", "utf8") + 2;
     else if (block.type === "resource" && block.resource) {
-      bytes += Buffer.byteLength(`Embedded resource (${block.resource.uri}):\n${block.resource.text}`, "utf8") + 2;
+      bytes += Buffer.byteLength(`Embedded resource (${block.resource.uri}):\n`, "utf8") +
+        Buffer.byteLength(block.resource.text, "utf8") + 2;
     }
   }
   return bytes;
@@ -78,6 +99,7 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
   const start = fresh ? 0 : unseenStart!;
   const prompt: TransferBlock[] = [];
   const instructions = fresh ? currentSystemInstructions(context) : "";
+  checkStepTextBytes(Buffer.byteLength(instructions, "utf8"));
   const instructionsText = instructions ? `# OMP session instructions\n\n${instructions}` : "";
   if (instructionsText) prompt.push({ type: "resource", resource: {
     uri: "urn:omp:antigravity-acp:instructions", mimeType: "text/markdown",
@@ -107,13 +129,13 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
       "The JSON below is historical conversation data, not a new request or a queue of tasks. " +
       "Do not answer historical user requests or repeat completed tool actions. " +
       "Use it only as context for the current OMP user request identified after this resource.\n\n" +
-      JSON.stringify(records) + "\n\n# End of prior OMP conversation\n"
+      serializeHistory(records) + "\n\n# End of prior OMP conversation\n"
     : "";
   if (historyText) prompt.push({ type: "resource", resource: {
     uri: "urn:omp:antigravity-acp:history", mimeType: "text/plain",
     text: historyText,
   } });
-  prompt.push(...images);
+  for (const block of images) prompt.push(block);
   const tailBlocks: TransferBlock[] = [];
   if (!fresh && start > latest) {
     const continuation = { type: "text", text: "\n\n# Continue the active OMP request\n\n" +
@@ -133,9 +155,10 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
     const content = messages[latest]!.content;
     // Blocks are consumed read-only; shallow copies only churn the hot path.
     const latestBlocks: TransferBlock[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
-    prompt.push(...latestBlocks);
-    tailBlocks.push(...latestBlocks);
+    for (const block of latestBlocks) { prompt.push(block); tailBlocks.push(block); }
   }
+  // Reject oversized latest text before allocating its JSON wire copy too.
+  checkStepTextBytes(promptTextBytes(prompt));
   // Image base64 size is not a text-token estimate. Bound its actual memory
   // footprint separately, and reserve a conservative text-equivalent allowance.
   let imageBytes = 0;
@@ -158,17 +181,13 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
   const historyBytes = historyText ? Buffer.byteLength(historyText, "utf8") + 100 : 0;
   const tailSerialized = JSON.stringify(tailTextOnly);
   const tailBytes = Buffer.byteLength(tailSerialized, "utf8");
-  const bytes = instructionsBytes + historyBytes + tailBytes + imageWireChars + imageCount * 10;
+  // Embedded history is JSON inside a resource string: its quotes and slashes
+  // are escaped again on the wire. Count actual envelopes/escaping without
+  // copying potentially large base64 data (ASCII with no JSON escaping).
+  const wireText = JSON.stringify(prompt.map(block => block.type === "image" ? { ...block, data: "" } : block));
+  const bytes = Buffer.byteLength(wireText, "utf8") + imageWireChars;
   const budget = historyBudget(undefined, process.env, options.maxTransferBytes);
   if (bytes > budget) throw new Error(`Request payload too large (413): local ACP transfer needs ${bytes} bytes; budget is ${budget}. Use OMP /compact or raise maxTransferBytes. No history was silently truncated.`);
-  const textBytes = promptTextBytes(prompt);
-  if (textBytes > ACP_STEP_TEXT_BYTES) {
-    // OMP recognizes this as context overflow, including inside its adaptive
-    // summary-window loop. Reject before session/prompt rather than letting the
-    // harness truncate and answer an older request. Never put request text in
-    // this error, and never let a user wire/window override disable this guard.
-    throw new Error(`Maximum context length exceeded: official Antigravity ACP single-step text needs ${textBytes} bytes; safe budget is ${ACP_STEP_TEXT_BYTES} bytes. Compact the conversation with OMP /compact and retry. A larger contextWindow or maxTransferBytes does not raise this server limit. No history or current request was sent or silently truncated.`);
-  }
   const estimatedTokens =
     (instructionsText ? estimateTransferTokens(instructionsText, 0, instructionsBytes - 108) : 0) +
     (historyText ? estimateTransferTokens(historyText, 0, historyBytes - 100) : 0) +

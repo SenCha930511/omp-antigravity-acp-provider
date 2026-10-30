@@ -23,7 +23,7 @@ function validate(options: unknown, allowUsage: boolean): void {
       if (value !== "auto" && value !== "off") throw new Error("usageMode must be auto or off");
       continue;
     }
-    const range = ranges[key as keyof ContextOptions];
+    const range = Object.hasOwn(ranges, key) ? ranges[key as keyof ContextOptions] : undefined;
     if (!range || !Number.isSafeInteger(value) || (value as number) < range[0] || (value as number) > range[1]) {
       throw new Error(`Invalid context setting ${key}${range ? `; expected ${range[0]}..${range[1]}` : ""}`);
     }
@@ -54,7 +54,8 @@ export function saveContextSettings(file: string, settings: ContextSettings) {
 export function updateContextSettings(settings: ContextSettings, target: string, key: string, value: number | string): ContextSettings {
   if (["__proto__", "constructor", "prototype"].includes(target)) throw new Error("Invalid model ID");
   const next = structuredClone(settings);
-  const options: Record<string, unknown> = target === "default" ? next.defaults : (next.models[target] ??= {});
+  const options: Record<string, unknown> = target === "default" ? next.defaults
+    : Object.hasOwn(next.models, target) ? next.models[target]! : (next.models[target] = {});
   options[key] = value;
   validate(options, target === "default");
   return next;

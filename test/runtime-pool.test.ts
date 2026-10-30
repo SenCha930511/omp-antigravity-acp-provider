@@ -116,3 +116,30 @@ test("closeIdle closes idle runtime but preserves leased or busy entry", async (
   // 4. missing entry
   assert.equal(await pool.closeIdle("non-existent"), false);
 });
+
+test("acquiring active work does not spend an idle slot or evict a reusable runtime", async () => {
+  let serial = 0;
+  const closed: number[] = [];
+  const pool = new SessionRuntimePool(() => ({ id: ++serial }), async entry => { closed.push(entry.id); },
+    { timeoutMs: 0, maxIdleEntries: 1 });
+  const idle = pool.get("idle");
+  const active = pool.acquire("active");
+  assert.equal(pool.peek("idle"), idle);
+  assert.deepEqual(closed, []);
+  active.release();
+  assert.deepEqual(closed, [idle.id]);
+  await pool.closeAll();
+});
+
+test("concurrent global shutdowns both wait for teardown", async () => {
+  const gate = Promise.withResolvers<void>();
+  const pool = new SessionRuntimePool(() => ({}), () => gate.promise);
+  pool.get("entry");
+  const first = pool.closeAll();
+  let done = false;
+  const second = pool.closeAll().then(() => { done = true; });
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(done, false);
+  gate.resolve();
+  await Promise.all([first, second]);
+});

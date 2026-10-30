@@ -8,6 +8,8 @@ import { SessionRuntimePool } from "./runtime-pool.ts";
 import { createStructuredFingerprintMemo } from "./structured-fingerprint.ts";
 import { Diagnostics, instrumentRuntime } from "./diagnostics.ts";
 import { stableTools } from "./tool-order.ts";
+import { toolDeclarations, normalizeOmpSystemDeltas, type OmpToolDeclaration } from "./omp-context.ts";
+import { OmpSessionLifecycle, type OmpProviderSessionState } from "./omp-session-lifecycle.ts";
 import { loadContextSettings } from "./context-settings.ts";
 import { selectRuntimeModel, type PublicCatalogModel } from "./model-catalog.ts";
 import { TOOL_ROUTING } from "./tool-routing.ts";
@@ -63,7 +65,8 @@ export default async function (pi: OmpHostApi) {
 }
 
 // Explicit state injection keeps command integration tests away from user data.
-export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
+export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
+  createConnection = (options: ConstructorParameters<typeof TierConnection>[0]): TierConnection => new TierConnection(options)) {
   const configPath = path.join(stateDir, "config.json");
   const cachePath = path.join(stateDir, "models-cache.json");
   const toolPolicyPath = path.join(stateDir, "omp-tools.json");
@@ -98,8 +101,8 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
 
   const connections = new Set<TierConnection>();
   const idleTimeoutMs = Number(process.env.OMP_ACP_IDLE_TIMEOUT_MS ?? 300_000);
-  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 0 || (idleTimeoutMs > 0 && idleTimeoutMs < 1000)) {
-    throw new Error("OMP_ACP_IDLE_TIMEOUT_MS must be 0 (disabled) or an integer of at least 1000");
+  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 0 || idleTimeoutMs > 2_147_483_647 || (idleTimeoutMs > 0 && idleTimeoutMs < 1000)) {
+    throw new Error("OMP_ACP_IDLE_TIMEOUT_MS must be 0 (disabled) or an integer between 1000 and 2147483647");
   }
   const maxIdleEntries = Number(process.env.OMP_ACP_MAX_IDLE_RUNTIMES ?? 2);
   if (!Number.isSafeInteger(maxIdleEntries) || maxIdleEntries < 0) throw new Error("OMP_ACP_MAX_IDLE_RUNTIMES must be a nonnegative integer (0 disables the cap)");
@@ -109,15 +112,18 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
   let lastToolAudit: ToolAuditSummary | undefined;
   let cachedToolProjection: {
     revision: string;
-    tools: { name: string }[];
+    tools: OmpToolDeclaration[];
     availableNames: string;
     audit: ToolAuditSummary;
   } | undefined;
 
+  const lifecycle = new OmpSessionLifecycle(id => runtimes.close(id), async id => {
+    if (id) await cleanup.releaseSession(id);
+  });
   const runtimes = new SessionRuntimePool<RuntimeBundleView>(() => {
     const ownedConnections = new Set<TierConnection>();
     const runtime = new AntigravityRuntime((options: ConstructorParameters<typeof TierConnection>[0]) => {
-      const connection = new TierConnection({
+      const connection = createConnection({
         ...options,
         ompNativeTools: toolPolicy.nativeTools,
         ompDebugToolUpdates: toolPolicy.debugToolUpdates,
@@ -139,15 +145,18 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
       provider: createAntigravityProvider(runtime).provider,
       isBusy: () => [...ownedConnections].some(connection => connection.activePrompts > 0),
     };
-  }, bundle => bundle.runtime.close(), { timeoutMs: idleTimeoutMs, maxIdleEntries, canDispose: bundle => !bundle.isBusy() });
+  }, (bundle, id) => lifecycle.disposeRuntime(id, bundle, () => bundle.runtime.close()),
+  { timeoutMs: idleTimeoutMs, maxIdleEntries, canDispose: bundle => !bundle.isBusy() });
+
+  async function closePool() { await lifecycle.closeAll(); await runtimes.closeAll(); }
 
   const sessionIdOf = (ctx: OmpCommandContext | undefined): string | undefined => ctx?.sessionManager?.getSessionId?.();
   pi.on("session_shutdown", async (_event: unknown, ctx: OmpCommandContext) => {
     const sessionId = sessionIdOf(ctx);
     if (sessionId) {
-      await Promise.all([runtimes.close(sessionId), runtimes.closeIdle()]);
+      await Promise.all([lifecycle.closeSession(sessionId), lifecycle.waitClosing(), runtimes.closeIdle()]);
     } else {
-      await runtimes.closeAll();
+      await closePool();
     }
     await sessionStore.flush();
     if (!runtimes.values().length) await cleanup.stop();
@@ -172,7 +181,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
       await sessionStore.clear();
       clearAntigravityCredentials();
     },
-    closeAllRuntimes: () => runtimes.closeAll(),
+    closeAllRuntimes: closePool,
     onSyncProvider: syncProviderRegistration,
   });
 
@@ -236,7 +245,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
       getSavedSessionCount: savedSessionCount,
       getPermissionMode: () => permissionMode,
       getAllRuntimes: () => runtimes.values(),
-      closeAllRuntimes: () => runtimes.closeAll(),
+      closeAllRuntimes: closePool,
       onModelsUpdated: models => {
         initialModels = models;
         adapted.registerProvider();
@@ -266,11 +275,11 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
         },
         streamSimple(
           model: { id: string },
-          context: { tools?: Array<{ name: string }>; systemPrompt?: string; messages: unknown[] },
-          options?: { sessionId?: string; reasoning?: string; signal?: AbortSignal },
+          context: { tools?: OmpToolDeclaration[]; systemPrompt?: string | string[]; messages: unknown[] },
+          options?: { sessionId?: string; reasoning?: string; signal?: AbortSignal; providerSessionState?: Map<string, OmpProviderSessionState> },
         ) {
-          const inputTools = context.tools ?? [];
-          let tools: Array<{ name: string }>;
+          const inputTools = toolDeclarations(context.tools ?? []);
+          let tools: OmpToolDeclaration[];
           let availableNames: string;
           const cached = cachedToolProjection;
           const revision = toolProjectionMemo(inputTools, () => String(++toolRevision));
@@ -298,7 +307,8 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
           const routedContext = {
             ...context,
             tools,
-            systemPrompt: `${context.systemPrompt ?? ""}\n\n${TOOL_ROUTING}\nOMP tool names: ${availableNames}`,
+            messages: normalizeOmpSystemDeltas(context.messages),
+            systemPrompt: `${Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n\n") : context.systemPrompt ?? ""}\n\n${TOOL_ROUTING}\nOMP tool names: ${availableNames}`,
           };
           if (process.env.OMP_ACP_TRACE === "1") {
             console.error("[ACP tools]", JSON.stringify(lastToolAudit));
@@ -306,17 +316,21 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
           // OMP needs a stream synchronously. Defer runtime setup behind it so
           // loading/selecting/listing models performs no ACP process activity.
           const deferred = new PiEventWriter(model);
+          const ticket = lifecycle.capture(options?.sessionId, options?.providerSessionState);
           void (async () => {
             try {
               if (options?.signal?.aborted) throw new Error("ACP request cancelled before startup");
+              await lifecycle.ready(ticket);
               await diagnostics.measure("runtime.prepare", prepareRuntime);
               if (options?.signal?.aborted) throw new Error("ACP request cancelled during startup");
               if (!catalogStore.upstreamModels.has(model.id)) await catalogStore.refresh(contextSettings);
               const original = catalogStore.upstreamModels.get(model.id);
               if (!original) throw new Error(`Antigravity model was not discovered: ${model.id}. Run /antigravity-acp refresh.`);
+              await lifecycle.ready(ticket);
               const lease = runtimes.acquire(options?.sessionId);
               const { runtime, provider } = lease.value;
               try {
+                lifecycle.attach(ticket, lease.value);
                 const stream = provider.streamSimple(selectRuntimeModel(original, options?.reasoning), routedContext, options);
                 for await (const event of stream) {
                   const message = event.message ?? event.partial;
@@ -331,7 +345,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
               } finally { lease.release(); }
             } catch (error) {
               deferred.fail(error, options?.signal?.aborted === true);
-            }
+            } finally { lifecycle.finish(ticket); }
           })();
           return deferred.stream;
         },
@@ -358,6 +372,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string) {
                 },
                 prompt: (request: { message: string; placeholder?: string }) => callbacks.onPrompt({ message: request.message, placeholder: request.placeholder }),
               });
+              auth.noteLoginSucceeded();
               // Record the signed-in account on the marker credential so OMP's
               // account list can label it; the email is identity data, not a secret.
               const email = antigravityAccountEmail();

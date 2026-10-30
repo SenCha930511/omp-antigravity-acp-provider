@@ -72,6 +72,11 @@ const result = await build({
             replacement: "buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy })",
           },
           {
+            name: "workspace and parked model boundaries",
+            anchor: "if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||\n\t\t\tbinding.toolFingerprint !== piToolFingerprint(tools)) {",
+            replacement: "if (binding.cwd !== process.cwd() ||\n\t\t\t(binding.turnCompletion && binding.modelId !== acpModelId) ||\n\t\t\tbinding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||\n\t\t\tbinding.toolFingerprint !== piToolFingerprint(tools)) {",
+          },
+          {
             name: "new request supersedes continuation",
             anchor: "\t\t// A permission tool result resumes the still-running ACP prompt rather than",
             replacement: [
@@ -115,6 +120,36 @@ const result = await build({
             ].join("\n"),
           },
           {
+            name: "reject duplicate active input without touching its owner",
+            anchor: "\t\t// A permission tool result resumes the still-running ACP prompt rather than",
+            replacement: [
+              "\t\tif (binding.turnCompletion && !binding.abortRequested &&",
+              "\t\t\tcontext.messages.length === binding.pendingContextCount &&",
+              "\t\t\tmessagesFingerprint(context.messages) === binding.pendingContextFingerprint) {",
+              "\t\t\tthrow new AntigravityAcpError('invalid_input', 'ACP request/continuation is already in progress for this session');",
+              "\t\t}",
+              "\t\t// A permission tool result resumes the still-running ACP prompt rather than",
+            ].join("\n"),
+          },
+          {
+            name: "remember queued duplicate admission",
+            anchor: "const previous = this.queues.get(key) ?? Promise.resolve();",
+            replacement: "const ompQueuedBehindTurn = this.queues.has(key);\n\t\tconst previous = this.queues.get(key) ?? Promise.resolve();",
+          },
+          {
+            name: "reject an already completed queued snapshot before reconstruction",
+            anchor: "// A queued caller may hold an obsolete binding after shutdown/mode changes.\n\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);",
+            replacement: [
+              "// A queued caller may hold an obsolete binding after shutdown/mode changes.",
+              "\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);",
+              "\t\t\tif (ompQueuedBehindTurn && binding.modelId === acpModelId && !binding.ompCancelledCheckpoint && binding.expectedAssistantFingerprint &&",
+              "\t\t\t\tcontext.messages.length === binding.messageCount &&",
+              "\t\t\t\tmessagesFingerprint(context.messages) === binding.historyFingerprint) {",
+              "\t\t\t\tthrow new AntigravityAcpError('invalid_input', 'ACP request was already processed by the preceding turn; refusing duplicate dispatch');",
+              "\t\t\t}",
+            ].join("\n"),
+          },
+          {
             name: "reset cancellation acknowledgement per prompt",
             anchor: "binding.instructionsFingerprint = instructionFingerprint(context);",
             replacement: "binding.ompTerminalStopReason = undefined;\n\t\t\t" + "binding.instructionsFingerprint = instructionFingerprint(context);",
@@ -128,7 +163,7 @@ const result = await build({
             name: "generated assistant boundary must match retained OMP history",
             anchor: "binding.needsReconstruction || binding.mode !== this.permissionMode ||",
             replacement: [
-              "binding.needsReconstruction ||",
+              "binding.needsReconstruction || binding.cwd !== process.cwd() ||",
               "\t\t\t\t(binding.expectedAssistantFingerprint && context.messages[binding.messageCount]?.role === 'assistant' &&",
               "\t\t\t\t\tmessageFingerprint(context.messages[binding.messageCount]) !== binding.expectedAssistantFingerprint) ||",
               "\t\t\t\t((binding.ompExpectedAssistantHasOutput || (binding.ompCancelledCheckpoint && binding.ompCancelledHadOutput)) &&",
@@ -159,6 +194,21 @@ const result = await build({
             name: "cleanup confirm",
             anchor: "this.persistBinding(binding);\n\t\t\tswitch (response.stopReason)",
             replacement: "if (response.stopReason !== 'cancelled') binding.ompCancelledCheckpoint = false;\n\t\t\tthis.persistBinding(binding);\n\t\t\tif (response.stopReason === 'end_turn') { binding.connection.confirmReplacement?.(key, binding.session.sessionId); if (!persistent) binding.connection.discardSession?.(binding.session.sessionId); }\n\t\t\tswitch (response.stopReason)",
+          },
+          {
+            name: "discard discovery session",
+            anchor: "const session = await connection.newSession(process.cwd(), signal);\n\t\t\tthis.assertEpoch(epoch);\n\t\t\treturn sessionModels(session)?.availableModels ?? [];",
+            replacement: "const session = await connection.newSession(process.cwd(), signal);\n\t\t\ttry { this.assertEpoch(epoch); return sessionModels(session)?.availableModels ?? []; } finally { await connection.discardSession?.(session.sessionId); }",
+          },
+          {
+            name: "discard login verification session",
+            anchor: "await authentication;\n\t\t\tthis.assertEpoch(epoch);\n\t\t\tawait connection.newSession(process.cwd(), signal);",
+            replacement: "await authentication;\n\t\t\tthis.assertEpoch(epoch);\n\t\t\tconst session = await connection.newSession(process.cwd(), signal);\n\t\t\ttry { this.assertEpoch(epoch); } finally { await connection.discardSession?.(session.sessionId); }",
+          },
+          {
+            name: "discard api-key verification session",
+            anchor: "await authenticateForCredential(connection, initialize, apiKey, signal);\n\t\t\tthis.assertEpoch(epoch);\n\t\t\tawait connection.newSession(process.cwd(), signal);",
+            replacement: "await authenticateForCredential(connection, initialize, apiKey, signal);\n\t\t\tthis.assertEpoch(epoch);\n\t\t\tconst session = await connection.newSession(process.cwd(), signal);\n\t\t\ttry { this.assertEpoch(epoch); } finally { await connection.discardSession?.(session.sessionId); }",
           },
         ];
         let contents = await fs.readFile(file, "utf8");
@@ -227,8 +277,16 @@ const result = await build({
             binding.ompInFlight = false;`],
           ['if (!binding.piSessionId) return;', 'if (!binding.piSessionId || binding.ompInvalidated) return;'],
           ['acpModelId: binding.modelId,', 'acpModelId: binding.modelId,\n ompCheckpointVersion: 1, ompInFlight: binding.ompInFlight === true, ompExpectedAssistantHasOutput: binding.ompExpectedAssistantHasOutput === true,'],
+          ['await this.sessionStore?.remove(saved.piSessionId);',
+            'await this.ompRemoveSaved(saved.piSessionId, saved.acpSessionId);'],
+          ['session ??= await connection.newSession(cwd, signal, mcpServers);',
+            'if (!session && saved) { await connection.retireForReplacement?.(key, saved.acpSessionId); await this.ompRemoveSaved(saved.piSessionId, saved.acpSessionId); }\n\t\t\tsession ??= await connection.newSession(cwd, signal, mcpServers);'],
+          ['if (!supportsMode(session, mode)) {\n\t\t\t\tif (piSessionId) await this.sessionStore?.remove(piSessionId);',
+            'if (!supportsMode(session, mode)) {\n\t\t\t\tif (restored && saved) { await connection.retireForReplacement?.(key, saved.acpSessionId); await this.ompRemoveSaved(saved.piSessionId, saved.acpSessionId); } else await connection.discardSession?.(session.sessionId);'],
           ['if (binding.needsReconstruction) { await this.sessionStore?.remove(binding.piSessionId); return; }',
-            'if (binding.needsReconstruction) { await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId); return; }'],
+            'if (binding.needsReconstruction) { binding.connection.retireForReplacement?.(binding.key, binding.session.sessionId); await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId); return; }'],
+          ['binding.needsReconstruction = true;\n\t\t\tif (binding.piSessionId) await this.sessionStore?.remove(binding.piSessionId);',
+            'binding.needsReconstruction = true;\n\t\t\tbinding.connection.retireForReplacement?.(binding.key, binding.session.sessionId);\n\t\t\tif (binding.piSessionId) await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId);'],
         ];
         for (const [anchor, replacement] of continuityPatches) {
           if (contents.split(anchor).length !== 2) throw new Error(`Pinned continuity seam changed: ${anchor}`);
@@ -301,7 +359,10 @@ const result = await build({
           if (removeSaved) binding.ompInvalidated = true;
           if (binding.ompDropPromise) {
             await binding.ompDropPromise;
-            if (removeSaved && binding.piSessionId) await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId);
+            if (removeSaved) {
+              binding.connection.retireForReplacement?.(key, binding.session.sessionId);
+              if (binding.piSessionId) await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId);
+            }
             return;
           }
           const dropping = (async () => {

@@ -32,6 +32,7 @@ function factory() {
     async prompt() { if (fail) throw new Error("synthetic replacement failure"); return { stopReason }; },
     async retireForReplacement(key: string, session: string) { await cleanup.retire(key, session); },
     async confirmReplacement(key: string, session: string) { await cleanup.confirm(key, session); },
+    async discardSession(session: string) { await cleanup.retire(`discovery:${session}`, session); await cleanup.confirm(`discovery:${session}`, "discovery-complete"); },
     async close() {
       if (!processState.alive) return;
       processState.alive = false;
@@ -54,6 +55,10 @@ async function turn(text: string) {
 }
 try {
   assert.ok((await turn("original history")).some(e => e.type === "done"));
+  const discovered = await runtime.discoverModels();
+  assert.equal(discovered.length, 1);
+  const discoveryId = connections.at(-1).id;
+  assert.equal(fs.existsSync(path.join(acpDir, "conversations", `${discoveryId}.db`)), false, "Discovery session must be discarded and cleaned on close");
   const first = connections[0].id;
   fail = true;
   assert.ok((await turn("compacted summary")).some(e => e.type === "error"));
@@ -83,6 +88,14 @@ try {
     parent.resumeSession = async () => { assert.ok(leased, "Lease must exist before official resume dispatch"); return {}; };
     parent.close = async function() { this.process.alive = false; };
     await tier.resumeSession(id, root);
+    tier.getSessionState = () => ({});
+    let unloadedReleased = false;
+    tier.cleanup.release = () => { unloadedReleased = true; };
+    tier.cleanup.retire = () => {};
+    await tier.retireForReplacement("sid:fixture", id);
+    assert.ok(unloadedReleased, "Failed restore must release its pre-acquired lease before replacement runs");
+    tier.cleanupLeases.set(id, "lease");
+    tier.cleanup.release = () => { assert.equal(tier.process.alive, false); released = true; };
     await tier.close();
     assert.ok(released);
   } finally { parent.resumeSession = originalResume; parent.close = originalClose; }

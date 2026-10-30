@@ -8,17 +8,22 @@ export class SessionRuntimePool<T> {
 
   constructor(
     private readonly create: () => T,
-    private readonly dispose: (entry: T) => Promise<void>,
+    private readonly dispose: (entry: T, sessionId?: string) => Promise<void>,
     private readonly idle: { timeoutMs: number; maxIdleEntries?: number; canDispose?: (entry: T) => boolean } = { timeoutMs: 0 },
   ) {}
 
-  get(sessionId?: string): T {
+  private touch(sessionId?: string): T {
     let entry = this.entries.get(sessionId);
     if (!entry) {
       entry = this.create();
       this.entries.set(sessionId, entry);
     }
     this.entries.delete(sessionId); this.entries.set(sessionId, entry);
+    return entry;
+  }
+
+  get(sessionId?: string): T {
+    const entry = this.touch(sessionId);
     this.schedule(sessionId, entry);
     this.trim(entry);
     return entry;
@@ -30,9 +35,12 @@ export class SessionRuntimePool<T> {
     return this.entries.get(sessionId);
   }
   acquire(sessionId?: string) {
-    const value = this.get(sessionId);
+    // Establish the lease before enforcing the idle cap: active work must not
+    // evict a warm runtime merely by temporarily appearing to be idle.
+    const value = this.touch(sessionId);
     this.leases.set(value, (this.leases.get(value) ?? 0) + 1);
     this.clearTimer(value);
+    this.trim();
     let released = false;
     return { value, release: () => {
       if (released) return;
@@ -46,11 +54,12 @@ export class SessionRuntimePool<T> {
   private trim(protectedEntry?: T) {
     const cap = this.idle.maxIdleEntries ?? 0;
     if (!cap) return;
-    const idle = [...this.entries].filter(([, entry]) => !this.leases.has(entry) && this.idle.canDispose?.(entry) !== false);
-    let remaining = idle.length;
-    for (const [key, entry] of idle) {
+    const isIdle = (entry: T) => !this.leases.has(entry) && this.idle.canDispose?.(entry) !== false;
+    let remaining = 0;
+    for (const entry of this.entries.values()) if (isIdle(entry)) remaining++;
+    for (const [key, entry] of this.entries) {
       if (remaining <= cap) break;
-      if (entry === protectedEntry) continue;
+      if (entry === protectedEntry || !isIdle(entry)) continue;
       void this.close(key).catch(() => {});
       remaining--;
     }
@@ -92,17 +101,21 @@ export class SessionRuntimePool<T> {
     this.entries.delete(sessionId);
     if (entry) {
       this.clearTimer(entry); this.leases.delete(entry);
-      const pending = this.dispose(entry);
-      this.disposing.add(pending);
-      try { await pending; } finally { this.disposing.delete(pending); }
+      await this.disposeEntry(entry, sessionId);
     }
   }
 
+  private async disposeEntry(entry: T, sessionId?: string): Promise<void> {
+    const pending = this.dispose(entry, sessionId);
+    this.disposing.add(pending);
+    try { await pending; } finally { this.disposing.delete(pending); }
+  }
+
   async closeAll(): Promise<void> {
-    const entries = this.values();
+    const entries = [...this.entries];
     this.entries.clear();
-    for (const entry of entries) { this.clearTimer(entry); this.leases.delete(entry); }
-    await Promise.allSettled(entries.map(entry => this.dispose(entry)));
+    for (const [, entry] of entries) { this.clearTimer(entry); this.leases.delete(entry); }
+    await Promise.allSettled(entries.map(([key, entry]) => this.disposeEntry(entry, key)));
     await Promise.allSettled(this.disposing);
   }
 }

@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { SessionCleanup, saveCleanupPolicy } from "../extension/session-cleanup.ts";
+import { AcpSessionStore } from "../extension/session-store.ts";
 
 function fixture(t: any) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-acp-cleanup-")));
@@ -91,9 +92,14 @@ test("deleted-source reconciliation recovers after mapping removal without losin
 test("an old mapping without a verified journal source is never inferred deleted", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
-  fs.writeFileSync(path.join(f.root, "state", "sessions.json"), JSON.stringify([{ piSessionId: "unknown", acpSessionId: id }]));
+  fs.writeFileSync(path.join(f.root, "state", "sessions.json"), JSON.stringify([{
+    piSessionId: "unknown", acpSessionId: id, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now(),
+  }]));
   await f.cleaner.release(token); f.advance(100); await f.cleaner.collect();
   assert.ok(f.exists(id));
+  assert.equal(f.cleaner.status().mapped, 1, "A valid legacy mapping is protected without deletion-source evidence");
+  assert.equal(f.cleaner.status().failures, 0);
 });
 
 test("conservative cleanup waits for successful replacement AND old process release", async t => {
@@ -208,7 +214,10 @@ test("quota warns in conservative mode; timeout evicts only idle unmapped owned 
   for (const id of [mapped, orphan]) { const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.release(token); }
   await f.cleaner.acquire(active, true, 987654);
   const token = await f.cleaner.acquire(foreign, false, 987654); await f.cleaner.release(token);
-  fs.writeFileSync(path.join(f.root, "state/sessions.json"), JSON.stringify([{ acpSessionId: mapped }]));
+  fs.writeFileSync(path.join(f.root, "state/sessions.json"), JSON.stringify([{
+    piSessionId: "mapped", acpSessionId: mapped, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now(),
+  }]));
   f.cleaner.budget(1, 1);
   assert.equal(await f.cleaner.collect(), 0); assert.equal(f.cleaner.status().overBudget, true);
   f.cleaner.configure("timeout", 100); f.advance(2);
@@ -245,4 +254,198 @@ test("malformed mappings block deletion and asynchronous directory inspection yi
   for (let i = 0; i < 100; i++) fs.writeFileSync(path.join(f.acp, "brain", id, String(i)), "fixture");
   let tick = false; const timer = setTimeout(() => { tick = true; }, 0);
   assert.equal(await f.cleaner.collect(), 1); clearTimeout(timer); assert.equal(tick, true);
+});
+
+test("malformed individual mapping records preserve every cleanup candidate", async t => {
+  const f = fixture(t), id = f.session();
+  const token = await f.cleaner.acquire(id, true, 987654);
+  await f.cleaner.release(token);
+  f.cleaner.configure("timeout", 1); f.advance(2);
+  const file = path.join(f.root, "state/sessions.json");
+  for (const record of [{}, { piSessionId: "chat" }, { piSessionId: "chat", acpSessionId: 42 }, null]) {
+    fs.writeFileSync(file, JSON.stringify([record]));
+    assert.equal(await f.cleaner.collect(), 0);
+    assert.ok(f.exists(id), "Uncertain mappings must block deletion");
+  }
+});
+
+test("cleanup forgets activity entries after unowned lease records are removed", async t => {
+  const f = fixture(t);
+  for (let i = 0; i < 8; i++) {
+    const token = await f.cleaner.acquire(randomUUID(), false, 987654);
+    await f.cleaner.release(token);
+  }
+  assert.equal((f.cleaner as any).touched.size, 0);
+});
+
+test("balanced preset keeps existing modes and explicit budgets, and validates recovery retention", t => {
+  const f = fixture(t);
+  assert.equal(f.cleaner.status().mode, "conservative");
+  f.cleaner.configure("timeout", 0.5);
+  f.cleaner.configure("balanced");
+  assert.equal(f.cleaner.status().idleDays, 7);
+  assert.equal(f.cleaner.status().recoveryDays, 1);
+  assert.equal(f.cleaner.status().maxSessions, 50);
+  assert.equal(f.cleaner.status().maxBytes, 512 * 1024 * 1024);
+  f.cleaner.budget(0, 123);
+  f.cleaner.configure("balanced", 14);
+  assert.equal(f.cleaner.status().maxSessions, 0);
+  assert.equal(f.cleaner.status().maxBytes, 123);
+  assert.equal(f.cleaner.status().idleDays, 14);
+  for (const recoveryDays of [0, -1, NaN, 3651]) {
+    assert.throws(() => saveCleanupPolicy(f.cleaner.policyPath, { mode: "balanced", idleDays: 7, recoveryDays }), /recoveryDays/);
+  }
+});
+
+test("balanced orphan retention starts when unmapped, while mapped history and foreign data survive", async t => {
+  const f = fixture(t), old = f.session(), mapped = f.session(), unknown = f.session();
+  const first = await f.cleaner.acquire(old, true, 987654);
+  const second = await f.cleaner.acquire(mapped, true, 987654);
+  const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
+  for (const [piSessionId, acpSessionId] of [["old", old], ["kept", mapped]]) await store.save({
+    piSessionId, acpSessionId, acpModelId: "flash", cwd: f.root, messageCount: 1, historyFingerprint: "test", lastActive: Date.now(),
+  });
+  await f.cleaner.release(first); await f.cleaner.release(second);
+  f.cleaner.configure("balanced"); f.advance(100);
+  assert.equal(await f.cleaner.collect(), 0, "Idle mapped conversations remain protected");
+  await store.remove("old");
+  assert.equal(await f.cleaner.collect(), 0, "Losing a mapping must not immediately delete its old history");
+  f.advance(6.99); assert.equal(await f.cleaner.collect(), 0);
+  f.advance(0.01); assert.equal(await f.cleaner.collect(), 1);
+  assert.equal(f.cleaner.status().reclaimedBytes, 37);
+  assert.ok(f.exists(mapped)); assert.ok(f.exists(unknown)); assert.equal(f.exists(old), false);
+});
+
+test("balanced replacement recovery survives restart, repeated confirmations and quota pressure", async t => {
+  const f = fixture(t), id = f.session();
+  f.cleaner.configure("balanced"); f.cleaner.budget(0, 1);
+  const token = await f.cleaner.acquire(id, true, 987654);
+  await f.cleaner.retire("chat", id); await f.cleaner.confirm("chat", randomUUID());
+  await f.cleaner.release(token);
+  assert.ok(f.exists(id)); assert.equal(f.cleaner.status().retainedForRecovery, 1);
+  f.advance(0.75); await f.cleaner.confirm("chat", randomUUID());
+  f.advance(0.25); assert.equal(await f.create().collect(), 1, "Repeated confirmations must not extend retention indefinitely");
+  assert.equal(f.exists(id), false);
+});
+
+test("explicit final release unmaps only owned one-shot state and balanced mode keeps a recovery copy", async t => {
+  const f = fixture(t), id = f.session(), main = f.session();
+  f.cleaner.configure("balanced");
+  const token = await f.cleaner.acquire(id, true, 987654);
+  const mainToken = await f.cleaner.acquire(main, true, 987654);
+  const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
+  for (const [piSessionId, acpSessionId] of [["side", id], ["main", main]]) await store.save({
+    piSessionId, acpSessionId, acpModelId: "flash", cwd: f.root, messageCount: 1, historyFingerprint: "test", lastActive: Date.now(),
+  });
+  await f.cleaner.releaseSession("side"); await f.cleaner.collect();
+  assert.equal((await store.get("side"))?.acpSessionId, id, "Live users keep the mapping until teardown completes");
+  assert.equal((await store.get("main"))?.acpSessionId, main);
+  f.advance(2); assert.equal(await f.cleaner.collect(), 0, "Live users override disposable eligibility");
+  await f.cleaner.release(token); assert.equal(f.exists(id), false);
+  assert.equal(await store.get("side"), undefined);
+  await f.cleaner.release(mainToken); f.advance(100); await f.cleaner.collect(); assert.ok(f.exists(main));
+});
+
+test("one-shot recovery starts at final release and off mode preserves its files", async t => {
+  const f = fixture(t), id = f.session();
+  f.cleaner.configure("off");
+  const token = await f.cleaner.acquire(id, true, 987654);
+  const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
+  await store.save({ piSessionId: "side", acpSessionId: id, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now() });
+  await f.cleaner.release(token); f.advance(10);
+  await f.cleaner.releaseSession("side"); await f.cleaner.collect(); assert.ok(f.exists(id));
+  f.cleaner.configure("balanced");
+  f.advance(0.99); assert.equal(await f.cleaner.collect(), 0);
+  f.advance(0.01); assert.equal(await f.create().collect(), 1);
+});
+
+test("final release preserves unregistered and ambiguously shared ACP mappings", async t => {
+  const f = fixture(t), unknown = f.session(), shared = f.session();
+  const token = await f.cleaner.acquire(shared, true, 987654); await f.cleaner.release(token);
+  const file = path.join(f.root, "state/sessions.json"), store = new AcpSessionStore(file);
+  const mapping = (piSessionId: string, acpSessionId: string) => ({ piSessionId, acpSessionId, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now() });
+  fs.writeFileSync(file, JSON.stringify([mapping("side", unknown), mapping("side", shared), mapping("other", shared)]));
+  await f.cleaner.releaseSession("side"); await f.cleaner.collect();
+  assert.equal((await store.list()).length, 3);
+  assert.ok(f.exists(shared)); assert.ok(f.exists(unknown));
+});
+
+test("final release cannot erase a newer mapping installed after its ownership snapshot", async t => {
+  const f = fixture(t), old = f.session(), newer = f.session();
+  f.cleaner.configure("balanced");
+  const token = await f.cleaner.acquire(old, true, 987654); await f.cleaner.release(token);
+  const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
+  const mapping = { piSessionId: "side", acpSessionId: old, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now() };
+  await store.save(mapping);
+  const inner = (f.cleaner as any).sessionStore, read = inner.list.bind(inner); let calls = 0;
+  inner.list = async () => {
+    if (++calls === 2) await store.save({ ...mapping, acpSessionId: newer });
+    return read();
+  };
+  await f.cleaner.releaseSession("side"); await f.cleaner.collect();
+  assert.equal((await store.get("side"))?.acpSessionId, newer);
+  assert.ok(f.exists(newer)); assert.ok(f.exists(old));
+});
+
+test("a persisted final-release marker repairs interrupted unmapping after process restart", async t => {
+  const f = fixture(t), id = f.session();
+  f.cleaner.configure("balanced");
+  const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.release(token);
+  const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
+  await store.save({ piSessionId: "side", acpSessionId: id, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now() });
+  (f.cleaner as any).sessionStore.removeIfMatches = async () => { throw new Error("synthetic crash before unmapping"); };
+  await assert.rejects(f.cleaner.releaseSession("side"), /synthetic crash/);
+  assert.equal((await store.get("side"))?.acpSessionId, id);
+  const restarted = f.create();
+  await assert.rejects(restarted.acquire(id, false, 987654), /finally released/);
+  assert.equal(await restarted.collect(), 0, "Recovery copy is retained across the interrupted cleanup");
+  assert.equal(await store.get("side"), undefined); assert.ok(f.exists(id));
+  f.advance(1); assert.equal(await restarted.collect(), 1);
+});
+
+test("contended final release retries its intent and preserves the balanced recovery window", async t => {
+  const f = fixture(t), id = f.session();
+  f.cleaner.configure("balanced");
+  const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.release(token);
+  const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
+  await store.save({ piSessionId: "side", acpSessionId: id, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now() });
+  const state = path.join(f.root, "state");
+  const file = path.join(state, fs.readdirSync(state).find(n => n.startsWith("cleanup-sessions-"))!);
+  fs.mkdirSync(file + ".lock");
+  await assert.rejects(f.cleaner.releaseSession("side"));
+  assert.equal(f.cleaner.status().pendingLifecycleUpdates, 1);
+  fs.rmdirSync(file + ".lock");
+  await f.cleaner.collect();
+  assert.equal(await store.get("side"), undefined); assert.ok(f.exists(id));
+  assert.equal(f.cleaner.status().pendingLifecycleUpdates, 0);
+});
+
+test("duplicate OMP identities cannot authorize final-release deletion of either owned session", async t => {
+  const f = fixture(t), ids = [f.session(), f.session()];
+  for (const id of ids) { const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.release(token); }
+  const file = path.join(f.root, "state/sessions.json");
+  fs.writeFileSync(file, JSON.stringify(ids.map(acpSessionId => ({ piSessionId: "side", acpSessionId, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now() }))));
+  await f.cleaner.releaseSession("side");
+  f.cleaner.configure("balanced"); f.advance(100); await f.cleaner.collect();
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).length, 2);
+  for (const id of ids) assert.ok(f.exists(id));
+});
+
+test("duplicate cleanup ownership cannot hide another record's active lease", async t => {
+  const f = fixture(t), id = f.session();
+  const token = await f.cleaner.acquire(id, true, 987654);
+  const state = path.join(f.root, "state"), file = path.join(state, fs.readdirSync(state).find(n => n.startsWith("cleanup-sessions-"))!);
+  const registry = JSON.parse(fs.readFileSync(file, "utf8"));
+  registry.sessions.unshift({ ...registry.sessions[0], id: id.toUpperCase(), leases: [], replaced: true });
+  fs.writeFileSync(file, JSON.stringify(registry));
+  f.cleaner.configure("balanced"); f.advance(100);
+  assert.equal(await f.cleaner.collect(), 0); assert.ok(f.exists(id));
+  assert.ok(f.cleaner.status().failures > 0);
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).sessions[1].leases[0].token, token);
 });
