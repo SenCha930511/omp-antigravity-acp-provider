@@ -1,5 +1,6 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { clearAntigravityCredentials, hasAntigravityAuth, resolveAntigravityAcpDirectory } from "./runtime.mjs";
@@ -7,30 +8,54 @@ import type { TierConnection } from "./tier-connection.ts";
 
 export const MARKER = "pi-antigravity-acp:managed-by-antigravity";
 
+const execFileAsync = promisify(execFile);
+
+// The real /usr/bin/security subprocess boundary, with its own binary
+// parameter so tests can drive a stub executable through the same code path.
+// Captured stderr is matched in memory only; it is never logged or persisted.
+export function runSecurity(args: string[], bin = "/usr/bin/security"): Promise<void> {
+  return execFileAsync(bin, args, { stdio: ["ignore", "ignore", "pipe"], timeout: 3000 }).then(() => undefined);
+}
+
+// errSecItemNotFound reaches the caller as exit code 44 (OSStatus -25300
+// truncated to 8 bits). The stderr wording separates it from any other
+// OSStatus whose truncated code also lands on 44.
+function isConfirmedMissing(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const detail = error as { killed?: unknown; signal?: unknown; code?: unknown; stderr?: unknown };
+  return detail.killed !== true && detail.signal == null && detail.code === 44
+    && typeof detail.stderr === "string" && /could not be found/.test(detail.stderr);
+}
+
 // macOS keychain operations behind one mutable object so offline command
 // tests can substitute them without touching the user's real keychain.
-export const keychain = {
-  // Check existence only. Never retrieve credentials from the keychain.
-  present(): boolean | undefined {
-    if (process.platform !== "darwin") return undefined;
+// present/remove resolve to true (present / removed), false (confirmed
+// absent), or undefined (not macOS); any other subprocess failure rejects
+// with a fixed credential-free message.
+export function createKeychain(run: (args: string[]) => Promise<void>, platform: NodeJS.Platform = process.platform) {
+  const check = async (args: string[], failure: string): Promise<boolean | undefined> => {
+    if (platform !== "darwin") return undefined;
     try {
-      execFileSync("/usr/bin/security", ["find-generic-password", "-s", "gemini", "-a", "antigravity-acp"], { stdio: "ignore", timeout: 3000 });
+      await run(args);
       return true;
-    } catch { return false; }
-  },
-  // Local logout for macOS keychain storage. The Antigravity server owns this
-  // item; removing it is required for a complete logout when no token file exists.
-  remove(): boolean | undefined {
-    if (process.platform !== "darwin") return undefined;
-    try {
-      execFileSync("/usr/bin/security", ["delete-generic-password", "-s", "gemini", "-a", "antigravity-acp"], { stdio: "ignore", timeout: 3000 });
-      return true;
-    } catch { return false; }
-  },
-  // Never read the stored secret: the item's ACL does not authorize the
-  // security CLI, so every `find-generic-password -w` would pop the macOS
-  // keychain password dialog. Only attribute-only lookups are prompt-free.
-};
+    } catch (error) {
+      if (isConfirmedMissing(error)) return false;
+      throw new Error(failure);
+    }
+  };
+  return {
+    // Check existence only: the item's ACL does not authorize the security
+    // CLI, so a `find-generic-password -w` would pop the macOS keychain
+    // password dialog. Attribute-only lookups stay prompt-free.
+    present: (): Promise<boolean | undefined> => check(["find-generic-password", "-s", "gemini", "-a", "antigravity-acp"], "Unable to inspect the Antigravity keychain entry"),
+    // Local logout for macOS keychain storage. The Antigravity server owns
+    // this item; removing it is required for a complete logout when no token
+    // file exists.
+    remove: (): Promise<boolean | undefined> => check(["delete-generic-password", "-s", "gemini", "-a", "antigravity-acp"], "Unable to remove the Antigravity keychain entry"),
+  };
+}
+
+export const keychain = createKeychain(runSecurity);
 
 function emailFromTokenJson(raw: string): string | undefined {
   try {
@@ -68,8 +93,8 @@ export function formatLogoutSummary(options: { keychainRemoved: boolean | undefi
     (options.keychainRemoved === false ? " The macOS keychain entry was not present or not removable." : "");
 }
 
-export function authReady(): boolean {
-  return hasAntigravityAuth() || keychain.present() === true;
+export async function authReady(): Promise<boolean> {
+  return hasAntigravityAuth() || (await keychain.present()) === true;
 }
 
 export interface OmpCommandContext {
@@ -167,12 +192,12 @@ export class OmpAuthCoordinator {
       await Promise.race([Promise.allSettled(pending), delay(10_000)]);
     }
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (keychain.present() === false) return true;
-      const removed = keychain.remove();
+      if ((await keychain.present()) === false) return true;
+      const removed = await keychain.remove();
       if (removed !== true) return removed;
       await delay(400);
     }
-    return keychain.present() === false;
+    return (await keychain.present()) === false;
   }
 
   // /login must mean a fresh Google sign-in: drop stored credentials (and this
@@ -203,7 +228,11 @@ export class OmpAuthCoordinator {
     // mappings. OMP retains its transcript for a fresh backend reconstruction.
     await this.deps.logoutAllRuntimes();
     clearAntigravityCredentials();
-    await this.removeKeychainCredentialDurably();
+    // The old keychain entry must be gone before a new sign-in can start; an
+    // unconfirmed removal refuses the login instead of silently reusing it.
+    if (await this.removeKeychainCredentialDurably() === false) {
+      throw new Error("Unable to confirm removal of the Antigravity keychain entry");
+    }
   }
 
   async performCommandLogout(ctx: OmpCommandContext): Promise<{ keychainRemoved: boolean | undefined; ompMarker: "removed" | "absent" | "unavailable" }> {
@@ -220,7 +249,16 @@ export class OmpAuthCoordinator {
     // Removing the marker ourselves must not trigger the follow-up logout.
     this.selfLogout = true;
     let ompMarker: "removed" | "absent" | "unavailable";
-    try { ompMarker = await removeOmpCredentialRecord(ctx); } finally { this.selfLogout = false; }
+    try {
+      ompMarker = await removeOmpCredentialRecord(ctx);
+      if (ompMarker !== "unavailable") {
+        // A generation event firing after the selfLogout window would compare
+        // against a stale markerPresent and schedule a redundant follow-up.
+        this.markerPresent = this.ompMarkerStored(ctx);
+        clearTimeout(this.followTimer);
+        this.followTimer = undefined;
+      }
+    } finally { this.selfLogout = false; }
     if (ompMarker !== "unavailable") {
       // Drop the config apiKey with the marker even without the watcher.
       this.apiKeyFallback = false;
@@ -235,18 +273,31 @@ export class OmpAuthCoordinator {
       clearTimeout(this.followRetry);
       this.followRetry = setTimeout(() => {
         this.followRetry = undefined;
-        if (this.ompMarkerStored(ctx) === false) void this.finishFollowedLogout(ctx);
+        if (this.ompMarkerStored(ctx) === false) this.runFollowedLogout(ctx);
       }, logoutFollow.retryMs);
       this.followRetry.unref?.();
       return;
     }
     await this.deps.logoutAllRuntimes();
     await this.deps.closeAllRuntimes();
+    // A quick re-login can restore the marker while the steps above await;
+    // a restored or unknown marker keeps the new keychain entry untouched.
+    if (this.ompMarkerStored(ctx) !== false) return;
     const keychainRemoved = await this.removeKeychainCredentialDurably();
     // Keep the confirmation terse; /antigravity-acp account shows the details.
     try {
       ctx?.ui?.notify?.(formatLogoutSummary({ keychainRemoved, followed: true }), "info");
     } catch { /* the host UI may already be gone */ }
+  }
+
+  // The follow-up runs detached from timer callbacks; a failure must not
+  // become an unhandled rejection, and the notice stays credential-free.
+  private runFollowedLogout(ctx: OmpCommandContext): void {
+    void this.finishFollowedLogout(ctx).catch(() => {
+      try {
+        ctx?.ui?.notify?.("Antigravity ACP: the logout OMP started could not be finished. Run /antigravity-acp logout to retry.", "error");
+      } catch { /* the host UI may already be gone */ }
+    });
   }
 
   watchOmpCredentials(ctx: OmpCommandContext | undefined): void {
@@ -296,7 +347,7 @@ export class OmpAuthCoordinator {
           this.deps.onSyncProvider();
           return;
         }
-        void this.finishFollowedLogout(ctx);
+        this.runFollowedLogout(ctx);
       }, logoutFollow.delayMs);
       this.followTimer.unref?.();
     });

@@ -238,7 +238,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       // fields, with OMP-specific lines in the same style.
       ctx.ui.notify([
         "Antigravity ACP account",
-        `Google account: ${antigravityAccountEmail() ?? (keychain.present() === true ? "signed in (token in macOS keychain; email not read)" : "not signed in")}`,
+        `Google account: ${antigravityAccountEmail() ?? ((await keychain.present()) === true ? "signed in (token in macOS keychain; email not read)" : "not signed in")}`,
         `Authentication: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}`,
         `Credential storage (preflight): ${describeCredentialStorage()}`,
         `OMP marker record: ${marker}`,
@@ -302,6 +302,6 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     }
 
     const policy = deps.getToolPolicy();
-    ctx.ui.notify(`Antigravity ACP (OMP adapter)\nAuth storage: ${authReady() ? "configured (ACP-owned token file or macOS keychain)" : inspectAntigravityAuth().status}\nPermissions: ${snapshot.permissionMode}\nNative tools: ${policy.nativeTools}\nDebug tool updates: ${policy.debugToolUpdates ? "on" : "off"}\nTool routing: ${JSON.stringify([...deps.connections].map(connection => connection.toolRouting).filter(Boolean))}\nActive sessions: ${snapshot.bindings}\nConfirmed thinking: ${JSON.stringify([...deps.connections].map(connection => connection.confirmedThinking).filter(Boolean))}\nUsage: ${JSON.stringify(snapshot.metrics)}\n${JSON.stringify(snapshot.processes)}`, "info");
+    ctx.ui.notify(`Antigravity ACP (OMP adapter)\nAuth storage: ${(await authReady()) ? "configured (ACP-owned token file or macOS keychain)" : inspectAntigravityAuth().status}\nPermissions: ${snapshot.permissionMode}\nNative tools: ${policy.nativeTools}\nDebug tool updates: ${policy.debugToolUpdates ? "on" : "off"}\nTool routing: ${JSON.stringify([...deps.connections].map(connection => connection.toolRouting).filter(Boolean))}\nActive sessions: ${snapshot.bindings}\nConfirmed thinking: ${JSON.stringify([...deps.connections].map(connection => connection.confirmedThinking).filter(Boolean))}\nUsage: ${JSON.stringify(snapshot.metrics)}\n${JSON.stringify(snapshot.processes)}`, "info");
   };
 }

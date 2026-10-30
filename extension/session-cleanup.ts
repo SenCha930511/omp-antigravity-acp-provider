@@ -38,6 +38,13 @@ export class SessionCleanup {
   private collecting?: Promise<number>;
   private readonly touched = new Map<string, number>();
   private readonly intents: Array<(r: Registry) => void> = [];
+  // Lock-wait budget clock, kept separate from the constructor's policy
+  // clock: advancing retention time must never spend a lock budget, and
+  // advancing a lock budget must never age out sessions.
+  private acquireRetry: { now: () => number; sleep: (ms: number) => Promise<void> } = {
+    now: Date.now,
+    sleep: ms => new Promise<void>(resolve => { const timer = setTimeout(resolve, ms); timer.unref?.(); }),
+  };
   private report = { owned: 0, active: 0, mapped: 0, unmapped: 0, ownedBytes: 0, overBudget: false, removed: 0, reclaimedBytes: 0, retainedForRecovery: 0, failures: 0, deferred: 0 };
   constructor(private readonly stateDir: string, readonly acpDir = resolveAntigravityAcpDirectory(), private readonly now = Date.now, private readonly isLive = live) {
     this.policyPath = path.join(stateDir, "cleanup.json");
@@ -60,7 +67,8 @@ export class SessionCleanup {
     if (await sourceId(file) !== id) return;
     await this.transaction(async registry => {
       const mappings = await this.sessionStore.list();
-      for (const record of registry.sessions) if (record.owned && mappings.some(m => m.piSessionId === id && m.acpSessionId === record.id)) {
+      const mappedAcpIds = new Set(mappings.filter(m => m.piSessionId === id).map(m => m.acpSessionId));
+      for (const record of registry.sessions) if (record.owned && mappedAcpIds.has(record.id)) {
         record.ompSource = { id, file: path.resolve(file), root, device: stat.dev, inode: stat.ino };
         delete record.sourceDeleted;
       }
@@ -99,15 +107,26 @@ export class SessionCleanup {
     void pending.finally(() => { if (tails.get(this.registryPath) === pending) tails.delete(this.registryPath); }).catch(() => {});
     return pending;
   }
-  async acquire(id: string, owned: boolean, serverPid: number) {
+  async acquire(id: string, owned: boolean, serverPid: number, lockWaitMs = 0): Promise<string> {
     if (!UUID.test(id) || !Number.isSafeInteger(serverPid) || serverPid <= 0) throw new Error("Invalid ACP cleanup lease");
-    return this.transaction(r => {
+    const action = (r: Registry): string => {
       let v = r.sessions.find(v => v.id === id);
       if (!v) { v = { id, owned, lastUsed: this.now(), leases: [] }; r.sessions.push(v); }
       if (v.disposableFor) throw new Error("ACP session was finally released; reconstruct a new session from OMP history");
       const token = randomUUID(); v.leases.push({ token, pid: process.pid, serverPid }); v.lastUsed = this.now(); delete v.orphanedAt;
       this.touched.set(id, v.lastUsed); return token;
-    });
+    };
+    // Only the recovery path passes a budget; every other caller keeps the
+    // raw ELOCKED identity and fails fast instead of queueing behind contention.
+    const deadline = this.acquireRetry.now() + lockWaitMs;
+    for (;;) {
+      try { return await this.transaction(action); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ELOCKED" || lockWaitMs <= 0) throw error;
+        if (this.acquireRetry.now() >= deadline) throw new Error("Timed out acquiring the ACP cleanup lease", { cause: error });
+        await this.acquireRetry.sleep(10);
+      }
+    }
   }
   private async intent(action: (r: Registry) => void) {
     if (this.intents.length >= 1024) throw new Error("Lifecycle retry queue full; preserving files");

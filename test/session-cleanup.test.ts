@@ -449,3 +449,140 @@ test("duplicate cleanup ownership cannot hide another record's active lease", as
   assert.ok(f.cleaner.status().failures > 0);
   assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).sessions[1].leases[0].token, token);
 });
+
+test("recovery-path acquisition waits out short contention without blocking fail-fast callers", async t => {
+  const f = fixture(t), id = f.session();
+  await f.cleaner.acquire(id, true, 987654);
+  const state = path.join(f.root, "state");
+  const file = path.join(state, fs.readdirSync(state).find(n => n.startsWith("cleanup-sessions-"))!);
+  let openSleep: () => void = () => {};
+  const sleepGate = new Promise<void>(resolve => { openSleep = resolve; });
+  let sleeps = 0;
+  (f.cleaner as any).acquireRetry = { now: Date.now, sleep: () => { sleeps++; return sleepGate; } };
+  fs.mkdirSync(file + ".lock");
+  const other = randomUUID();
+  const attempt = f.cleaner.acquire(other, false, 987654, 5000);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  f.advance(1);
+  await assert.rejects(f.cleaner.touch(id), (error: NodeJS.ErrnoException) => error.code === "ELOCKED",
+    "touch keeps its raw fail-fast identity instead of queueing behind the retrying acquire");
+  fs.rmdirSync(file + ".lock");
+  openSleep();
+  const token = await attempt;
+  assert.ok(token, "the lease is acquired once contention clears");
+  const registry = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(registry.sessions.find((v: any) => v.id === other).leases.length, 1);
+  assert.ok(sleeps >= 1);
+});
+
+test("a lock budget expiring under sustained contention wraps the raw ELOCKED cause", async t => {
+  const f = fixture(t), id = f.session();
+  await f.cleaner.acquire(id, true, 987654);
+  const state = path.join(f.root, "state");
+  const file = path.join(state, fs.readdirSync(state).find(n => n.startsWith("cleanup-sessions-"))!);
+  let lockClock = 1_000_000;
+  let sleeps = 0;
+  (f.cleaner as any).acquireRetry = { now: () => lockClock, sleep: async () => { sleeps++; lockClock += 10; } };
+  fs.mkdirSync(file + ".lock");
+  const failure = await f.cleaner.acquire(randomUUID(), false, 987654, 5000).then(() => undefined, error => error);
+  assert.ok(failure instanceof Error);
+  assert.equal(failure.message, "Timed out acquiring the ACP cleanup lease");
+  assert.equal((failure.cause as NodeJS.ErrnoException)?.code, "ELOCKED");
+  assert.ok(sleeps <= 501, `bounded sleep count: ${sleeps}`);
+  fs.rmdirSync(file + ".lock");
+});
+
+test("a non-lock registry failure bypasses the retry budget entirely", async t => {
+  const f = fixture(t), id = f.session();
+  await f.cleaner.acquire(id, true, 987654);
+  const state = path.join(f.root, "state");
+  const file = path.join(state, fs.readdirSync(state).find(n => n.startsWith("cleanup-sessions-"))!);
+  const registry = JSON.parse(fs.readFileSync(file, "utf8"));
+  registry.sessions.unshift({ ...registry.sessions[0], id: id.toUpperCase(), leases: [] });
+  fs.writeFileSync(file, JSON.stringify(registry));
+  let sleeps = 0;
+  (f.cleaner as any).acquireRetry = { now: Date.now, sleep: async () => { sleeps++; } };
+  await assert.rejects(f.cleaner.acquire(randomUUID(), false, 987654, 5000), /Duplicate ACP cleanup ownership/);
+  assert.equal(sleeps, 0);
+});
+
+test("the default acquisition path keeps the raw ELOCKED identity", async t => {
+  const f = fixture(t), id = f.session();
+  await f.cleaner.acquire(id, true, 987654);
+  const state = path.join(f.root, "state");
+  const file = path.join(state, fs.readdirSync(state).find(n => n.startsWith("cleanup-sessions-"))!);
+  let sleeps = 0;
+  (f.cleaner as any).acquireRetry = { now: Date.now, sleep: async () => { sleeps++; } };
+  fs.mkdirSync(file + ".lock");
+  await assert.rejects(f.cleaner.acquire(randomUUID(), false, 987654), (error: NodeJS.ErrnoException) => error.code === "ELOCKED");
+  assert.equal(sleeps, 0);
+  fs.rmdirSync(file + ".lock");
+});
+
+test("the lock budget and the retention policy advance on separate clocks", async t => {
+  const f = fixture(t), id = f.session();
+  await f.cleaner.acquire(id, true, 987654);
+  const state = path.join(f.root, "state");
+  const file = path.join(state, fs.readdirSync(state).find(n => n.startsWith("cleanup-sessions-"))!);
+  let lockClock = 5_000_000_000;
+  let openSleep: () => void = () => {};
+  const sleepGate = new Promise<void>(resolve => { openSleep = resolve; });
+  (f.cleaner as any).acquireRetry = { now: () => lockClock, sleep: () => sleepGate };
+  fs.mkdirSync(file + ".lock");
+  const other = randomUUID();
+  let settled = false;
+  const attempt = f.cleaner.acquire(other, false, 987654, 5000);
+  void attempt.then(() => { settled = true; }, () => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  f.advance(7);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false, "policy time must not spend the lock budget");
+  lockClock += 6000;
+  openSleep();
+  await assert.rejects(attempt, /Timed out acquiring the ACP cleanup lease/);
+  fs.rmdirSync(file + ".lock");
+  const second = randomUUID();
+  assert.ok(await f.cleaner.acquire(second, false, 987654, 5000));
+  const registry = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(registry.sessions.find((v: any) => v.id === second).lastUsed, 1_000_000 + 7 * 86_400_000,
+    "lastUsed comes from the policy clock even while the lock clock runs far ahead");
+});
+
+test("trackSource scans mappings once and stamps only mapped owned records", async t => {
+  const f = fixture(t);
+  const matching = f.session(), unrelated = f.session(), foreign = f.session();
+  await f.cleaner.acquire(matching, true, 987654);
+  await f.cleaner.acquire(unrelated, true, 987654);
+  await f.cleaner.acquire(foreign, false, 987654);
+  const root = path.join(f.root, "sessions"), file = path.join(root, "workspace", "chat.jsonl");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ type: "session", id: "omp-chat" }) + "\n");
+  const mappingFile = path.join(f.root, "state", "sessions.json");
+  const mapping = (piSessionId: string, acpSessionId: string) => ({ piSessionId, acpSessionId, acpModelId: "flash", cwd: f.root, messageCount: 1, historyFingerprint: "test", lastActive: Date.now() });
+  fs.writeFileSync(mappingFile, JSON.stringify([
+    mapping("omp-chat", matching),
+    mapping("omp-chat", matching),
+    mapping("other-pi", unrelated),
+    mapping("omp-chat", foreign),
+  ]));
+  const reads = { piSessionId: 0, acpSessionId: 0 };
+  const store = (f.cleaner as any).sessionStore;
+  const realList = store.list.bind(store);
+  store.list = async () => (await realList()).map((m: any) => new Proxy(m, {
+    get(target, prop) { if (prop === "piSessionId" || prop === "acpSessionId") reads[prop]++; return target[prop]; },
+  }));
+  await f.cleaner.trackSource("omp-chat", file);
+  assert.equal(reads.piSessionId, 4, "one scan of the mapping list, not one per owned record");
+  assert.equal(reads.acpSessionId, 3, "only mappings for the tracked OMP session expose their ACP id");
+  const registryPath = path.join(f.root, "state", fs.readdirSync(path.join(f.root, "state")).find(n => n.startsWith("cleanup-sessions-"))!);
+  const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  const stat = fs.statSync(root);
+  assert.deepEqual(registry.sessions.find((v: any) => v.id === matching).ompSource,
+    { id: "omp-chat", file: path.resolve(file), root, device: stat.dev, inode: stat.ino });
+  assert.equal(registry.sessions.find((v: any) => v.id === unrelated).ompSource, undefined, "a mapping for another OMP session never stamps");
+  assert.equal(registry.sessions.find((v: any) => v.id === foreign).ompSource, undefined, "an unowned record is never stamped");
+  fs.writeFileSync(mappingFile, JSON.stringify([]));
+  const scanned = reads.piSessionId;
+  await f.cleaner.trackSource("omp-chat", file);
+  assert.equal(reads.piSessionId, scanned, "an empty mapping list performs no property scans");
+});

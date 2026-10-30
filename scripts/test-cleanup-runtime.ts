@@ -77,17 +77,20 @@ try {
   console.log("Built runtime reconstruction, failed replacement, successful cleanup and normal shutdown: PASS");
 
   const parent: any = Object.getPrototypeOf(TierConnection.prototype);
-  const originalResume = parent.resumeSession, originalClose = parent.close;
+  const originalResume = parent.resumeSession, originalClose = parent.close, originalNewSession = parent.newSession;
   const id = randomUUID(); let leased = false, released = false;
+  const resumeAcquire: { owned?: boolean; waitMs?: number } = {};
   const tier: any = Object.assign(Object.create(TierConnection.prototype), {
-    process: { alive: true, pid: process.pid }, cleanupLeases: new Map(),
-    cleanup: { acquire(got: string) { assert.equal(got, id); leased = true; return "lease"; },
+    process: { alive: true, pid: process.pid }, cleanupLeases: new Map(), usageBaselines: new Map(), pendingOwned: new Set(),
+    cleanup: { acquire(got: string, owned: boolean, _pid: number, waitMs?: number) { assert.equal(got, id); resumeAcquire.owned = owned; resumeAcquire.waitMs = waitMs; leased = true; return "lease"; },
       release() { assert.equal(tier.process.alive, false); released = true; } },
   });
   try {
     parent.resumeSession = async () => { assert.ok(leased, "Lease must exist before official resume dispatch"); return {}; };
     parent.close = async function() { this.process.alive = false; };
     await tier.resumeSession(id, root);
+    assert.equal(resumeAcquire.owned, false);
+    assert.equal(resumeAcquire.waitMs, 5000, "the recovery path carries the bounded lock budget");
     tier.getSessionState = () => ({});
     let unloadedReleased = false;
     tier.cleanup.release = () => { unloadedReleased = true; };
@@ -98,8 +101,38 @@ try {
     tier.cleanup.release = () => { assert.equal(tier.process.alive, false); released = true; };
     await tier.close();
     assert.ok(released);
-  } finally { parent.resumeSession = originalResume; parent.close = originalClose; }
+    const created = randomUUID(); let newSessionWaitMs = -1;
+    parent.newSession = async () => ({ sessionId: created });
+    tier.cleanup = { acquire(got: string, _owned: boolean, _pid: number, waitMs?: number) { assert.equal(got, created); newSessionWaitMs = waitMs; return "lease"; }, release() {} };
+    await tier.newSession();
+    assert.equal(newSessionWaitMs, undefined, "new session registration keeps the default fail-fast acquisition");
+  } finally { parent.resumeSession = originalResume; parent.close = originalClose; parent.newSession = originalNewSession; }
   console.log("Actual TierConnection leases before replay and releases only after process exit: PASS");
+
+  const contendedId = randomUUID();
+  await cleanup.acquire(contendedId, true, process.pid);
+  const registryFile = path.join(stateDir, fs.readdirSync(stateDir).find(name => name.startsWith("cleanup-sessions-"))!);
+  const realAcquireRetry = (cleanup as any).acquireRetry;
+  let openSleep: () => void = () => {};
+  const sleepGate = new Promise<void>(resolve => { openSleep = resolve; });
+  (cleanup as any).acquireRetry = { now: Date.now, sleep: () => sleepGate };
+  fs.mkdirSync(registryFile + ".lock");
+  const gatedTier: any = Object.assign(Object.create(TierConnection.prototype), {
+    process: { alive: true, pid: process.pid }, cleanupLeases: new Map(), cleanup,
+  });
+  let dispatched = false;
+  parent.resumeSession = async () => { dispatched = true; return {}; };
+  const resuming = gatedTier.resumeSession(contendedId, root);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(dispatched, false, "the official resume RPC must not dispatch while the registry is contended");
+  fs.rmdirSync(registryFile + ".lock");
+  openSleep();
+  await resuming;
+  assert.ok(dispatched, "dispatch follows the acquired lease once contention clears");
+  assert.ok(gatedTier.cleanupLeases.has(contendedId), "the waiting acquisition registers its lease");
+  (cleanup as any).acquireRetry = realAcquireRetry;
+  parent.resumeSession = originalResume;
+  console.log("Contended recovery waits for the lease before dispatching resume: PASS");
 
   const active = randomUUID();
   fs.writeFileSync(path.join(acpDir, "conversations", `${active}.db`), "owned");

@@ -131,6 +131,31 @@ for (const reason of ["edited", "missing-partial", "timeout"]) {
 
 {
   const f = fixture();
+  const proto = AntigravityRuntime.prototype as any;
+  const originalFingerprint = proto.ompMessagesFingerprint;
+  let prefixLengthCalls = 0;
+  proto.ompMessagesFingerprint = function (messages: any[]) {
+    if (messages.length === 1) prefixLengthCalls++;
+    return originalFingerprint.call(this, messages);
+  };
+  try {
+    const r = f.create(); const old = await f.held(r);
+    prefixLengthCalls = 0;
+    const next = await f.run(r, [user("EDITED"), partial()]);
+    await old.result;
+    assert.ok(next.some(e => e.type === "done"));
+    assert.equal(prefixLengthCalls, 1, "The supersedes judgment must fingerprint the pending prefix exactly once");
+    assert.equal(f.connections.length, 2, "A modified prefix without a new user rebuilds on a fresh connection");
+    assert.ok(JSON.stringify(f.connections.at(-1).prompts[0]).includes("EDITED"));
+  } finally {
+    proto.ompMessagesFingerprint = originalFingerprint;
+    await f.close();
+  }
+}
+console.log("An edited prefix without a new user fingerprints the pending prefix once: PASS");
+
+{
+  const f = fixture();
   try {
     const r = f.create(); const old = await f.held(r);
     const first = f.run(r, [user("OLD"), partial(), user("NEW_ONE")]);

@@ -30,8 +30,8 @@ let command: any;
 try {
   let keychainEntry = true;
   let flushOnce = false;
-  keychain.present = () => { keychainCalls.push("present"); return keychainEntry; };
-  keychain.remove = () => {
+  keychain.present = async () => { keychainCalls.push("present"); return keychainEntry; };
+  keychain.remove = async () => {
     keychainCalls.push("remove");
     if (!keychainEntry) return false;
     keychainEntry = false;

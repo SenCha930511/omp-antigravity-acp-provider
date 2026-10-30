@@ -90,7 +90,7 @@ export class TierConnection extends AntigravityAcpConnection {
   private async protectSession(id: string) {
     if (this.cleanup && !this.cleanupLeases.has(id)) {
       // Lease before the resume/load RPC, including while the server replays.
-      this.cleanupLeases.set(id, await this.cleanup.acquire(id, false, this.process.pid!));
+      this.cleanupLeases.set(id, await this.cleanup.acquire(id, false, this.process.pid!, 5000));
     }
   }
   override async resumeSession(...args: Parameters<AntigravityAcpConnection["resumeSession"]>) {
