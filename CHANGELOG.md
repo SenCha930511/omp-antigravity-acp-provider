@@ -1,6 +1,10 @@
 # Changelog
 
 
+## Unreleased
+
+- Let `balanced` cleanup reclaim a still-mapped conversation once its last activity exceeds `idleDays`, after proving unique ownership and removing the mapping first; the next turn rebuilds from OMP history. `conservative` and `timeout` keep mapped sessions, and live leases or ambiguous mappings still preserve them.
+
 ## 0.1.28 — 2026-10-30
 
 - Make the macOS keychain path asynchronous with explicit outcomes: present, confirmed absent only for the not-found exit with matching stderr, and rejection with fixed credential-free messages for every other failure, so timeouts or permission errors can no longer be reported as signed out or as successful credential removal.

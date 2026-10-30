@@ -115,7 +115,7 @@ test("conservative cleanup waits for successful replacement AND old process rele
   assert.equal(f.exists(old), false);
   assert.equal(fs.existsSync(path.join(f.acp, "brain", old)), false);
   assert.ok(f.exists(next));
-  assert.deepEqual(fs.readdirSync(path.join(f.acp, "conversations")), [".db", ".db-journal", ".db-shm", ".db-wal", ".meta"].map(s => next + s).sort());
+  assert.deepEqual(fs.readdirSync(path.join(f.acp, "conversations")).sort(), [".db", ".db-journal", ".db-shm", ".db-wal", ".meta"].map(s => next + s).sort());
 });
 
 test("off defers even confirmed superseded data; switching back retries", async t => {
@@ -297,23 +297,46 @@ test("balanced preset keeps existing modes and explicit budgets, and validates r
   }
 });
 
-test("balanced orphan retention starts when unmapped, while mapped history and foreign data survive", async t => {
-  const f = fixture(t), old = f.session(), mapped = f.session(), unknown = f.session();
-  const first = await f.cleaner.acquire(old, true, 987654);
-  const second = await f.cleaner.acquire(mapped, true, 987654);
+test("balanced reclaims mapped and orphaned conversations only after the full idle window", async t => {
+  const f = fixture(t), idle = f.session(), orphan = f.session(), leased = f.session(), unknown = f.session();
   const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
-  for (const [piSessionId, acpSessionId] of [["old", old], ["kept", mapped]]) await store.save({
+  const idleToken = await f.cleaner.acquire(idle, true, 987654);
+  const orphanToken = await f.cleaner.acquire(orphan, true, 987654);
+  const leasedToken = await f.cleaner.acquire(leased, true, 987654);
+  for (const [piSessionId, acpSessionId] of [["idle-chat", idle], ["leased-chat", leased]]) await store.save({
     piSessionId, acpSessionId, acpModelId: "flash", cwd: f.root, messageCount: 1, historyFingerprint: "test", lastActive: Date.now(),
   });
-  await f.cleaner.release(first); await f.cleaner.release(second);
-  f.cleaner.configure("balanced"); f.advance(100);
-  assert.equal(await f.cleaner.collect(), 0, "Idle mapped conversations remain protected");
-  await store.remove("old");
-  assert.equal(await f.cleaner.collect(), 0, "Losing a mapping must not immediately delete its old history");
-  f.advance(6.99); assert.equal(await f.cleaner.collect(), 0);
-  f.advance(0.01); assert.equal(await f.cleaner.collect(), 1);
-  assert.equal(f.cleaner.status().reclaimedBytes, 37);
-  assert.ok(f.exists(mapped)); assert.ok(f.exists(unknown)); assert.equal(f.exists(old), false);
+  await f.cleaner.release(idleToken); await f.cleaner.release(orphanToken);
+  f.cleaner.configure("balanced");
+  f.advance(6.99);
+  assert.equal(await f.cleaner.collect(), 0, "Mapped and orphaned history survives until the full idle window ends");
+  assert.equal((await store.get("idle-chat"))?.acpSessionId, idle);
+  f.advance(0.01);
+  assert.equal(await f.cleaner.collect(), 2);
+  assert.equal(f.exists(idle), false); assert.equal(f.exists(orphan), false);
+  assert.equal(await store.get("idle-chat"), undefined, "The stale mapping is removed before its files");
+  assert.equal(f.cleaner.status().removedMapped, 1);
+  assert.equal(f.cleaner.status().reclaimedBytes, 74);
+  assert.ok(f.exists(leased), "A live lease protects mapped history regardless of idle time");
+  assert.equal(await f.cleaner.release(leasedToken), 1, "The last user releasing starts normal idle accounting");
+  assert.equal(f.exists(leased), false);
+  assert.ok(f.exists(unknown));
+});
+
+test("conservative and timeout modes never reclaim mapped history", async t => {
+  const f = fixture(t), id = f.session();
+  const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
+  const token = await f.cleaner.acquire(id, true, 987654);
+  await store.save({ piSessionId: "chat", acpSessionId: id, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now() });
+  await f.cleaner.release(token);
+  f.advance(100);
+  assert.equal(await f.cleaner.collect(), 0, "Conservative keeps mapped conversations");
+  f.cleaner.configure("timeout", 1);
+  assert.equal(await f.cleaner.collect(), 0, "Timeout keeps mapped conversations");
+  f.cleaner.configure("balanced");
+  assert.equal(await f.cleaner.collect(), 1);
+  assert.equal(await store.get("chat"), undefined); assert.equal(f.exists(id), false);
 });
 
 test("balanced replacement recovery survives restart, repeated confirmations and quota pressure", async t => {
@@ -343,7 +366,7 @@ test("explicit final release unmaps only owned one-shot state and balanced mode 
   f.advance(2); assert.equal(await f.cleaner.collect(), 0, "Live users override disposable eligibility");
   await f.cleaner.release(token); assert.equal(f.exists(id), false);
   assert.equal(await store.get("side"), undefined);
-  await f.cleaner.release(mainToken); f.advance(100); await f.cleaner.collect(); assert.ok(f.exists(main));
+  await f.cleaner.release(mainToken); f.advance(1); await f.cleaner.collect(); assert.ok(f.exists(main));
 });
 
 test("one-shot recovery starts at final release and off mode preserves its files", async t => {

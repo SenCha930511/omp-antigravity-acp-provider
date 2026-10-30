@@ -74,7 +74,7 @@ export class SessionCleanup {
       }
     });
   }
-  status() { return { ...loadCleanupPolicy(this.policyPath), ...this.report, warning: this.report.overBudget ? "Soft budget exceeded; mapped and active sessions remain protected" : undefined, pendingLifecycleUpdates: this.intents.length, file: this.policyPath, scope: "adapter-owned local ACP data" }; }
+  status() { return { ...loadCleanupPolicy(this.policyPath), ...this.report, warning: this.report.overBudget ? "Soft budget exceeded; active and recently used sessions remain protected" : undefined, pendingLifecycleUpdates: this.intents.length, file: this.policyPath, scope: "adapter-owned local ACP data" }; }
   start() { if (this.timer) return; void this.collect(); this.timer = setInterval(() => { void this.collect(); }, 15 * 60_000); this.timer.unref(); }
   async stop() { clearInterval(this.timer); clearTimeout(this.nextBatch); this.timer = undefined; this.nextBatch = undefined; await this.collecting; await tails.get(this.registryPath)?.catch(() => {}); }
   private transaction<T>(action: (r: Registry) => T | Promise<T>): Promise<T> {
@@ -185,7 +185,7 @@ export class SessionCleanup {
       if (registry.sessions.some(v => v.disposableFor)) await this.unmapReleased(registry);
       const mappings = await this.sessionStore.list();
       const mapped = new Set(mappings.map(v => v.acpSessionId));
-      const report = { owned: 0, active: 0, mapped: 0, unmapped: 0, ownedBytes: 0, overBudget: false, removed: 0, reclaimedBytes: 0, retainedForRecovery: 0, failures: this.report.failures, deferred: 0 };
+      const report = { owned: 0, active: 0, mapped: 0, unmapped: 0, ownedBytes: 0, overBudget: false, removed: 0, removedMapped: 0, reclaimedBytes: 0, retainedForRecovery: 0, failures: this.report.failures, deferred: 0 };
       let dirs: { conversations: string; brain: string } | undefined;
       const owned = [];
       const sourceScans = new Map<string, Promise<Map<string, string>>>();
@@ -234,7 +234,13 @@ export class SessionCleanup {
       const over = () => Boolean((policy.maxSessions && report.owned > policy.maxSessions) || (policy.maxBytes && report.ownedBytes > policy.maxBytes));
       report.overBudget = over();
       if (policy.mode !== "off") for (const { v, size } of owned.sort((a, b) => a.v.lastUsed - b.v.lastUsed)) {
-        if (mapped.has(v.id) || v.leases.length) continue;
+        if (v.leases.length) continue;
+        const isMapped = mapped.has(v.id);
+        // Balanced mode may retire a still-mapped conversation once it has been
+        // idle for the full window; the next turn rebuilds it from OMP history.
+        // Every other mode, and every shorter idle period, preserves mappings.
+        const mappedExpired = isMapped && policy.mode === "balanced" && this.now() - v.lastUsed >= policy.idleDays * 86_400_000;
+        if (isMapped && !mappedExpired) continue;
         const recoverable = v.replaced || v.disposableAt !== undefined;
         // Legacy replacement records start their recovery window on the first
         // balanced sweep. Pressure never bypasses that minimum retention.
@@ -242,16 +248,30 @@ export class SessionCleanup {
         const recovering = policy.mode === "balanced" && recoverable && this.now() - Math.max(v.confirmedAt ?? 0, v.disposableAt ?? 0, v.lastUsed) < (policy.recoveryDays ?? 1) * 86_400_000;
         if (recovering && !v.sourceDeleted) { report.retainedForRecovery++; continue; }
         const timeout = policy.mode === "timeout" || policy.mode === "balanced";
-        const idleSince = policy.mode === "balanced" ? Math.max(v.lastUsed, v.orphanedAt!) : v.lastUsed;
-        const expired = timeout && (this.now() - idleSince >= policy.idleDays * 86_400_000 || (over() && this.now() - v.orphanedAt! >= (policy.orphanGraceDays ?? 1) * 86_400_000));
-        if (!recoverable && !v.sourceDeleted && !expired) continue;
+        const idleSince = policy.mode === "balanced" ? Math.max(v.lastUsed, v.orphanedAt ?? 0) : v.lastUsed;
+        const expired = timeout && (this.now() - idleSince >= policy.idleDays * 86_400_000 ||
+          (over() && v.orphanedAt !== undefined && this.now() - v.orphanedAt >= (policy.orphanGraceDays ?? 1) * 86_400_000));
+        if (!recoverable && !v.sourceDeleted && !expired && !mappedExpired) continue;
         if (report.removed >= (policy.batchSize ?? 8)) { report.deferred++; continue; }
         try {
+          if (isMapped) {
+            // Re-prove ownership under the mapping store's lock before deleting
+            // files. Ambiguous or duplicated mappings prove nothing, and a
+            // concurrent resume that re-mapped this ACP ID wins; either way the
+            // sweep leaves the session for its owner.
+            const rows = mappings.filter(m => m.acpSessionId === v.id);
+            const owner = rows.length === 1 ? rows[0]!.piSessionId : undefined;
+            if (owner === undefined || mappings.filter(m => m.piSessionId === owner).length !== 1) continue;
+            await this.sessionStore.removeIfMatches(owner, v.id);
+            if ((await this.sessionStore.list()).some(m => m.acpSessionId === v.id)) { report.failures++; continue; }
+            mapped.delete(v.id);
+          }
           dirs ??= await this.verifyRoot(); const targets = this.targets(v.id, dirs);
           for (const target of targets) await this.inspect(target);
           for (const target of targets) await afs.rm(target, { recursive: true, force: true });
           registry.sessions = registry.sessions.filter(r => r !== v); this.touched.delete(v.id);
-          report.removed++; report.owned--; report.unmapped--; report.ownedBytes -= size; report.reclaimedBytes += size;
+          report.removed++; report.owned--; report.ownedBytes -= size; report.reclaimedBytes += size;
+          if (isMapped) { report.mapped--; report.removedMapped++; } else report.unmapped--;
         } catch { report.failures++; }
       }
       registry.sessions = registry.sessions.filter(v => v.owned || v.leases.length);

@@ -14,7 +14,7 @@
 
 | 資料 | 保留／回收規則 |
 | --- | --- |
-| 正常對話、有 mapping | 保留，容量上限不能強制刪除 |
+| 正常對話、有 mapping | 閒置未超過 `idleDays` 時保留；超過才回收，先移除 mapping 再刪檔，下次使用時從 OMP 歷史重建。容量壓力不能縮短這個窗口 |
 | 使用中的 session | 保留，OMP 或 ACP PID 仍存活即受 lease 保護 |
 | 確認被取代／最終釋放的一次性 session | 至少保留 1 天，容量壓力不能縮短這個窗口 |
 | 其他 adapter-owned 孤立 session | 保留 7 天；超出軟上限時，孤立至少 1 天的合格資料按最舊活動優先回收 |
@@ -22,6 +22,7 @@
 | 歸屬不明、未登記、路徑不安全或 mapping 不明確 | 保留 |
 
 `/antigravity-acp cleanup balanced` 設定上述保留期，並在沒有既有值時補上 50 個 session／512 MiB 的軟上限。既有 `0` 仍代表停用上限。可用 `cleanup balanced 14` 把一般孤立資料改留 14 天；`recoveryDays` 可在設定檔調整。大量正常對話可以超出軟上限。
+後續調整：`balanced` 原本對所有 mapped session 無條件保留，導致長期使用後磁碟只增不減。現在 mapped session 也套用同一個 `idleDays` 視窗（預設 7 天），但仍要求：沒有 live lease、mapping 唯一且可證明歸屬、回收前先條件式移除 mapping。`conservative` 與 `timeout` 維持原本語意，mapped session 一律不刪。重建成本見 README 的 context transfer 章節：重播受單步 188,000 bytes 限制，長對話重開時 OMP 可能需要先 compaction。
 
 回收副本保留在原有 ACP 儲存位置，只是延後刪除，沒有新增還原介面。OMP 歷史記錄不會被改寫；ACP 專有推理與 checkpoint 在真正刪除後無法保留。已驗證的 source 缺失清理仍有自己的規則，不會被平衡模式當成普通孤立資料處理。
 
