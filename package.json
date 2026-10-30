@@ -1,6 +1,6 @@
 {
   "name": "omp-antigravity-acp-provider",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "ompAcpBundle": 1,
   "description": "Google Antigravity ACP provider for Oh My Pi (OMP), with tool bridging and per-model thinking; derived from zacbemis/pi-antigravity-acp-provider",
   "type": "module",

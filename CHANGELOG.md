@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## 0.1.29 — 2026-10-31
 
 - Reuse the warm ACP session when steering on servers without `session/cancel` (verified `agy_acp_server` 1.4.3 returns `-32601`): hold the caller's abort, keep the transport open so the superseded turn ends naturally, freeze message/thought/tool/plan updates so the retained partial output matches the checkpoint fingerprint, and send the new request as a warm delta instead of a full cold replay that could trip the 188,000-byte per-step guard and force OMP compaction. The grace is activity-aware — long thinking or tool loops keep extending it — and only a silent gap beyond `OMP_ACP_STEER_GRACE_MS` (default 60000 ms, `0` restores the old rebuild) or the absolute `OMP_ACP_STEER_GRACE_MAX_MS` cap (default 300000 ms, `0` uncapped) falls back to cold reconstruction; the vendored progress watchdog stays the outer safety net.
 
