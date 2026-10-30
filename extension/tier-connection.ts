@@ -7,7 +7,11 @@ import { showAcpUpdate } from "./activity-presentation.ts";
 import { parseSessionUsage, usageDelta, type SessionUsage } from "./usage-accounting.ts";
 import type { SessionCleanup } from "./session-cleanup.ts";
 import type { Diagnostics } from "./diagnostics.ts";
+import { deferredAbortSignal, steerTimings as resolveSteerTimings, type SteerTimings } from "./turn-cancellation.ts";
 
+// Updates that would extend the retained turn output stay frozen while a
+// turn the server cannot cancel drains towards its natural end.
+const STEER_FROZEN_UPDATES = new Set(["agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]);
 export class TierConnection extends AntigravityAcpConnection {
   confirmedThinking: { model: string; effort: string } | undefined;
   debugToolUpdates: boolean;
@@ -27,8 +31,11 @@ export class TierConnection extends AntigravityAcpConnection {
   private ownershipRetry?: Promise<void>;
   private cleanupLeases = new Map<string, string>();
   toolRouting: { nativeTools: NativeToolMode; channel: "pending" | "system-append" | "legacy-prompt" } | undefined;
+  private readonly steerTimings: SteerTimings;
+  private readonly steerMuted = new Set<string>();
+  private readonly steerActivity = new Map<string, Set<() => void>>();
 
-  constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics }) {
+  constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompSteerTimings?: SteerTimings; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics }) {
     super(options);
     this.cleanup = options.ompCleanup;
     this.diagnostics = options.ompDiagnostics;
@@ -36,6 +43,7 @@ export class TierConnection extends AntigravityAcpConnection {
     void this.process.exited.then(() => this.releaseCleanupLeases()).catch(() => {});
     this.debugToolUpdates = options.ompDebugToolUpdates ?? false;
     this.usageMode = options.ompUsageMode ?? "auto";
+    this.steerTimings = options.ompSteerTimings ?? resolveSteerTimings();
     this.setHandlers({ ...options.handlers, onUpdate: async notification => {
       const update = notification.update as {
         sessionUpdate?: string;
@@ -62,6 +70,14 @@ export class TierConnection extends AntigravityAcpConnection {
         this.diagnostics?.record("acp.first-output", performance.now() - this.firstOutput.get(notification.sessionId)!);
         this.firstOutput.delete(notification.sessionId);
       }
+      if (this.steerMuted.has(notification.sessionId)) {
+        // The turn cannot be cancelled and is draining towards its natural
+        // end: the update proves it is alive and extends the steering grace,
+        // while output-mutating updates stay frozen so the checkpointed
+        // fingerprint still matches what OMP retained at the boundary.
+        for (const listener of [...this.steerActivity.get(notification.sessionId) ?? []]) listener();
+        if (STEER_FROZEN_UPDATES.has(update.sessionUpdate ?? "")) return;
+      }
       if (showAcpUpdate(notification, this.debugToolUpdates)) await options.handlers?.onUpdate?.(notification);
     } });
     if (options.ompNativeTools) {
@@ -75,6 +91,25 @@ export class TierConnection extends AntigravityAcpConnection {
   configureUsage(mode: "auto" | "off") {
     this.usageMode = mode;
     this.usageBaselines.clear();
+  }
+
+  // drainCancelledTurn calls this while waiting for a turn the server cannot
+  // cancel, so retained partial output stays frozen at the steering boundary
+  // and the checkpointed fingerprint still matches the OMP transcript.
+  muteSteerChunks(sessionId: string) {
+    this.steerMuted.add(sessionId);
+  }
+
+  // armSteerGiveup subscribes here: every update from the draining session
+  // resets the silence window of the steering grace.
+  onSteerActivity(sessionId: string, listener: () => void): () => void {
+    let listeners = this.steerActivity.get(sessionId);
+    if (!listeners) this.steerActivity.set(sessionId, (listeners = new Set()));
+    listeners.add(listener);
+    return () => {
+      listeners!.delete(listener);
+      if (!listeners!.size) this.steerActivity.delete(sessionId);
+    };
   }
 
   override async newSession(...args: Parameters<AntigravityAcpConnection["newSession"]>) {
@@ -106,6 +141,8 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageStatus?.delete(id);
     this.usageBaselines?.delete(id);
     this.usageCommands?.delete(id);
+    this.steerMuted?.delete(id);
+    this.steerActivity?.delete(id);
   }
   async retireForReplacement(key: string, id: string) {
     const unloaded = !Object.keys(this.getSessionState(id)).length;
@@ -142,6 +179,8 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageCommands?.clear();
     this.usageCaptures?.clear();
     this.firstOutput?.clear();
+    this.steerMuted?.clear();
+    this.steerActivity?.clear();
   }
   private async retryOwnership() {
     if (this.ownershipRetry) return this.ownershipRetry;
@@ -174,10 +213,19 @@ export class TierConnection extends AntigravityAcpConnection {
   override async prompt(request: Parameters<AntigravityAcpConnection["prompt"]>[0], signal?: AbortSignal) {
     this.activePrompts++;
     const id = request.sessionId;
+    // The next dispatch owns this session's stream again; updates from a
+    // drained turn must no longer be frozen once it starts.
+    this.steerMuted?.delete(id);
     await this.retryOwnership();
     let abortedAt: number | undefined;
     const aborted = () => { abortedAt = performance.now(); };
     signal?.addEventListener("abort", aborted, { once: true });
+    // The official server has no session/cancel, so a caller abort must not
+    // reach the vendored transport immediately: upstream closes the whole
+    // connection 1.5s later and would destroy the warm session that
+    // drainCancelledTurn is waiting to reuse. The hold lasts as long as the
+    // draining turn keeps producing updates, within the grace timings.
+    const deferred = signal ? deferredAbortSignal(signal, this.steerTimings, { source: this, sessionId: id }) : undefined;
     try { await this.cleanup?.touch(id); } catch { /* Cleanup must not affect inference. */ }
     try {
       const queryUsage = process.env.OMP_ACP_USAGE !== "off" && this.usageMode !== "off" && this.usageCommands.has(id);
@@ -189,7 +237,7 @@ export class TierConnection extends AntigravityAcpConnection {
       }
       const started = performance.now();
       this.firstOutput?.set(id, started);
-      const response = await super.prompt(request, signal);
+      const response = await super.prompt(request, deferred?.signal ?? signal);
       this.diagnostics?.record("acp.prompt", performance.now() - started);
       if (abortedAt !== undefined && ["cancelled", "end_turn"].includes(response.stopReason)) this.diagnostics?.record("acp.cancel-confirmation", performance.now() - abortedAt);
       const withContext = <T extends { _meta?: Record<string, unknown> }>(value: T): T => {
@@ -214,6 +262,7 @@ export class TierConnection extends AntigravityAcpConnection {
         return withContext(response);
       }
     } finally {
+      deferred?.dispose();
       signal?.removeEventListener("abort", aborted);
       this.firstOutput?.delete(id);
       this.activePrompts--;

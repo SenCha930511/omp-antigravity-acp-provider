@@ -21,6 +21,9 @@ async function fixture(maxIdleEntries = 2) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-transitions-"));
   const store = new AcpSessionStore(path.join(root, "sessions.json"));
   const sessions = new Map<string, any>(), connections: any[] = [], actions: string[] = [];
+  const cancelState = { unsupported: false };
+  const hangs: Array<{ promise: Promise<void>; resolve: () => void }> = [];
+  const muted: string[] = [];
   let failResume = false, failLoad = false;
   const pool = new SessionRuntimePool<any>(() => {
     let runtime: any;
@@ -28,6 +31,16 @@ async function fixture(maxIdleEntries = 2) {
       const exit = Promise.withResolvers<any>(), closed = Promise.withResolvers<never>();
       void closed.promise.catch(() => {});
       const connection: any = { process: { alive: true, exited: exit.promise }, cwd: options.cwd, prompts: [], restored: [], activePrompts: 0,
+        frozen: new Set<string>(), steerListeners: [] as Array<[string, () => void]>,
+        // Mirrors TierConnection: frozen updates count as steer activity but
+        // are never forwarded, so the checkpoint fingerprint stays frozen.
+        emit(update: any) {
+          if (connection.frozen.has(connection.id)) {
+            for (const [sid, listener] of [...connection.steerListeners]) if (sid === connection.id) listener();
+            return;
+          }
+          options.handlers.onUpdate({ sessionId: connection.id, update });
+        },
         async initialize() { return { protocolVersion: 1, agentCapabilities: {
           loadSession: true, sessionCapabilities: { resume: {} }, promptCapabilities: { embeddedContext: true, image: true } } }; },
         getSessionState() { return sessions.get(connection.id); },
@@ -51,14 +64,41 @@ async function fixture(maxIdleEntries = 2) {
         async setModel(_id: string, id: string) { connection.getSessionState().models.currentModelId = id; },
         async setMode(_id: string, mode: string) { connection.getSessionState().modes.currentModeId = mode; },
         holdPromptWatchdog() { return () => {}; },
+        async cancel() {
+          if (cancelState.unsupported) {
+            const error = Object.assign(new Error("Method not found: session/cancel"), { code: -32601 });
+            throw error;
+          }
+          throw new Error("Fixture cancel unavailable");
+        },
+        muteSteerChunks(id: string) { muted.push(id); connection.frozen.add(id); },
+        onSteerActivity(id: string, listener: () => void) {
+          const entry = [id, listener] as [string, () => void];
+          connection.steerListeners.push(entry);
+          return () => { const at = connection.steerListeners.indexOf(entry); if (at >= 0) connection.steerListeners.splice(at, 1); };
+        },
         async prompt(request: any) {
           connection.activePrompts++;
+          connection.frozen.delete(connection.id);
           connection.prompts.push({ ...structuredClone(request), model: connection.getSessionState().models.currentModelId });
           try {
             const action = actions.shift();
             if (action === "tools") {
               const binding = [...runtime.resolvedBindings].find((b: any) => b.session.sessionId === connection.id);
               await Promise.race([runtime.requestPiTool(binding, { id: "pending-read", name: "read", arguments: {} }), closed.promise]);
+            }
+            if (action === "hang" || action === "hang-dribble") {
+              const hang = Promise.withResolvers<void>();
+              hangs.push(hang);
+              const dribble = action === "hang-dribble"
+                ? setInterval(() => connection.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "DRIBBLE" } }), 25)
+                : undefined;
+              try {
+                await Promise.race([hang.promise, closed.promise]);
+              } finally {
+                if (dribble) clearInterval(dribble);
+              }
+              return { stopReason: "end_turn" };
             }
             if (action === "foreign") {
               const foreign = randomUUID();
@@ -68,8 +108,8 @@ async function fixture(maxIdleEntries = 2) {
               options.handlers.onUpdate({ sessionId: foreign, update: { sessionUpdate: "agent_message_chunk",
                 content: { type: "text", text: "FOREIGN_SESSION_OUTPUT" } } });
             }
-            options.handlers.onUpdate({ sessionId: connection.id, update: { sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: `ACK:${connection.id}:${connection.prompts.length}` } } });
+            connection.emit({ sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: `ACK:${connection.id}:${connection.prompts.length}` } });
             return { stopReason: "end_turn" };
           } finally { connection.activePrompts--; }
         },
@@ -95,7 +135,8 @@ async function fixture(maxIdleEntries = 2) {
       return events.find(e => e.type === "done")?.message;
     } finally { lease.release(); }
   }
-  return { root, store, pool, connections, actions, turn,
+  return { root, store, pool, connections, actions, turn, cancel: cancelState, hangs, muted,
+    releaseHangs() { for (const hang of hangs) hang.resolve(); },
     failRestoration(resume: boolean, load: boolean) { failResume = resume; failLoad = load; },
     async close() { await pool.closeAll(); await fs.rm(root, { recursive: true, force: true }); },
   };
@@ -272,4 +313,125 @@ test("moving cwd with an unchanged routing id cannot reuse the old ACP workspace
     assert.equal(connection.prompts.length, 1);
     assert.match(current(connection.prompts[0]), /REQ_AFTER_MOVE/);
   } finally { process.chdir(originalCwd); await f.close(); }
+});
+
+test("steer with unsupported session/cancel reuses the warm ACP session after the old turn ends", { timeout: 8000 }, async () => {
+  const previous = process.env.OMP_ACP_STEER_GRACE_MS;
+  process.env.OMP_ACP_STEER_GRACE_MS = "5000";
+  const f = await fixture();
+  try {
+    f.cancel.unsupported = true;
+    f.actions.push("hang");
+    const first = user("REQ_STEER_FIRST");
+    let oldTurnFailed = false;
+    const oldTurn = f.turn("steer", [first]).catch(() => { oldTurnFailed = true; });
+    while (!f.connections.length || f.connections[0].prompts.length < 1) await tick();
+    const connection = f.connections[0], id = connection.id;
+    const nextTurn = f.turn("steer", [first, user("REQ_STEER_NOW")]);
+    while (!f.muted.length) await tick();
+    assert.equal(connection.prompts.length, 1, "the steer must wait for the old turn instead of dispatching concurrently");
+    f.releaseHangs();
+    await nextTurn;
+    await oldTurn;
+    assert.ok(oldTurnFailed, "the superseded turn still reports the abort to its own writer");
+    const request = connection.prompts.at(-1);
+    assert.equal(request.sessionId, id, "the warm ACP session must survive the steer");
+    assert.match(current(request), /REQ_STEER_NOW/);
+    assert.doesNotMatch(payload(request), /REQ_STEER_FIRST/, "only the unseen delta is replayed");
+    assert.equal(f.connections.length, 1, "no cold reconstruction may spawn a second connection");
+    assert.equal((await f.store.get("steer"))!.ompInFlight, false, "the reused mapping rests clean, not in flight");
+  } finally {
+    if (previous === undefined) delete process.env.OMP_ACP_STEER_GRACE_MS;
+    else process.env.OMP_ACP_STEER_GRACE_MS = previous;
+    await f.close();
+  }
+});
+
+test("steer grace expiry still rebuilds cold when the old turn never ends", { timeout: 8000 }, async () => {
+  const previous = process.env.OMP_ACP_STEER_GRACE_MS;
+  process.env.OMP_ACP_STEER_GRACE_MS = "25";
+  const f = await fixture();
+  try {
+    f.cancel.unsupported = true;
+    f.actions.push("hang");
+    const first = user("REQ_STEER_EXPIRE_FIRST");
+    const oldTurn = f.turn("expire", [first]).catch(() => {});
+    while (!f.connections.length || f.connections[0].prompts.length < 1) await tick();
+    const old = f.connections[0].id;
+    const nextTurn = f.turn("expire", [first, user("REQ_STEER_EXPIRE_NOW")]);
+    while (!f.muted.length) await tick();
+    await nextTurn;
+    await oldTurn;
+    assert.equal(f.connections.length, 2, "an expired grace must fall back to reconstruction");
+    assert.equal(f.connections[0].process.alive, false);
+    const connection = f.connections.at(-1), request = connection.prompts.at(-1);
+    assert.notEqual(connection.id, old);
+    assert.match(current(request), /REQ_STEER_EXPIRE_NOW/);
+    assert.match(payload(request), /REQ_STEER_EXPIRE_FIRST/, "the fallback cold-replays the retained history");
+  } finally {
+    if (previous === undefined) delete process.env.OMP_ACP_STEER_GRACE_MS;
+    else process.env.OMP_ACP_STEER_GRACE_MS = previous;
+    await f.close();
+  }
+});
+
+test("steer grace extends while the old turn keeps producing output", { timeout: 8000 }, async () => {
+  const previous = process.env.OMP_ACP_STEER_GRACE_MS, previousMax = process.env.OMP_ACP_STEER_GRACE_MAX_MS;
+  process.env.OMP_ACP_STEER_GRACE_MS = "80";
+  process.env.OMP_ACP_STEER_GRACE_MAX_MS = "10000";
+  const f = await fixture();
+  try {
+    f.cancel.unsupported = true;
+    f.actions.push("hang-dribble");
+    const first = user("REQ_DRIBBLE_FIRST");
+    const oldTurn = f.turn("dribble", [first]).catch(() => {});
+    while (!f.connections.length || f.connections[0].prompts.length < 1) await tick();
+    const connection = f.connections[0], id = connection.id;
+    const nextTurn = f.turn("dribble", [first, user("REQ_DRIBBLE_NOW")]);
+    while (!f.muted.length) await tick();
+    setTimeout(() => f.releaseHangs(), 320);
+    await nextTurn;
+    await oldTurn;
+    assert.equal(f.connections.length, 1, "an actively streaming turn must not expire the silence window");
+    const request = connection.prompts.at(-1);
+    assert.equal(request.sessionId, id, "the warm ACP session must survive the extended grace");
+    assert.match(current(request), /REQ_DRIBBLE_NOW/);
+    assert.doesNotMatch(payload(request), /REQ_DRIBBLE_FIRST/, "only the unseen delta is replayed");
+  } finally {
+    if (previous === undefined) delete process.env.OMP_ACP_STEER_GRACE_MS;
+    else process.env.OMP_ACP_STEER_GRACE_MS = previous;
+    if (previousMax === undefined) delete process.env.OMP_ACP_STEER_GRACE_MAX_MS;
+    else process.env.OMP_ACP_STEER_GRACE_MAX_MS = previousMax;
+    await f.close();
+  }
+});
+
+test("steer grace still falls back cold at the absolute cap while output continues", { timeout: 8000 }, async () => {
+  const previous = process.env.OMP_ACP_STEER_GRACE_MS, previousMax = process.env.OMP_ACP_STEER_GRACE_MAX_MS;
+  process.env.OMP_ACP_STEER_GRACE_MS = "600000";
+  process.env.OMP_ACP_STEER_GRACE_MAX_MS = "150";
+  const f = await fixture();
+  try {
+    f.cancel.unsupported = true;
+    f.actions.push("hang-dribble");
+    const first = user("REQ_CAP_FIRST");
+    const oldTurn = f.turn("cap", [first]).catch(() => {});
+    while (!f.connections.length || f.connections[0].prompts.length < 1) await tick();
+    const old = f.connections[0].id;
+    const nextTurn = f.turn("cap", [first, user("REQ_CAP_NOW")]);
+    while (!f.muted.length) await tick();
+    await nextTurn;
+    await oldTurn;
+    assert.equal(f.connections.length, 2, "the absolute cap must still bound the wait");
+    assert.equal(f.connections[0].process.alive, false);
+    const connection = f.connections.at(-1), request = connection.prompts.at(-1);
+    assert.notEqual(connection.id, old);
+    assert.match(current(request), /REQ_CAP_NOW/);
+  } finally {
+    if (previous === undefined) delete process.env.OMP_ACP_STEER_GRACE_MS;
+    else process.env.OMP_ACP_STEER_GRACE_MS = previous;
+    if (previousMax === undefined) delete process.env.OMP_ACP_STEER_GRACE_MAX_MS;
+    else process.env.OMP_ACP_STEER_GRACE_MAX_MS = previousMax;
+    await f.close();
+  }
 });

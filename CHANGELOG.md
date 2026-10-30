@@ -3,6 +3,8 @@
 
 ## Unreleased
 
+- Reuse the warm ACP session when steering on servers without `session/cancel` (verified `agy_acp_server` 1.4.3 returns `-32601`): hold the caller's abort, keep the transport open so the superseded turn ends naturally, freeze message/thought/tool/plan updates so the retained partial output matches the checkpoint fingerprint, and send the new request as a warm delta instead of a full cold replay that could trip the 188,000-byte per-step guard and force OMP compaction. The grace is activity-aware — long thinking or tool loops keep extending it — and only a silent gap beyond `OMP_ACP_STEER_GRACE_MS` (default 60000 ms, `0` restores the old rebuild) or the absolute `OMP_ACP_STEER_GRACE_MAX_MS` cap (default 300000 ms, `0` uncapped) falls back to cold reconstruction; the vendored progress watchdog stays the outer safety net.
+
 - Let `balanced` cleanup reclaim a still-mapped conversation once its last activity exceeds `idleDays`, after proving unique ownership and removing the mapping first; the next turn rebuilds from OMP history. `conservative` and `timeout` keep mapped sessions, and live leases or ambiguous mappings still preserve them.
 - Keep cleanup working when one OMP journal is unreadable: an empty or truncated `.jsonl` now marks the relocation scan incomplete instead of aborting it for every session, and an incomplete scan can never prove a missing source was deleted.
 - Always release a session's one-shot registration when its runtime teardown fails, instead of skipping the unbind because one closing promise rejected.
