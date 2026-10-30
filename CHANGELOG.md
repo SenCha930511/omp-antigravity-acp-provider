@@ -1,5 +1,15 @@
 # Changelog
 
+
+## 0.1.28 — 2026-10-30
+
+- Make the macOS keychain path asynchronous with explicit outcomes: present, confirmed absent only for the not-found exit with matching stderr, and rejection with fixed credential-free messages for every other failure, so timeouts or permission errors can no longer be reported as signed out or as successful credential removal.
+- Refuse a fresh Google login when durable keychain removal cannot be confirmed, instead of silently reusing a possibly retained previous-account credential.
+- Re-check the OMP credential marker immediately before the followed logout deletes the keychain entry, and refresh the watcher state inside the command-logout guard, so a quick re-login after `/antigravity-acp logout` cannot have its new keychain credential deleted by a stale deferred logout.
+- Surface followed-logout failures as one fixed error notice instead of unhandled promise rejections, including on the busy-retry path.
+- Retry transient `ELOCKED` cleanup-registry contention with a bounded 5-second budget on the resume/load path only, keeping warm native session restoration under short lock races; every other path still fails fast with the original error identity.
+- Compute the pending-prefix fingerprint once per dispatch in the supersedes-continuation path (previously twice) and index source-tracking mappings in one scan inside the cleanup transaction, with behavior-equivalence and call-count regressions.
+
 ## 0.1.27 — 2026-10-30
 
 - Add an optional balanced cleanup preset with orphan retention, minimum recovery windows, soft budgets and reclaimed-byte reporting; preserve the existing default policy and OMP history.
