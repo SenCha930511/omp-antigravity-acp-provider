@@ -1,6 +1,10 @@
 # Changelog
 
 
+## 0.1.31 — 2026-10-31
+
+- Treat an identical resend as OMP `/retry` and regenerate on the warm ACP session instead of rebuilding cold: when the incoming context exactly matches what the session already accepted (the retry drops the generated answer from the OMP branch), the adapter now sends a compact regenerate nudge that restates the original request, keeping every retry off the full cold-replay path that could exceed the 188,000-byte per-step guard and force OMP compaction. Edited prefixes, missing partial answers and other unsafe boundaries still rebuild as before, and the regenerated answer becomes the expected boundary so follow-up turns stay warm.
+
 ## 0.1.30 — 2026-10-31
 
 - Keep the warm ACP session when a steer lands on a tool boundary and the superseded turn ends by the server's own budget (`max_turn_requests` / `max_tokens`) instead of a clean `end_turn`: the drain and cancellation checkpoint now accept those terminal reasons, so the next request continues with only the unseen delta instead of a cold replay that exceeds the 188,000-byte per-step guard and forces OMP to compact the conversation.
