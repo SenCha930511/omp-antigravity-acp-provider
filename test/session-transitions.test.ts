@@ -83,9 +83,12 @@ async function fixture(maxIdleEntries = 2) {
           connection.prompts.push({ ...structuredClone(request), model: connection.getSessionState().models.currentModelId });
           try {
             const action = actions.shift();
-            if (action === "tools") {
+            if (action === "tools" || action === "tools-cap" || action === "tools-max") {
               const binding = [...runtime.resolvedBindings].find((b: any) => b.session.sessionId === connection.id);
-              await Promise.race([runtime.requestPiTool(binding, { id: "pending-read", name: "read", arguments: {} }), closed.promise]);
+              const result = await Promise.race([runtime.requestPiTool(binding, { id: "pending-read", name: "read", arguments: {} }), closed.promise]);
+              // A drained steer cancels the parked call; a long agent loop can then
+              // end its own turn by budget instead of a clean end_turn.
+              if (action !== "tools" && result?.isError) return { stopReason: action === "tools-cap" ? "max_turn_requests" : "max_tokens" };
             }
             if (action === "hang" || action === "hang-dribble") {
               const hang = Promise.withResolvers<void>();
@@ -346,6 +349,29 @@ test("steer with unsupported session/cancel reuses the warm ACP session after th
     await f.close();
   }
 });
+
+for (const [action, label] of [["tools-cap", "max_turn_requests"], ["tools-max", "max_tokens"]] as const) {
+  test(`steer at a tool boundary stays warm when the drained turn ends with ${label}`, { timeout: 8000 }, async () => {
+    const f = await fixture();
+    try {
+      f.cancel.unsupported = true;
+      f.actions.push(action);
+      const first = user("REQ_BUDGET_STEER_FIRST"), partial = await f.turn("budget-steer", [first]);
+      assert.equal(partial.stopReason, "toolUse");
+      const toolCall = partial.content.find((block: any) => block.type === "toolCall");
+      const result = { role: "toolResult", toolName: "read", toolCallId: toolCall.id,
+        content: [{ type: "text", text: "TOOL_RESULT_BODY" }], timestamp: 2 };
+      // OMP injects the steering message in the same request as the tool result.
+      const answer = await f.turn("budget-steer", [first, partial, result, user("REQ_BUDGET_STEER_NOW")]);
+      assert.equal(answer.stopReason, "stop");
+      assert.equal(f.connections.length, 1, `${label} must not force a cold reconstruction`);
+      const connection = f.connections[0], request = connection.prompts.at(-1);
+      assert.equal(request.sessionId, connection.id, "the warm ACP session must survive the budget stop");
+      assert.match(current(request), /REQ_BUDGET_STEER_NOW/);
+      assert.doesNotMatch(payload(request), /REQ_BUDGET_STEER_FIRST/, "only the unseen delta is replayed");
+    } finally { await f.close(); }
+  });
+}
 
 test("steer grace expiry still rebuilds cold when the old turn never ends", { timeout: 8000 }, async () => {
   const previous = process.env.OMP_ACP_STEER_GRACE_MS;
