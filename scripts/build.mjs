@@ -69,7 +69,7 @@ const result = await build({
           {
             name: "context",
             anchor: "buildPromptParts(context, fresh, unseenStart)",
-            replacement: "buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy })",
+            replacement: "buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy }, ompRetryResend)",
           },
           {
             name: "workspace and parked model boundaries",
@@ -162,6 +162,11 @@ const result = await build({
             replacement: "if (binding.ompInvalidated) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost');\n\t\t\tbinding.ompTerminalStopReason = response.stopReason;\n\t\t\tif (binding.abortRequested) throw abortError();",
           },
           {
+            name: "identical resend keeps the warm session for regeneration",
+            anchor: "// A queued caller may hold an obsolete binding after shutdown/mode changes.\n\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);",
+            replacement: "// A queued caller may hold an obsolete binding after shutdown/mode changes.\n\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);\n\t\t\t// An identical resend is OMP /retry: the generated answer was dropped from\n\t\t\t// the OMP branch, so regeneration continues on the warm ACP session.\n\t\t\tconst ompRetryResend = binding.messageCount > 0 &&\n\t\t\t\tcontext.messages.length === binding.messageCount &&\n\t\t\t\tmessagesFingerprint(context.messages) === binding.historyFingerprint;",
+          },
+          {
             name: "generated assistant boundary must match retained OMP history",
             anchor: "binding.needsReconstruction || binding.mode !== this.permissionMode ||",
             replacement: [
@@ -169,7 +174,7 @@ const result = await build({
               "\t\t\t\t(binding.expectedAssistantFingerprint && context.messages[binding.messageCount]?.role === 'assistant' &&",
               "\t\t\t\t\tmessageFingerprint(context.messages[binding.messageCount]) !== binding.expectedAssistantFingerprint) ||",
               "\t\t\t\t((binding.ompExpectedAssistantHasOutput || (binding.ompCancelledCheckpoint && binding.ompCancelledHadOutput)) &&",
-              "\t\t\t\t\tcontext.messages[binding.messageCount]?.role !== 'assistant') || binding.mode !== this.permissionMode ||",
+              "\t\t\t\t\tcontext.messages[binding.messageCount]?.role !== 'assistant' && !ompRetryResend) || binding.mode !== this.permissionMode ||",
             ].join("\n"),
           },
           {

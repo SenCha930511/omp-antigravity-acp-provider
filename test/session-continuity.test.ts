@@ -414,3 +414,36 @@ for (const changed of ["edited", "missing", "unchanged", "empty"] as const) {
     } finally { await f.close(); }
   });
 }
+
+test("identical resend (OMP /retry) regenerates on the warm ACP session", async () => {
+  const f = fixture();
+  try {
+    const r = f.create(), first = user("FIRST");
+    assert.equal(f.reply(await f.run(r, [first]))?.stopReason, "stop");
+    const retried = await f.run(r, [first]);
+    assert.equal(f.reply(retried)?.stopReason, "stop");
+    assert.equal(f.connections.length, 1, "/retry must not rebuild the ACP session");
+    const prompt = JSON.stringify(f.connections[0].prompts.at(-1).prompt);
+    assert.match(prompt, /OMP retry request/, "the regenerate nudge replaces the cold replay");
+    assert.match(prompt, /FIRST/, "the original request is restated for regeneration");
+    assert.doesNotMatch(prompt, /Prior OMP conversation/, "no history replay is sent");
+    // The regenerated answer becomes the expected boundary; a follow-up stays warm.
+    await f.run(r, [first, f.reply(retried), user("AFTER_RETRY")]);
+    assert.equal(f.connections.length, 1, "the regenerated boundary must stay warm");
+    const follow = JSON.stringify(f.connections[0].prompts.at(-1).prompt);
+    assert.match(follow, /AFTER_RETRY/);
+    assert.doesNotMatch(follow, /Prior OMP conversation/);
+  } finally { await f.close(); }
+});
+
+test("identical resend after an empty answer also regenerates warmly", async () => {
+  const f = fixture();
+  try {
+    const r = f.create(), first = user("FIRST");
+    f.actions.push("empty");
+    await f.run(r, [first]);
+    await f.run(r, [first]);
+    assert.equal(f.connections.length, 1, "an empty prior answer must not force a rebuild");
+    assert.match(JSON.stringify(f.connections[0].prompts.at(-1).prompt), /OMP retry request/);
+  } finally { await f.close(); }
+});

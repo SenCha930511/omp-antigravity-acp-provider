@@ -78,8 +78,20 @@ export function historyBudget(_contextWindow = 32_768, env = process.env, config
   return bytes;
 }
 
+// OMP /retry drops the generated answer from its branch and resends the same
+// context. The warm ACP session already holds the request, so regeneration is
+// requested explicitly instead of replaying history into a cold session.
+function retryRequestText(content: string | TransferBlock[]): string {
+  const restate = typeof content === "string" ? content.trim()
+    : content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n\n").trim();
+  return "\n\n# OMP retry request\n\n" +
+    "The user discarded the previous response to the current user request. " +
+    "Produce a completely new answer for it. Do not continue, quote or repeat the discarded response." +
+    (restate ? `\n\n# Original request\n\n${restate}` : "");
+}
+
 export function buildPromptParts(context: TransferContext, fresh: boolean, unseenStart?: number,
-  limits: { contextWindow?: number; maxTokens?: number; policy?: ContextOptions } = {}) {
+  limits: { contextWindow?: number; maxTokens?: number; policy?: ContextOptions } = {}, retryResend = false) {
   // The runtime hot path always passes a fully resolved ompContextPolicy
   // (see scripts/build.mjs); re-resolution is only needed for partial input.
   const policy = limits.policy;
@@ -138,7 +150,8 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
   for (const block of images) prompt.push(block);
   const tailBlocks: TransferBlock[] = [];
   if (!fresh && start > latest) {
-    const continuation = { type: "text", text: "\n\n# Continue the active OMP request\n\n" +
+    const continuation = { type: "text", text: retryResend ? retryRequestText(messages[latest]!.content) :
+      "\n\n# Continue the active OMP request\n\n" +
       "The new context/tool results above belong to the user request already received in this session. " +
       "Finish that request from those results. Do not answer historical user requests or repeat completed tool actions." };
     prompt.push(continuation);
