@@ -25,6 +25,7 @@
     "!extension/vendor/",
     "licenses/",
     "README.md",
+    "AGENT_INSTALL.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "THIRD_PARTY_LICENSES.txt"
