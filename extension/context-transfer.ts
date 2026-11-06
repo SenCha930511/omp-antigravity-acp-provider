@@ -70,6 +70,18 @@ export function currentSystemInstructions(context: TransferContext): string {
   return prompt;
 }
 
+const DATE_CWD_REMINDER = /^(?:<system-reminder>\s*)?Today: [^\n]*?Do not repeat this information in your reply\.(?:\s*<\/system-reminder>)?\s*$/gmu;
+
+// OMP injects a date/cwd reminder around turns. Its metadata changes without
+// changing policy, so it must not force a full ACP replay (and possible
+// compaction) in the middle of an active tool continuation.
+export function stableSystemInstructions(context: TransferContext): string {
+  return currentSystemInstructions(context)
+    .replace(DATE_CWD_REMINDER, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function historyBudget(_contextWindow = 32_768, env = process.env, configured = 16_777_216): number {
   const bytes = Number(env.OMP_ACP_HISTORY_BYTES ?? configured);
   if (!Number.isSafeInteger(bytes) || bytes < 65_536 || bytes > 134_217_728) {

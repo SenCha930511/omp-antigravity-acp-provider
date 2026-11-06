@@ -9,6 +9,10 @@ import { AcpSessionStore, AntigravityRuntime } from "../extension/runtime.mjs";
 import { SessionRuntimePool } from "../extension/runtime-pool.ts";
 import { selectRuntimeModel } from "../extension/model-catalog.ts";
 
+// Existing transition tests exercise the explicit interrupt mode; queue mode
+// has its own regression below.
+process.env.OMP_ACP_STEER_MODE = "steer";
+
 const model = { id: "gemini-3.8-flash", name: "Offline Flash", api: "antigravity-acp", provider: "antigravity-acp",
   contextWindow: 524288, maxTokens: 32000, reasoning: false, input: ["text"],
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
@@ -126,12 +130,12 @@ async function fixture(maxIdleEntries = 2) {
     return runtime;
   }, runtime => runtime.close(), { timeoutMs: 0, maxIdleEntries,
     canDispose: runtime => ![...runtime.resolvedBindings].some((b: any) => b.connection.activePrompts > 0) });
-  async function turn(id: string, messages: any[], options: { model?: any; systemPrompt?: string; tools?: any[]; promptCacheKey?: string } = {}) {
+  async function turn(id: string, messages: any[], options: { model?: any; systemPrompt?: string; tools?: any[]; promptCacheKey?: string; signal?: AbortSignal } = {}) {
     const lease = pool.acquire(id), events: any[] = [];
     try {
       for await (const event of lease.value.stream(options.model ?? model,
         { messages, systemPrompt: options.systemPrompt ?? "FIXTURE_RULES", tools: options.tools ?? [] },
-        { sessionId: id, promptCacheKey: options.promptCacheKey }).stream) events.push(structuredClone(event));
+        { sessionId: id, promptCacheKey: options.promptCacheKey, signal: options.signal }).stream) events.push(structuredClone(event));
       await tick();
       const error = events.find(e => e.type === "error");
       if (error) throw new Error(error.error.errorMessage);
@@ -373,6 +377,25 @@ for (const [action, label] of [["tools-cap", "max_turn_requests"], ["tools-max",
   });
 }
 
+test("a tool-set change at a steer boundary keeps the warm session", { timeout: 8000 }, async () => {
+  const f = await fixture();
+  try {
+    f.cancel.unsupported = true;
+    f.actions.push("tools-cap");
+    const first = user("REQ_TOOLSET_STEER_FIRST");
+    const askTool = { name: "ask", description: "", parameters: { type: "object", properties: {} } };
+    const partial = await f.turn("toolset-steer", [first], { tools: [askTool] });
+    assert.equal(partial.stopReason, "toolUse");
+    const toolCall = partial.content.find((block: any) => block.type === "toolCall");
+    const result = { role: "toolResult", toolName: "read", toolCallId: toolCall.id,
+      content: [{ type: "text", text: "TOOL_RESULT_BODY" }], timestamp: 2 };
+    const answer = await f.turn("toolset-steer", [first, partial, result, user("REQ_TOOLSET_STEER_NOW")], { tools: [] });
+    assert.equal(answer.stopReason, "stop");
+    assert.equal(f.connections.length, 1, "a tool-set change must not force a cold reconstruction");
+    assert.match(current(f.connections[0].prompts.at(-1)), /REQ_TOOLSET_STEER_NOW/);
+  } finally { await f.close(); }
+});
+
 test("steer grace expiry still rebuilds cold when the old turn never ends", { timeout: 8000 }, async () => {
   const previous = process.env.OMP_ACP_STEER_GRACE_MS;
   process.env.OMP_ACP_STEER_GRACE_MS = "25";
@@ -458,6 +481,40 @@ test("steer grace still falls back cold at the absolute cap while output continu
     else process.env.OMP_ACP_STEER_GRACE_MS = previous;
     if (previousMax === undefined) delete process.env.OMP_ACP_STEER_GRACE_MAX_MS;
     else process.env.OMP_ACP_STEER_GRACE_MAX_MS = previousMax;
+    await f.close();
+  }
+});
+
+test("queue mode waits for the active streaming turn and reuses it", { timeout: 8000 }, async () => {
+  const previousMode = process.env.OMP_ACP_STEER_MODE;
+  process.env.OMP_ACP_STEER_MODE = "queue";
+  const f = await fixture();
+  try {
+    f.actions.push("hang");
+    const first = user("REQ_QUEUE_FIRST");
+    const controller = new AbortController();
+    let oldFailed = false;
+    const oldTurn = f.turn("queue", [first], { signal: controller.signal }).catch(() => { oldFailed = true; });
+    while (!f.connections.length || f.connections[0].prompts.length < 1) await tick();
+    const connection = f.connections[0], id = connection.id;
+    const nextTurn = f.turn("queue", [first, user("REQ_QUEUE_NOW")]);
+    await tick();
+    assert.equal(connection.prompts.length, 1, "the queued request must not dispatch concurrently");
+    controller.abort();
+    await tick();
+    assert.equal(connection.prompts.length, 1, "the old turn must not be replaced");
+    f.releaseHangs();
+    await nextTurn;
+    await oldTurn;
+    assert.equal(oldFailed, false, "queue mode must not abort the old writer");
+    const request = connection.prompts.at(-1);
+    assert.equal(request.sessionId, id);
+    assert.match(current(request), /REQ_QUEUE_NOW/);
+    assert.doesNotMatch(payload(request), /REQ_QUEUE_FIRST/);
+    assert.equal(f.connections.length, 1);
+  } finally {
+    if (previousMode === undefined) delete process.env.OMP_ACP_STEER_MODE;
+    else process.env.OMP_ACP_STEER_MODE = previousMode;
     await f.close();
   }
 });

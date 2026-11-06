@@ -5,6 +5,25 @@ export interface SteerTimings {
   maxMs: number;
 }
 
+export type SteerMode = "steer" | "queue";
+
+// Queue mode keeps the active ACP turn alive and sends the next user message
+// as a warm delta after it finishes. Steer mode keeps the original interrupt
+// behavior for callers that explicitly want it.
+export function steerMode(env: NodeJS.ProcessEnv = process.env): SteerMode {
+  const value = env.OMP_ACP_STEER_MODE?.trim().toLowerCase();
+  if (!value || value === "queue") return "queue";
+  if (value === "steer") return "steer";
+  throw new Error("OMP_ACP_STEER_MODE must be steer or queue");
+}
+
+// OMP aborts a steering turn with a reason-less AbortController. User cancels
+// and internal interrupts carry an explicit reason and must still stop work.
+export function isSteerAbort(signal: AbortSignal): boolean {
+  const reason = signal.reason;
+  return reason === undefined || (reason instanceof Error && reason.name === "AbortError");
+}
+
 export interface SteerActivitySource {
   onSteerActivity?(sessionId: string, listener: () => void): () => void;
 }
@@ -19,14 +38,14 @@ interface PendingTurn {
   };
 }
 
-// The official ACP server still lacks session/cancel (verified against
-// agy_acp_server 1.4.3: -32601 Method not found), so an interrupted turn
-// cannot be stopped. The steering grace instead waits for the old turn to end
-// naturally, letting the adapter checkpoint the warm ACP session and send the
-// new request as a delta instead of a full cold replay. The wait extends while
-// the old turn keeps producing updates — long thinking or tool loops do not
-// expire it — and only a silent gap beyond idleMs, or the absolute maxMs cap,
-// gives up. idleMs 0 restores the legacy immediate-reconstruction behavior.
+// session/cancel is a notification: the server may acknowledge it and still
+// send final updates before the prompt terminates. The steering grace therefore
+// waits for the terminal response, letting the adapter checkpoint the warm ACP
+// session and send the new request as a delta instead of a full cold replay.
+// The wait extends while the old turn keeps producing updates — long thinking
+// or tool loops do not expire it — and only a silent gap beyond idleMs, or the
+// absolute maxMs cap, gives up. idleMs 0 restores the legacy immediate
+// reconstruction behavior.
 export function steerTimings(env: NodeJS.ProcessEnv = process.env): SteerTimings {
   const idleMs = Number(env.OMP_ACP_STEER_GRACE_MS ?? 60_000);
   if (!Number.isSafeInteger(idleMs) || idleMs < 0 || idleMs > 600_000) {
@@ -90,14 +109,16 @@ export function deferredAbortSignal(
   signal: AbortSignal,
   timings: SteerTimings,
   activity?: { source: SteerActivitySource; sessionId: string },
+  holdOnAbort?: () => boolean,
 ): { signal: AbortSignal; dispose: () => void } {
   if (!(timings.idleMs > 0)) return { signal, dispose: () => undefined };
   const controller = new AbortController();
   let giveup: { dispose: () => void } | undefined;
   const onAbort = () => {
-    if (giveup) return;
+    if (giveup || holdOnAbort?.()) return;
     giveup = armSteerGiveup(activity?.source, activity?.sessionId, timings, () => controller.abort(signal.reason));
   };
+
   signal.addEventListener("abort", onAbort, { once: true });
   if (signal.aborted) onAbort();
   return {
@@ -124,12 +145,14 @@ export async function drainCancelledTurn(
   const cancelled = () => deadline.resolve(false);
   let timer = setTimeout(cancelled, timeoutMs);
   let giveup: { dispose: () => void } | undefined;
+  let finished = false;
   signal?.addEventListener("abort", cancelled, { once: true });
-  // Without session/cancel the old turn keeps running. Freeze what OMP has
-  // retained so the checkpointed fingerprint still matches once it ends, and
-  // wait for natural completion: the grace extends while the turn keeps
-  // producing updates and only gives up after a silent gap or the hard cap.
+  // session/cancel is an ACP notification: a successful send only means the
+  // server received it, not that the prompt already stopped. Freeze retained
+  // output and wait for the terminal response under the same activity-aware
+  // grace. The initial timer only bounds a transport that never sends.
   const extendForNaturalCompletion = () => {
+    if (finished || giveup) return;
     binding.connection.muteSteerChunks?.(binding.session.sessionId);
     clearTimeout(timer);
     giveup = armSteerGiveup(binding.connection, binding.session.sessionId, timings, cancelled);
@@ -137,17 +160,19 @@ export async function drainCancelledTurn(
   try {
     abort();
     // A blocked cancel transport must not block the fallback deadline.
-    try {
-      void binding.connection.cancel(binding.session.sessionId).catch((error: unknown) => {
+    void (async () => {
+      try {
+        await binding.connection.cancel(binding.session.sessionId);
+        if (timings.idleMs > 0) extendForNaturalCompletion();
+        else deadline.resolve(false);
+      } catch (error) {
         if (timings.idleMs > 0 && isCancelUnsupported(error)) extendForNaturalCompletion();
         else deadline.resolve(false);
-      });
-    } catch (error) {
-      if (timings.idleMs > 0 && isCancelUnsupported(error)) extendForNaturalCompletion();
-      else return false;
-    }
+      }
+    })();
     return await Promise.race([completion.then(() => true, () => false), deadline.promise]);
   } finally {
+    finished = true;
     giveup?.dispose();
     clearTimeout(timer);
     signal?.removeEventListener("abort", cancelled);

@@ -7,7 +7,7 @@ import { showAcpUpdate } from "./activity-presentation.ts";
 import { parseSessionUsage, usageDelta, type SessionUsage } from "./usage-accounting.ts";
 import type { SessionCleanup } from "./session-cleanup.ts";
 import type { Diagnostics } from "./diagnostics.ts";
-import { deferredAbortSignal, steerTimings as resolveSteerTimings, type SteerTimings } from "./turn-cancellation.ts";
+import { deferredAbortSignal, isSteerAbort, steerMode as resolveSteerMode, steerTimings as resolveSteerTimings, type SteerMode, type SteerTimings } from "./turn-cancellation.ts";
 
 // Updates that would extend the retained turn output stay frozen while a
 // turn the server cannot cancel drains towards its natural end.
@@ -31,11 +31,12 @@ export class TierConnection extends AntigravityAcpConnection {
   private ownershipRetry?: Promise<void>;
   private cleanupLeases = new Map<string, string>();
   toolRouting: { nativeTools: NativeToolMode; channel: "pending" | "system-append" | "legacy-prompt" } | undefined;
+  private readonly steerMode: SteerMode;
   private readonly steerTimings: SteerTimings;
   private readonly steerMuted = new Set<string>();
   private readonly steerActivity = new Map<string, Set<() => void>>();
 
-  constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompSteerTimings?: SteerTimings; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics }) {
+  constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompSteerMode?: SteerMode; ompSteerTimings?: SteerTimings; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics }) {
     super(options);
     this.cleanup = options.ompCleanup;
     this.diagnostics = options.ompDiagnostics;
@@ -43,6 +44,7 @@ export class TierConnection extends AntigravityAcpConnection {
     void this.process.exited.then(() => this.releaseCleanupLeases()).catch(() => {});
     this.debugToolUpdates = options.ompDebugToolUpdates ?? false;
     this.usageMode = options.ompUsageMode ?? "auto";
+    this.steerMode = options.ompSteerMode ?? resolveSteerMode();
     this.steerTimings = options.ompSteerTimings ?? resolveSteerTimings();
     this.setHandlers({ ...options.handlers, onUpdate: async notification => {
       const update = notification.update as {
@@ -218,14 +220,18 @@ export class TierConnection extends AntigravityAcpConnection {
     this.steerMuted?.delete(id);
     await this.retryOwnership();
     let abortedAt: number | undefined;
-    const aborted = () => { abortedAt = performance.now(); };
+    const queueHold = () => this.steerMode === "queue" && signal !== undefined && isSteerAbort(signal);
+    const aborted = () => {
+      abortedAt = performance.now();
+      // Queue mode keeps the ACP turn alive after OMP's steering abort. Freeze
+      // output from this point so the checkpoint matches what OMP retained.
+      if (queueHold()) this.muteSteerChunks(id);
+    };
     signal?.addEventListener("abort", aborted, { once: true });
-    // The official server has no session/cancel, so a caller abort must not
-    // reach the vendored transport immediately: upstream closes the whole
-    // connection 1.5s later and would destroy the warm session that
-    // drainCancelledTurn is waiting to reuse. The hold lasts as long as the
-    // draining turn keeps producing updates, within the grace timings.
-    const deferred = signal ? deferredAbortSignal(signal, this.steerTimings, { source: this, sessionId: id }) : undefined;
+    // The server may acknowledge session/cancel but still send final updates.
+    // A transport abort would close the whole connection 1.5s later. Hold it
+    // while the draining turn is alive; queue mode holds until it completes.
+    const deferred = signal ? deferredAbortSignal(signal, this.steerTimings, { source: this, sessionId: id }, queueHold) : undefined;
     try { await this.cleanup?.touch(id); } catch { /* Cleanup must not affect inference. */ }
     try {
       const queryUsage = process.env.OMP_ACP_USAGE !== "off" && this.usageMode !== "off" && this.usageCommands.has(id);

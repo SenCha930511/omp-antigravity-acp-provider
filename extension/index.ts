@@ -18,6 +18,7 @@ import {
   MARKER,
   OmpAuthCoordinator,
   antigravityAccountEmail,
+  authReady,
   keychain,
   logoutFollow,
   type OmpCommandContext,
@@ -97,6 +98,14 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       throw error;
     });
     return readiness;
+  }
+
+  // Inference and model discovery must not let the ACP server open an
+  // interactive Google consent flow at session/new. A missing local login is a
+  // user action, not a reason to leave the submitted message pending.
+  async function requireAcpAuth(): Promise<void> {
+    if (await authReady()) return;
+    throw new Error("Antigravity ACP is not signed in. Run /login (or /antigravity-acp login) before sending a message.");
   }
 
   const connections = new Set<TierConnection>();
@@ -218,6 +227,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     cleanup,
     prepareRuntime,
     () => [...(FALLBACK_MODELS as PublicCatalogModel[])],
+    requireAcpAuth,
   );
   let initialModels = catalogStore.loadInitialOrCached(contextSettings);
 
@@ -321,6 +331,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
             try {
               if (options?.signal?.aborted) throw new Error("ACP request cancelled before startup");
               await lifecycle.ready(ticket);
+              await requireAcpAuth();
               await diagnostics.measure("runtime.prepare", prepareRuntime);
               if (options?.signal?.aborted) throw new Error("ACP request cancelled during startup");
               if (!catalogStore.upstreamModels.has(model.id)) await catalogStore.refresh(contextSettings);

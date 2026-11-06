@@ -89,9 +89,9 @@ function fixture(leaseStore?: any) {
     }, "yolo", store);
     runtimes.push(runtime); return runtime;
   }
-  async function run(runtime: any, messages: any[], settle = true) {
+  async function run(runtime: any, messages: any[], settle = true, tools: any[] = [], id = "chat", systemPrompt?: string) {
     const events: any[] = [];
-    for await (const event of runtime.stream(model, { messages, tools: [] }, { sessionId: "chat" }).stream) {
+    for await (const event of runtime.stream(model, { messages, systemPrompt, tools }, { sessionId: id }).stream) {
       events.push(structuredClone(event));
     }
     if (settle) await tick();
@@ -374,6 +374,19 @@ for (const kind of ["tools", "permission"] as const) {
     } finally { one?.fail(new Error("fixture cleanup")); two?.fail(new Error("fixture cleanup")); await f.close(); }
   });
 }
+
+test("a tool-set change during a parked continuation keeps the warm session", async () => {
+  const f = fixture();
+  try {
+    const r = f.create(), first = user("ASK_CONTINUATION"); f.actions.push("tools");
+    const askTool = { name: "ask", description: "", parameters: { type: "object", properties: {} } };
+    const answer = f.reply(await f.run(r, [first], true, [askTool], "ask-cont", "FIXTURE_RULES"));
+    const events = await f.run(r, [first, answer, ...f.results("tools", answer)], true, [], "ask-cont", "FIXTURE_RULES");
+    assert.equal(f.connections.length, 1, "removing a tool during a continuation must not cold rebuild");
+    assert.equal(f.connections[0].prompts.length, 1);
+    assert.ok(events.some(e => e.type === "done"));
+  } finally { await f.close(); }
+});
 
 for (const sequence of [
   ["tools", "tools"], ["permission", "permission"],

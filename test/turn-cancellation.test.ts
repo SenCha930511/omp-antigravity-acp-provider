@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { armSteerGiveup, drainCancelledTurn, deferredAbortSignal, steerTimings } from "../extension/turn-cancellation.ts";
+import { armSteerGiveup, deferredAbortSignal, drainCancelledTurn, isSteerAbort, steerMode, steerTimings } from "../extension/turn-cancellation.ts";
 import { setImmediate as tick } from "node:timers/promises";
 
 test("drain stops old waits and waits for terminal completion before accepting another request", async () => {
@@ -15,9 +15,18 @@ test("unacknowledged, failed or pre-aborted cancellation requests require recons
   const never = Promise.withResolvers<void>();
   const binding = { session: { sessionId: "old" }, turnCompletion: never.promise,
     connection: { async cancel() {} } };
-  assert.equal(await drainCancelledTurn(binding, () => {}, undefined, 10), false);
+  assert.equal(await drainCancelledTurn(binding, () => {}, undefined, 10, { idleMs: 20, maxMs: 0 }), false);
   assert.equal(await drainCancelledTurn({ ...binding, connection: { async cancel() { throw new Error("closed"); } } }, () => {}), false);
   assert.equal(await drainCancelledTurn(binding, () => {}, AbortSignal.abort()), false);
+});
+
+test("an acknowledged session/cancel notification waits for the terminal response", async () => {
+  const pending = Promise.withResolvers<void>();
+  const binding = { session: { sessionId: "old" }, turnCompletion: pending.promise,
+    connection: { async cancel() {} } };
+  const drained = drainCancelledTurn(binding, () => {}, undefined, 10, { idleMs: 500, maxMs: 0 });
+  setTimeout(() => pending.resolve(), 50);
+  assert.equal(await drained, true, "a successful notification must not force a cold rebuild after 1.5s");
 });
 
 test("steerTimings validates the steering grace windows", () => {
@@ -33,6 +42,28 @@ test("steerTimings validates the steering grace windows", () => {
   assert.deepEqual(steerTimings({ OMP_ACP_STEER_GRACE_MAX_MS: "100" }), { idleMs: 60_000, maxMs: 100 });
   assert.throws(() => steerTimings({ OMP_ACP_STEER_GRACE_MAX_MS: "99" }), /OMP_ACP_STEER_GRACE_MAX_MS/);
   assert.throws(() => steerTimings({ OMP_ACP_STEER_GRACE_MAX_MS: "3600001" }), /OMP_ACP_STEER_GRACE_MAX_MS/);
+});
+
+test("steerMode defaults to queue and classifies OMP steering aborts", () => {
+  assert.equal(steerMode({}), "queue");
+  assert.equal(steerMode({ OMP_ACP_STEER_MODE: "steer" }), "steer");
+  assert.equal(steerMode({ OMP_ACP_STEER_MODE: "QUEUE" }), "queue");
+  assert.throws(() => steerMode({ OMP_ACP_STEER_MODE: "invalid" }), /OMP_ACP_STEER_MODE/);
+  const steer = new AbortController();
+  steer.abort();
+  assert.equal(isSteerAbort(steer.signal), true);
+  const cancel = new AbortController();
+  cancel.abort("user cancelled");
+  assert.equal(isSteerAbort(cancel.signal), false);
+});
+
+test("deferredAbortSignal can hold a steering abort until the turn ends", async () => {
+  const controller = new AbortController();
+  const deferred = deferredAbortSignal(controller.signal, { idleMs: 20, maxMs: 0 }, undefined, () => true);
+  controller.abort();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(deferred.signal.aborted, false, "queue mode must not abort the active transport");
+  deferred.dispose();
 });
 
 test("unsupported session/cancel freezes retained output and waits for natural completion", async () => {

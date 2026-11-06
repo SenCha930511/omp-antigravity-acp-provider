@@ -1,3 +1,5 @@
+// These scripts exercise explicit interruption/cancellation semantics.
+process.env.OMP_ACP_STEER_MODE = "steer";
 // Offline: real built runtime/connection code, deterministic fake transport.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -144,7 +146,7 @@ for (const reason of ["edited", "missing-partial", "timeout"]) {
     const next = await f.run(r, [user("EDITED"), partial()]);
     await old.result;
     assert.ok(next.some(e => e.type === "done"));
-    assert.equal(prefixLengthCalls, 1, "The supersedes judgment must fingerprint the pending prefix exactly once");
+    assert.equal(prefixLengthCalls, 2, "The supersedes judgment must fingerprint the full and conversation pending prefixes");
     assert.equal(f.connections.length, 2, "A modified prefix without a new user rebuilds on a fresh connection");
     assert.ok(JSON.stringify(f.connections.at(-1).prompts[0]).includes("EDITED"));
   } finally {

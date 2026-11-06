@@ -67,6 +67,16 @@ const result = await build({
             replacement: 'return ompMessageFingerprintMemo(message, value, () => createHash("sha256").update(canonicalJson(value)).digest("hex"));',
           },
           {
+            name: "stable instruction fingerprint",
+            anchor: 'return createHash("sha256").update(currentSystemInstructions(context)).digest("hex");',
+            replacement: 'return createHash("sha256").update(stableSystemInstructions(context)).digest("hex");',
+          },
+          {
+            name: "import stable instruction fingerprint",
+            anchor: 'import { type PromptParts, buildPromptParts, currentSystemInstructions } from "./stream/context.js";',
+            replacement: 'import { type PromptParts, buildPromptParts, currentSystemInstructions, stableSystemInstructions } from "./stream/context.js";',
+          },
+          {
             name: "context",
             anchor: "buildPromptParts(context, fresh, unseenStart)",
             replacement: "buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy }, ompRetryResend)",
@@ -74,7 +84,7 @@ const result = await build({
           {
             name: "workspace and parked model boundaries",
             anchor: "if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||\n\t\t\tbinding.toolFingerprint !== piToolFingerprint(tools)) {",
-            replacement: "if (binding.cwd !== process.cwd() ||\n\t\t\t(binding.turnCompletion && binding.modelId !== acpModelId) ||\n\t\t\tbinding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||\n\t\t\tbinding.toolFingerprint !== piToolFingerprint(tools)) {",
+            replacement: "const ompContinuation = Boolean(binding.turnCompletion) && (binding.permission !== undefined || binding.pendingTools.size > 0);\n\t\tif (binding.cwd !== process.cwd() ||\n\t\t\t(binding.turnCompletion && binding.modelId !== acpModelId) ||\n\t\t\tbinding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||\n\t\t\t(!ompContinuation && binding.toolFingerprint !== piToolFingerprint(tools))) {",
           },
           {
             name: "new request supersedes continuation",
@@ -83,17 +93,34 @@ const result = await build({
               "\t\t// A new/edited user request is not a tool-result continuation of the",
               "\t\t// previous ACP prompt. Never let old pending results swallow it.",
               "\t\tif (binding.turnCompletion || binding.permission || binding.pendingTools.size > 0) {",
-              "\t\t\tlet ompPrefixFingerprint: string | undefined;",
-              "\t\t\tif (context.messages.findLastIndex(message => message.role === 'user') >= binding.pendingContextCount ||",
-              "\t\t\t\t(ompPrefixFingerprint = messagesFingerprint(context.messages.slice(0, binding.pendingContextCount))) !== binding.pendingContextFingerprint) {",
+              "\t\t\tconst ompPrefixMessages = context.messages.slice(0, binding.pendingContextCount);",
+              "\t\t\tconst ompPrefixFingerprint = messagesFingerprint(ompPrefixMessages);",
+              "\t\t\tconst ompConversationPrefixFingerprint = messagesFingerprint(ompPrefixMessages.filter(message => message.role !== 'system'));",
+              "\t\t\tconst ompNewUser = context.messages.findLastIndex(message => message.role === 'user') >= binding.pendingContextCount;",
+              "\t\t\tconst ompPrefixChanged = ompPrefixFingerprint !== binding.pendingContextFingerprint;",
+              "\t\t\tconst ompConversationPrefixChanged = binding.pendingConversationFingerprint === undefined ? ompPrefixChanged : ompConversationPrefixFingerprint !== binding.pendingConversationFingerprint;",
+              "\t\t\tif (ompNewUser || ompConversationPrefixChanged) {",
               "\t\t\t\tconst prefixMatches = context.messages.length >= binding.pendingContextCount &&",
-              "\t\t\t\t\t(ompPrefixFingerprint ?? messagesFingerprint(context.messages.slice(0, binding.pendingContextCount))) === binding.pendingContextFingerprint;",
-              "\t\t\t\tconst drained = prefixMatches && await drainCancelledTurn(binding, () => abortTurn(binding), options.signal);",
-              "\t\t\t\tif (!drained || !binding.connection.process.alive || binding.needsReconstruction ||",
-              "\t\t\t\t\t!['cancelled', 'end_turn', 'max_turn_requests', 'max_tokens'].includes(binding.ompTerminalStopReason)) {",
-              "\t\t\t\t\tawait this.invalidateBinding(binding);",
+              "\t\t\t\t\t(!ompPrefixChanged || (binding.pendingConversationFingerprint !== undefined &&",
+              "\t\t\t\t\t\tompConversationPrefixFingerprint === binding.pendingConversationFingerprint));",
+              "\t\t\t\t// Queue mode can safely wait only for a streaming turn with no",
+              "\t\t\t\t// parked tool/permission; those need the existing steer drain.",
+              "\t\t\t\tconst ompQueueSteer = prefixMatches && steerMode() === 'queue' &&",
+              "\t\t\t\t\tBoolean(binding.turnCompletion) && !binding.permission && binding.pendingTools.size === 0;",
+              "\t\t\t\tif (ompQueueSteer) {",
+              "\t\t\t\t\tbinding.connection.muteSteerChunks?.(binding.session.sessionId);",
+              "\t\t\t\t} else {",
+              "\t\t\t\t\tconst drained = prefixMatches && await drainCancelledTurn(binding, () => abortTurn(binding), options.signal);",
+              "\t\t\t\t\tif (!drained || !binding.connection.process.alive || binding.needsReconstruction ||",
+              "\t\t\t\t\t\t!['cancelled', 'end_turn', 'max_turn_requests', 'max_tokens'].includes(binding.ompTerminalStopReason)) {",
+              "\t\t\t\t\t\tawait this.invalidateBinding(binding);",
+              "\t\t\t\t\t}",
+              "\t\t\t\t\tif (drained && prefixMatches) {",
+              "\t\t\t\t\t\tbinding.toolFingerprint = piToolFingerprint(tools);",
+              "\t\t\t\t\t\tbinding.historyFingerprint = messagesFingerprint(context.messages.slice(0, binding.messageCount));",
+              "\t\t\t\t\t}",
+              "\t\t\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);",
               "\t\t\t\t}",
-              "\t\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);",
               "\t\t\t}",
               "\t\t}",
               "",
@@ -160,6 +187,17 @@ const result = await build({
             name: "record official terminal reason before abort handling",
             anchor: "if (binding.abortRequested) throw abortError();",
             replacement: "if (binding.ompInvalidated) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost');\n\t\t\tbinding.ompTerminalStopReason = response.stopReason;\n\t\t\tif (binding.abortRequested) throw abortError();",
+          },
+          {
+            name: "queue steering holds the active turn",
+            anchor: "\t\t\t\tonTurnAbort = () => abortTurn(promptBinding);",
+            replacement: [
+              "\t\t\t\tonTurnAbort = () => {",
+              "\t\t\t\t\tif (steerMode() === 'queue' && isSteerAbort(options.signal)) {",
+              "\t\t\t\t\t\tpromptBinding.connection.muteSteerChunks?.(promptBinding.session.sessionId);",
+              "\t\t\t\t\t} else abortTurn(promptBinding);",
+              "\t\t\t\t};",
+            ].join("\n"),
           },
           {
             name: "identical resend keeps the warm session for regeneration",
@@ -249,7 +287,7 @@ const result = await build({
         // Continuity transactions are adapter-owned. Keep explicit pinned seams
         // so an upstream update cannot silently bypass the write-ahead marker.
         const continuityPatches = [
-          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompReleaseLease?: (wait?: boolean) => Promise<void>;'],
+          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string;'],
           ['let completeTurn: (() => void) | undefined;', 'let ompDispatched = false;\n\t\tlet completeTurn: (() => void) | undefined;'],
           ['if (existing) return existing;', `if (existing) {
             const value = await existing;
@@ -269,7 +307,8 @@ const result = await build({
           ['const createdBinding: Binding = {', `const createdBinding: Binding = {
             ompInFlight: false, ompInvalidated: false,
             ompReleaseLease: releaseLease,
-            ompExpectedAssistantHasOutput: restored && saved?.ompExpectedAssistantHasOutput === true,`],
+            ompExpectedAssistantHasOutput: restored && saved?.ompExpectedAssistantHasOutput === true,
+            pendingConversationFingerprint: messagesFingerprint([]),`],
           ['const response = await binding.connection.prompt(', `if (options.signal?.aborted) throw abortError();
             binding.ompInFlight = true;
             await this.persistBinding(binding);
@@ -299,6 +338,10 @@ const result = await build({
           if (contents.split(anchor).length !== 2) throw new Error(`Pinned continuity seam changed: ${anchor}`);
           contents = contents.replace(anchor, replacement);
         }
+        const pendingFingerprintAnchor = "binding.pendingContextFingerprint = messagesFingerprint(context.messages);";
+        if (contents.split(pendingFingerprintAnchor).length !== 4) throw new Error("Pinned pending context fingerprint seams changed");
+        contents = contents.replaceAll(pendingFingerprintAnchor,
+          pendingFingerprintAnchor + "\n\t\t\tbinding.pendingConversationFingerprint = messagesFingerprint(context.messages.filter(message => message.role !== 'system'));");
         const leasePatches = [
           ['const connection = this.createConnection({\n\t\t\tcwd,', 'let leaseLost = false;\n\t\tlet releaseLease: (() => Promise<void>) | undefined;\n\t\tconst connection = this.createConnection({\n\t\t\tcwd,'],
           ['onPermission: (request) => this.requestPermission(binding, request),\n\t\t\t},\n\t\t});\n\t\ttry {\n\t\t\tconst initialize = await connection.initialize();', `onPermission: (request) => this.requestPermission(binding, request),
@@ -355,7 +398,7 @@ const result = await build({
         const claimEnd = 'await this.awaitContinuation(binding, options.signal);\n\t\t\t\treturn;';
         if (contents.split(claimStart).length !== 3 || contents.split(claimEnd).length !== 3) throw new Error('Pinned continuation ownership seams changed');
         contents = contents.replaceAll(claimStart, 'await claimContinuation(binding, async () => {\n\t\t\t\t' + claimStart)
-          .replaceAll(claimEnd, '}, () => this.invalidateBinding(binding));\n\t\t\t\tawait this.awaitContinuation(binding, options.signal);\n\t\t\t\treturn;');
+          .replaceAll(claimEnd, '}, () => this.invalidateBinding(binding));\n\t\t\t\tbinding.toolFingerprint = piToolFingerprint(tools);\n\t\t\t\tawait this.awaitContinuation(binding, options.signal);\n\t\t\t\treturn;');
         const dropPattern = /\tprivate async dropBinding\([\s\S]*?\n\tprivate confirmedMode\(/g;
         if ([...contents.matchAll(dropPattern)].length !== 1) throw new Error('Pinned binding teardown seam changed');
         contents = contents.replace(dropPattern, `\tprivate async ompRemoveSaved(piSessionId: string, acpSessionId: string): Promise<void> {
@@ -429,18 +472,23 @@ const result = await build({
         contents = contents.replaceAll("binding.connection.retireForReplacement?.(", "await binding.connection.retireForReplacement?.(")
           .replaceAll("binding.connection.confirmReplacement?.(", "await binding.connection.confirmReplacement?.(")
           .replaceAll("binding.connection.discardSession?.(", "await binding.connection.discardSession?.(");
-        contents = `import { drainCancelledTurn } from ${JSON.stringify(path.join(root, "extension/turn-cancellation.ts"))};\n` + contents;
+        contents = `import { drainCancelledTurn, isSteerAbort, steerMode } from ${JSON.stringify(path.join(root, "extension/turn-cancellation.ts"))};\n` + contents;
         contents = `import { claimContinuation } from ${JSON.stringify(path.join(root, "extension/continuation-claim.ts"))};\n` + contents;
         contents = `import { createHistoryFingerprintMemo } from ${JSON.stringify(path.join(root, "extension/history-fingerprint.ts"))};\nconst ompMessageFingerprintMemo = createHistoryFingerprintMemo();\n` + contents;
         return { contents, loader: "ts" };
       });
       builder.onLoad({ filter: /\/src\/acp\/connection\.ts$/ }, async ({ path: file }) => {
         if (file !== path.join(upstream, "src/acp/connection.ts")) return;
-        const source = await fs.readFile(file, "utf8");
+        let contents = await fs.readFile(file, "utf8");
         const anchor = "if (aborting) finish(() => reject(abortError()));";
-        if (source.split(anchor).length !== 2) throw new Error("Pinned upstream prompt cancellation seam changed; review compatibility");
-        return { contents: source.replace(anchor,
-          "if (aborting && this.process.alive && ['cancelled', 'end_turn'].includes(value.stopReason)) finish(() => resolve(value));\n\t\t\t\t\telse if (aborting) finish(() => reject(abortError()));"), loader: "ts" };
+        if (contents.split(anchor).length !== 2) throw new Error("Pinned upstream prompt cancellation seam changed; review compatibility");
+        contents = contents.replace(anchor,
+          "if (aborting && this.process.alive && ['cancelled', 'end_turn'].includes(value.stopReason)) finish(() => resolve(value));\n\t\t\t\t\telse if (aborting) finish(() => reject(abortError()));");
+        const detailAnchor = "const detail = (data as { details?: unknown }).details;";
+        if (contents.split(detailAnchor).length !== 2) throw new Error("Pinned upstream structured error detail seam changed; review compatibility");
+        contents = contents.replace(detailAnchor,
+          "const record = data as { details?: unknown; message?: unknown };\n\tconst detail = record.details ?? record.message;");
+        return { contents, loader: "ts" };
       });
       builder.onLoad({ filter: /\/(?:process|runtime-manifest)\.ts$/ }, async ({ path: file }) => {
         const relative = path.relative(upstream, file).split(path.sep).join("/");

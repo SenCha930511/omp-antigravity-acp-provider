@@ -34,6 +34,43 @@ test("actual OMP wrapper refreshes tool audit for same-array additions/removals 
   } finally { await hooks.get("session_shutdown")?.({}, {}); await fs.rm(state, { recursive: true, force: true }); }
 });
 
+test("inference refuses to start ACP when the local Google login is absent", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-preflight-"));
+  const geminiHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-preflight-home-"));
+  const previousHome = process.env.GEMINI_HOME, previousKey = process.env.GEMINI_API_KEY;
+  const { keychain } = await import("../extension/auth-sync.ts");
+  const previousPresent = keychain.present;
+  let provider: any, spawns = 0;
+  try {
+    process.env.GEMINI_HOME = geminiHome;
+    delete process.env.GEMINI_API_KEY;
+    keychain.present = async () => false;
+    await registerOmpAdapter({ on: () => {}, registerTool() {},
+      registerProvider: (_name: string, value: any) => { provider = value; },
+      registerCommand() {} }, state, () => { spawns++; throw new Error("ACP must not spawn"); });
+    const events: any[] = [];
+    for await (const event of provider.streamSimple(provider.models[0],
+      { messages: [{ role: "user", content: "synthetic", timestamp: 1 }], tools: [] }, {})) events.push(event);
+    assert.match(events.find(event => event.type === "error")?.error.errorMessage ?? "", /not signed in.*\/login/i);
+    assert.equal(spawns, 0);
+  } finally {
+    keychain.present = previousPresent;
+    if (previousHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = previousHome;
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previousKey;
+    await fs.rm(state, { recursive: true, force: true });
+    await fs.rm(geminiHome, { recursive: true, force: true });
+  }
+});
+
+test("catalog discovery refuses to prepare ACP when auth preflight fails", async () => {
+  let prepared = 0, auth = 0;
+  const store = new CatalogStore("/nonexistent/models.json", {} as any,
+    async () => { prepared++; }, () => [], async () => { auth++; throw new Error("not signed in"); });
+  await assert.rejects(store.discoverModels(), /not signed in/);
+  assert.equal(auth, 1);
+  assert.equal(prepared, 0);
+});
+
 test("idle runtime cap evicts LRU only, protects leases/busy work and awaits pending teardown", async () => {
   const closed: number[] = []; let serial = 0, busy = false;
   const pool = new SessionRuntimePool(() => ({ id: ++serial }), async entry => { closed.push(entry.id); },

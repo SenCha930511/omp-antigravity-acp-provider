@@ -1,3 +1,5 @@
+// These scripts exercise explicit interruption/cancellation semantics.
+process.env.OMP_ACP_STEER_MODE = "steer";
 // Exercise the built upstream/runtime seam without Google calls or user data.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";

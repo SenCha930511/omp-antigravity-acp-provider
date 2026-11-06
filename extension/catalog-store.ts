@@ -25,6 +25,7 @@ export class CatalogStore {
     private readonly cleanup: SessionCleanup,
     private readonly prepareRuntime: () => Promise<void>,
     private readonly fallbackModels: () => PublicCatalogModel[],
+    private readonly requireAuth: () => Promise<void> = async () => {},
   ) {}
 
   projectWithSettings(models: PublicCatalogModel[], settings: ContextSettings): ConfiguredCatalogModel[] {
@@ -108,6 +109,7 @@ export class CatalogStore {
     finally { if (this.discovery === pending) this.discovery = undefined; }
   }
   private async discoverOnce(): Promise<AdvertisedModel[]> {
+    await this.requireAuth();
     await this.prepareRuntime();
     const connection = new TierConnection({ cwd: process.cwd(), ompCleanup: this.cleanup });
     let discoveredSession: string | undefined;
