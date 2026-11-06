@@ -1,6 +1,14 @@
 # Changelog
 
 
+## 0.1.32 — 2026-11-06
+
+- Default to queue steering (`OMP_ACP_STEER_MODE=queue`): a new OMP message waits for the active ACP turn and continues on the warm session with only the unseen delta, instead of interrupting the turn and risking a cold replay that can trigger OMP compaction. `OMP_ACP_STEER_MODE=steer` restores immediate interruption; tool/permission boundaries still use the bounded steer drain. Acknowledged `session/cancel` notifications now wait for the terminal response before deciding whether reconstruction is needed.
+- Refuse to start ACP for inference or `/antigravity-acp refresh` when no local Google login is available. The adapter now reports "run /login" instead of leaving the message pending while `session/new` opens an interactive consent flow.
+- Ignore OMP's date/cwd reminder in the instruction fingerprint, and distinguish system-only changes from conversation changes, so a changed reminder or an unchanged parked continuation cannot force an unnecessary full replay.
+- Keep the warm ACP session when the OMP tool set changes during a parked tool/permission continuation or at a steer boundary, instead of rebuilding solely because the projected tool schema changed.
+- Fall back to the structured error `message` when ACP omits `details`, preserving the server's diagnostic text.
+
 ## 0.1.31 — 2026-10-31
 
 - Treat an identical resend as OMP `/retry` and regenerate on the warm ACP session instead of rebuilding cold: when the incoming context exactly matches what the session already accepted (the retry drops the generated answer from the OMP branch), the adapter now sends a compact regenerate nudge that restates the original request, keeping every retry off the full cold-replay path that could exceed the 188,000-byte per-step guard and force OMP compaction. Edited prefixes, missing partial answers and other unsafe boundaries still rebuild as before, and the regenerated answer becomes the expected boundary so follow-up turns stay warm.
