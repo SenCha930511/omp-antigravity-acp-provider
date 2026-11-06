@@ -115,6 +115,19 @@ By default a new user message waits for the active ACP turn to finish (`OMP_ACP_
 
 Inference and `/antigravity-acp refresh` refuse to start ACP when no local Google login is available; run `/login` (or `/antigravity-acp login`) first instead of waiting for an interactive consent flow inside `session/new`.
 
+## Limitations vs direct OAuth
+
+- No direct model API endpoint or reverse-proxy mode.
+- No API-key, service-account, or raw OAuth-token authentication; Google browser consent is required.
+- Only models advertised by the ACP server are available.
+- Only thinking levels confirmed by the ACP server are selectable.
+- No arbitrary generation controls: temperature, top_p, seed, stop sequences, tool_choice, response format, or output-token limit.
+- No exact API billing or complete subagent usage; cost and quota figures are estimates.
+- No guaranteed prompt-cache hits, cache discounts, or identical tokenization.
+- No full native history or hidden reasoning across a cold rebuild; server-side compaction is outside adapter control.
+- No per-tool native allowlist; `native-tools` supports only `prefer` and `disabled`, and global MCP servers remain.
+- No standalone client; the official ACP runtime is required.
+
 Detailed behavior, advanced settings and limitations: [docs/](docs/) and [CHANGELOG.md](CHANGELOG.md).
 
 ## License
