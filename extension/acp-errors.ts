@@ -12,6 +12,7 @@ export type AcpFailureCode =
   | "server"
   | "transport"
   | "protocol"
+  | "model"
   | "aborted";
 
 export class AcpFailure extends Error {
@@ -97,7 +98,8 @@ export function classifyAcpFailure(error: unknown): Error {
     if (error.code === "auth") return new AcpFailure("auth", appendHint(error.message, AUTH_RULE), { cause: error });
     if (error.code === "timeout") return new AcpFailure("timeout", appendHint(error.message, TIMEOUT_RULE), { cause: error });
     if (error.code === "spawn" || error.code === "process_exit") return new AcpFailure("transport", appendHint(error.message, TRANSPORT_RULE), { cause: error });
-    if (error.code === "invalid_input" || error.code === "model") return new AcpFailure("protocol", appendHint(error.message, PROTOCOL_RULE), { cause: error });
+    if (error.code === "invalid_input") return new AcpFailure("protocol", appendHint(error.message, PROTOCOL_RULE), { cause: error });
+    if (error.code === "model") return new AcpFailure("model", error.message, { cause: error });
   }
   const message = error instanceof Error ? error.message : String(error);
   if (!message.trim()) return error instanceof Error ? error : new Error(message);

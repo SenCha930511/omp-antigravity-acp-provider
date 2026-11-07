@@ -30,6 +30,7 @@ export function classifyOutputLimitNotice(raw: string): NoticeVerdict {
 // the hold state is keyed by session and never leaks across streams.
 export class AgentNoticeFilter {
   private readonly holds = new Map<string, string>();
+  private readonly limitNotices = new Set<string>();
   dropped = 0;
 
   accept(sessionId: string, text: string): string | undefined {
@@ -40,7 +41,12 @@ export class AgentNoticeFilter {
       return undefined;
     }
     this.holds.delete(sessionId);
-    if (verdict === "drop" || AGENT_RETRY_NOTICE.test(combined)) {
+    if (verdict === "drop") {
+      this.dropped++;
+      this.limitNotices.add(sessionId);
+      return undefined;
+    }
+    if (AGENT_RETRY_NOTICE.test(combined)) {
       this.dropped++;
       return undefined;
     }
@@ -55,16 +61,23 @@ export class AgentNoticeFilter {
     this.holds.delete(sessionId);
     if (classifyOutputLimitNotice(held) === "drop") {
       this.dropped++;
+      this.limitNotices.add(sessionId);
       return undefined;
     }
     return held;
   }
 
+  consumeOutputLimitNotice(sessionId: string): boolean {
+    return this.limitNotices.delete(sessionId);
+  }
+
   forget(sessionId: string): void {
     this.holds.delete(sessionId);
+    this.limitNotices.delete(sessionId);
   }
 
   clear(): void {
     this.holds.clear();
+    this.limitNotices.clear();
   }
 }

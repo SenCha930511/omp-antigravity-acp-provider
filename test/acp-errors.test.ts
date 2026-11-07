@@ -37,6 +37,7 @@ test("vendor codes survive when the message is ambiguous", () => {
   assert.equal(classifyAcpFailure(new AntigravityAcpError("aborted", "cancelled")).code, "aborted");
   assert.equal(classifyAcpFailure(new AntigravityAcpError("spawn", "bridge failed to bind")).code, "transport");
   assert.equal(classifyAcpFailure(new AntigravityAcpError("invalid_input", "bad request")).code, "protocol");
+  assert.equal(classifyAcpFailure(new AntigravityAcpError("model", "model unavailable")).code, "model");
 });
 
 test("unknown failures are left untouched", () => {

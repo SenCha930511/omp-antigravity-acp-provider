@@ -117,6 +117,8 @@ By default a new user message waits for the active ACP turn to finish (`OMP_ACP_
 
 ACP runtimes stay warm for 15 minutes by default. Set `OMP_ACP_IDLE_TIMEOUT_MS=0` to keep them until OMP exits, or lower the value to reclaim memory sooner.
 
+An ACP turn that ends at the model's output limit is continued on the same session up to three times. `OMP_ACP_MAX_CONTINUATIONS=0` disables the loop; if agy already reported its own output-cap continuation, the adapter does not add another.
+
 Inference and `/antigravity-acp refresh` refuse to start ACP when no local Google login is available; run `/login` (or `/antigravity-acp login`) first instead of waiting for an interactive consent flow inside `session/new`.
 
 ## Limitations vs direct OAuth

@@ -12,6 +12,15 @@ import type { SessionCleanup } from "./session-cleanup.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import { deferredAbortSignal, isSteerAbort, steerMode as resolveSteerMode, steerTimings as resolveSteerTimings, type SteerMode, type SteerTimings } from "./turn-cancellation.ts";
 
+const CONTINUATION_PROMPT = "Continue exactly where your previous output stopped. Do not repeat any earlier text.";
+function continuationLimit(): number {
+  const raw = process.env.OMP_ACP_MAX_CONTINUATIONS;
+  if (raw === undefined || raw.trim() === "") return 3;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0 || value > 10) throw new Error("OMP_ACP_MAX_CONTINUATIONS must be an integer between 0 and 10");
+  return value;
+}
+
 // Updates that would extend the retained turn output stay frozen while a
 // turn the server cannot cancel drains towards its natural end.
 const STEER_FROZEN_UPDATES = new Set(["agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]);
@@ -40,6 +49,7 @@ export class TierConnection extends AntigravityAcpConnection {
   toolRouting: { nativeTools: NativeToolMode; channel: "pending" | "system-append" | "legacy-prompt" } | undefined;
   private readonly steerMode: SteerMode;
   private readonly steerTimings: SteerTimings;
+  private readonly maxContinuations: number;
   private readonly steerMuted = new Set<string>();
   private readonly steerActivity = new Map<string, Set<() => void>>();
 
@@ -53,6 +63,7 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageMode = options.ompUsageMode ?? DEFAULT_USAGE_MODE;
     this.steerMode = options.ompSteerMode ?? resolveSteerMode();
     this.steerTimings = options.ompSteerTimings ?? resolveSteerTimings();
+    this.maxContinuations = continuationLimit();
     this.setHandlers({ ...options.handlers, onUpdate: async notification => {
       const update = notification.update as {
         sessionUpdate?: string;
@@ -318,6 +329,17 @@ export class TierConnection extends AntigravityAcpConnection {
     }
   }
 
+  private async promptWithContinuations(request: Parameters<AntigravityAcpConnection["prompt"]>[0], signal?: AbortSignal) {
+    let response = await super.prompt(request, signal);
+    for (let count = 0; count < this.maxContinuations && !signal?.aborted; count++) {
+      if (response.stopReason !== "max_tokens" && response.stopReason !== "max_turn_requests") break;
+      if (this.noticeFilter.consumeOutputLimitNotice(request.sessionId)) break;
+      const continued = await super.prompt({ sessionId: request.sessionId, prompt: [{ type: "text", text: CONTINUATION_PROMPT }] }, signal);
+      response = continued.usage || !response.usage ? continued : { ...continued, usage: response.usage };
+    }
+    return response;
+  }
+
   override async prompt(request: Parameters<AntigravityAcpConnection["prompt"]>[0], signal?: AbortSignal) {
     this.activePrompts++;
     const id = request.sessionId;
@@ -349,7 +371,7 @@ export class TierConnection extends AntigravityAcpConnection {
       }
       const started = performance.now();
       this.firstOutput?.set(id, started);
-      const response = await super.prompt(request, deferred?.signal ?? signal);
+      const response = await this.promptWithContinuations(request, deferred?.signal ?? signal);
       this.diagnostics?.record("acp.prompt", performance.now() - started);
       if (abortedAt !== undefined && ["cancelled", "end_turn"].includes(response.stopReason)) this.diagnostics?.record("acp.cancel-confirmation", performance.now() - abortedAt);
       const withContext = <T extends { _meta?: Record<string, unknown> }>(value: T): T => {

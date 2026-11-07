@@ -12,6 +12,15 @@ test("classifies the output-limit notice and its retry suffix", () => {
   assert.equal(classifyOutputLimitNotice("Here is the answer."), "emit");
 });
 
+test("reports a dropped output-limit notice once", () => {
+  const filter = new AgentNoticeFilter();
+  filter.accept("s", "your previous response was cut off because it exceeded the output token limit");
+  assert.equal(filter.consumeOutputLimitNotice("s"), true);
+  assert.equal(filter.consumeOutputLimitNotice("s"), false);
+  filter.accept("s", "⚠ API error (attempt 1): upstream");
+  assert.equal(filter.consumeOutputLimitNotice("s"), false);
+});
+
 test("drops a retry notice and keeps ordinary text byte-for-byte", () => {
   const filter = new AgentNoticeFilter();
   assert.equal(filter.accept("s", "your previous response was cut off because it exceeded the output"), undefined);

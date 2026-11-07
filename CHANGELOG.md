@@ -6,6 +6,7 @@
 - Classify ACP failures into auth, quota, rate-limit, context, timeout, server, transport and protocol. OMP now sees account exhaustion as non-retryable while a transient throttle keeps its retry path.
 - Disable Node's MCP bridge keep-alive, request and header timeouts so a long parked tool call is not cut off by the HTTP server defaults.
 - Coalesce concurrent `/usage` reads. The query is a per-turn delta baseline, so it is not TTL-cached.
+- Continue a turn that ends at the model's output limit on the same ACP session, up to three times. If agy already reported its own output-cap continuation, the adapter skips its own continuation. `OMP_ACP_MAX_CONTINUATIONS=0` disables the loop.
 
 
 ## 0.1.35 — 2026-11-08
