@@ -46,10 +46,13 @@
     "test:continuity": "node scripts/test-request-continuity.ts && node scripts/test-graceful-cancellation.ts",
     "test:omp-compaction": "bun scripts/test-omp-compaction.ts",
     "test:omp-sessions": "node scripts/test-omp-session-switch.ts",
-    "check": "npm run build && npm test && npm run test:cleanup && npm run test:continuity && npm run test:graph && npm run test:commands && npm run test:auth",
+    "check": "npm run build && npm test && npm run test:cleanup && npm run test:continuity && npm run test:tools && npm run test:wire && npm run test:graph && npm run test:commands && npm run test:auth",
     "prepack": "npm run build",
     "prepublishOnly": "npm run check",
-    "test:graph": "bun scripts/test-load-graph.ts"
+    "test:graph": "bun scripts/test-load-graph.ts",
+    "test:tools": "node scripts/test-tool-set-sync.ts",
+    "probe:agy": "node scripts/probe-agy-limits.ts",
+    "test:wire": "node scripts/test-wire-acp.ts"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "1.8.0",
