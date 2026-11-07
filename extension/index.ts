@@ -27,6 +27,7 @@ import {
 import { CatalogStore } from "./catalog-store.ts";
 import { createAntigravityCommandHandler, type RuntimeBundleView, type ToolAuditSummary } from "./commands.ts";
 import { formatCompactionNotice } from "./acp-compaction.ts";
+import { classifyAcpFailure } from "./acp-errors.ts";
 import {
   AcpSessionStore,
   AntigravityRuntime,
@@ -384,7 +385,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
               } finally { lease.release(); }
             } catch (error) {
               routingFailed = true;
-              deferred.fail(error, options?.signal?.aborted === true);
+              deferred.fail(classifyAcpFailure(error), options?.signal?.aborted === true);
             } finally {
               if (routingFailed) routing.noteFailure(routingId);
               lifecycle.finish(ticket);

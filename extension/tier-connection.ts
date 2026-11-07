@@ -5,6 +5,7 @@ import { choices, resolveSelection, selector } from "./selectors.ts";
 import { installSessionRouting, type NativeToolMode } from "./tool-routing.ts";
 import { showAcpUpdate } from "./activity-presentation.ts";
 import { alignContextTokens, applyCompactionChunk, applyCompactionUpdate, isTerminalCompaction, type AcpCompactionNotice, type AcpCompactionRecord } from "./acp-compaction.ts";
+import { AgentNoticeFilter } from "./agent-notices.ts";
 import { parseSessionUsage, usageDelta, type SessionUsage } from "./usage-accounting.ts";
 import { DEFAULT_USAGE_MODE } from "./context-settings.ts";
 import type { SessionCleanup } from "./session-cleanup.ts";
@@ -27,10 +28,12 @@ export class TierConnection extends AntigravityAcpConnection {
   private readonly ompContextWindows = new Map<string, number>();
   private readonly usageBaselines = new Map<string, SessionUsage>();
   private readonly usageCaptures = new Map<string, { text: string }>();
+  private readonly usageReads = new Map<string, Promise<SessionUsage | undefined>>();
   private readonly usageCommands = new Set<string>();
   private cleanup?: SessionCleanup;
   private diagnostics?: Diagnostics;
   private readonly firstOutput = new Map<string, number>();
+  private readonly noticeFilter = new AgentNoticeFilter();
   private readonly pendingOwned = new Set<string>();
   private ownershipRetry?: Promise<void>;
   private cleanupLeases = new Map<string, string>();
@@ -83,9 +86,22 @@ export class TierConnection extends AntigravityAcpConnection {
         }
         return;
       }
-      if (update.sessionUpdate === "agent_message_chunk" && this.firstOutput.has(notification.sessionId)) {
-        this.diagnostics?.record("acp.first-output", performance.now() - this.firstOutput.get(notification.sessionId)!);
-        this.firstOutput.delete(notification.sessionId);
+      let forward = notification;
+      if (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text" && typeof update.content.text === "string") {
+        const text = this.noticeFilter.accept(notification.sessionId, update.content.text);
+        if (text === undefined) return;
+        this.markFirstOutput(notification.sessionId);
+        if (text !== update.content.text) {
+          forward = { ...notification, update: { ...update, content: { ...update.content, text } } } as typeof notification;
+        }
+      }
+      if (update.sessionUpdate === "agent_thought_chunk") {
+        const held = this.noticeFilter.flush(notification.sessionId);
+        if (held !== undefined) {
+          this.markFirstOutput(notification.sessionId);
+          const synthetic = { ...notification, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: held } } } as typeof notification;
+          if (showAcpUpdate(synthetic, this.debugToolUpdates)) await options.handlers?.onUpdate?.(synthetic);
+        }
       }
       if (this.steerMuted.has(notification.sessionId)) {
         // The turn cannot be cancelled and is draining towards its natural
@@ -95,7 +111,7 @@ export class TierConnection extends AntigravityAcpConnection {
         for (const listener of [...this.steerActivity.get(notification.sessionId) ?? []]) listener();
         if (STEER_FROZEN_UPDATES.has(update.sessionUpdate ?? "")) return;
       }
-      if (showAcpUpdate(notification, this.debugToolUpdates)) await options.handlers?.onUpdate?.(notification);
+      if (showAcpUpdate(forward, this.debugToolUpdates)) await options.handlers?.onUpdate?.(forward);
     } });
     if (options.ompNativeTools) {
       this.toolRouting = { nativeTools: options.ompNativeTools, channel: "pending" };
@@ -206,6 +222,8 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageStatus?.delete(id);
     this.usageBaselines?.delete(id);
     this.usageCommands?.delete(id);
+    this.usageReads?.delete(id);
+    this.noticeFilter?.forget(id);
     this.steerMuted?.delete(id);
     this.steerActivity?.delete(id);
   }
@@ -247,6 +265,8 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageCommands?.clear();
     this.usageCaptures?.clear();
     this.firstOutput?.clear();
+    this.noticeFilter?.clear();
+    this.usageReads?.clear();
     this.steerMuted?.clear();
     this.steerActivity?.clear();
   }
@@ -262,7 +282,27 @@ export class TierConnection extends AntigravityAcpConnection {
     }
   }
 
-  private async readUsage(sessionId: string, signal?: AbortSignal) {
+  private markFirstOutput(sessionId: string): void {
+    const started = this.firstOutput.get(sessionId);
+    if (started === undefined) return;
+    this.diagnostics?.record("acp.first-output", performance.now() - started);
+    this.firstOutput.delete(sessionId);
+  }
+
+  private readUsage(sessionId: string, signal?: AbortSignal): Promise<SessionUsage | undefined> {
+    const inflight = this.usageReads.get(sessionId);
+    if (inflight) return inflight;
+    // This query is a delta baseline, not a display quota. A TTL cache would
+    // make the post-turn delta undercount, so only concurrent reads coalesce.
+    let tracked: Promise<SessionUsage | undefined>;
+    tracked = this.readUsageOnce(sessionId, signal).finally(() => {
+      if (this.usageReads.get(sessionId) === tracked) this.usageReads.delete(sessionId);
+    });
+    this.usageReads.set(sessionId, tracked);
+    return tracked;
+  }
+
+  private async readUsageOnce(sessionId: string, signal?: AbortSignal): Promise<SessionUsage | undefined> {
     const started = performance.now();
     this.usageQueryCount++;
     const capture = { text: "" };
@@ -346,6 +386,7 @@ export class TierConnection extends AntigravityAcpConnection {
       deferred?.dispose();
       signal?.removeEventListener("abort", aborted);
       this.firstOutput?.delete(id);
+      this.noticeFilter?.forget(id);
       this.activePrompts--;
       try { await this.cleanup?.touch(id); } catch { /* Keep accounting optional. */ }
     }

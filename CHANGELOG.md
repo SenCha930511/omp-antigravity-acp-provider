@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.36 — 2026-11-08
+
+- Drop agy's transport-retry and output-cap continuation notices from the assistant transcript. A split notice is held until the next chunk settles it, and a thought chunk releases a held prefix that was model text.
+- Classify ACP failures into auth, quota, rate-limit, context, timeout, server, transport and protocol. OMP now sees account exhaustion as non-retryable while a transient throttle keeps its retry path.
+- Disable Node's MCP bridge keep-alive, request and header timeouts so a long parked tool call is not cut off by the HTTP server defaults.
+- Coalesce concurrent `/usage` reads. The query is a per-turn delta baseline, so it is not TTL-cached.
+
+
 ## 0.1.35 — 2026-11-08
 
 - Keep ACP `plan` and tool status updates out of the model thinking stream. Only `agent_thought_chunk` text reaches `thinking_delta`; debug tool status still travels through OMP notifications.

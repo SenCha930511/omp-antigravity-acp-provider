@@ -625,9 +625,21 @@ const result = await build({
         contents = `import { createHistoryFingerprintMemo } from ${JSON.stringify(path.join(root, "extension/history-fingerprint.ts"))};\nconst ompMessageFingerprintMemo = createHistoryFingerprintMemo();\n` + contents;
         return { contents, loader: "ts" };
       });
+      builder.onLoad({ filter: /\/src\/stream\/pi-events\.ts$/ }, async ({ path: file }) => {
+        if (file !== path.join(upstream, "src/stream/pi-events.ts")) return;
+        let contents = await fs.readFile(file, "utf8");
+        const anchor = "\t\tthis.message.errorMessage = errorMessage(cause);";
+        if (contents.split(anchor).length !== 2) throw new Error("Pinned upstream writer failure seam changed; review compatibility");
+        contents = contents.replace(anchor, "\t\tthis.message.errorMessage = errorMessage(classifyAcpFailure(cause));");
+        contents = `import { classifyAcpFailure } from ${JSON.stringify(path.join(root, "extension/acp-errors.ts"))};\n` + contents;
+        return { contents, loader: "ts" };
+      });
       builder.onLoad({ filter: /\/src\/mcp\/bridge\.ts$/ }, async ({ path: file }) => {
         if (file !== path.join(upstream, "src/mcp/bridge.ts")) return;
         let contents = await fs.readFile(file, "utf8");
+        const serverAnchor = "\t\tthis.server.maxConnections = 8;";
+        if (contents.split(serverAnchor).length !== 2) throw new Error("Pinned upstream MCP bridge server seam changed; review compatibility");
+        contents = contents.replace(serverAnchor, `${serverAnchor}\n\t\tthis.server.keepAliveTimeout = 0;\n\t\tthis.server.requestTimeout = 0;\n\t\tthis.server.headersTimeout = 0;`);
         const anchor = "\treadonly fingerprint: string;\n\treadonly omissions: ToolOmission[] = [];\n\tprivate readonly token = crypto.randomUUID().replaceAll(\"-\", \"\");\n\tprivate readonly tools: BridgeTool[];";
         if (contents.split(anchor).length !== 2) throw new Error("Pinned upstream MCP bridge seam changed; review compatibility");
         contents = contents.replace(anchor, "\tfingerprint: string;\n\treadonly omissions: ToolOmission[] = [];\n\tprivate readonly token = crypto.randomUUID().replaceAll(\"-\", \"\");\n\tprivate tools: BridgeTool[];");
