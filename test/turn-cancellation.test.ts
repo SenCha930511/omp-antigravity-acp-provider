@@ -29,6 +29,15 @@ test("an acknowledged session/cancel notification waits for the terminal respons
   assert.equal(await drained, true, "a successful notification must not force a cold rebuild after 1.5s");
 });
 
+test("a slow cancel acknowledgement gets the natural-completion grace", async () => {
+  const pending = Promise.withResolvers<void>();
+  const binding = { session: { sessionId: "old" }, turnCompletion: pending.promise,
+    connection: { async cancel() { await new Promise(resolve => setTimeout(resolve, 30)); } } };
+  const drained = drainCancelledTurn(binding, () => {}, undefined, 10, { idleMs: 100, maxMs: 0 });
+  setTimeout(() => pending.resolve(), 50);
+  assert.equal(await drained, true, "a pending cancel RPC must not force a cold rebuild at the send deadline");
+});
+
 test("steerTimings validates the steering grace windows", () => {
   assert.deepEqual(steerTimings({}), { idleMs: 60_000, maxMs: 300_000 });
   assert.deepEqual(steerTimings({ OMP_ACP_STEER_GRACE_MS: "0" }), { idleMs: 0, maxMs: 300_000 });

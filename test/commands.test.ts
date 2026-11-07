@@ -83,7 +83,8 @@ test("balanced cleanup command persists retention and accepts custom days withou
 test("usage, account and refresh report without instantiating a runtime", async () => {
   const fixture = makeHandler();
   await fixture.handler("usage", fixture.ctx);
-  assert.match(fixture.notices[0]!, /"configured"/);
+  assert.match(fixture.notices[0]!, /"configured": "off"/);
+  assert.match(fixture.notices[0]!, /"effective": "off"/);
   await fixture.handler("account", fixture.ctx);
   const account = fixture.notices[1]!;
   assert.match(account, /Antigravity ACP account/);
@@ -134,5 +135,19 @@ test("permissions and native-tools do not mutate live state or close runtimes if
   assert.equal(fixture.deps.getPermissionMode(), "default");
   await assert.rejects(fixture.handler("native-tools disabled", fixture.ctx));
   assert.equal(closed, 0);
+  fs.rmSync(fixture.state, { recursive: true, force: true });
+});
+
+test("status and tools hold a runtime lease for their snapshot", async () => {
+  const fixture = makeHandler();
+  let acquired = 0, released = 0;
+  fixture.deps.acquireRuntimeForSession = () => {
+    acquired++;
+    return { value: bundle, release: () => { released++; } };
+  };
+  await fixture.handler("status", fixture.ctx);
+  await fixture.handler("tools", fixture.ctx);
+  assert.equal(acquired, 2);
+  assert.equal(released, 2);
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });

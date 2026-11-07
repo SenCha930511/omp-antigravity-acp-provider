@@ -14,7 +14,7 @@ import { setTimeout as delay } from "node:timers/promises";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const omp = process.env.OMP_ACP_TEST_OMP_BIN ?? "omp";
 const version = execFileSync(omp, ["--version"], { encoding: "utf8" }).trim();
-const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-rpc-"));
+const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-rpc-")));
 const state = path.join(temporary, "agent/antigravity-acp-provider");
 await fs.mkdir(state, { recursive: true });
 await fs.writeFile(path.join(state, "context.json"), JSON.stringify({ defaults: { contextWindow: 524288, maxTokens: 32000, usageMode: "off" }, models: {} }));
@@ -136,8 +136,24 @@ try {
   assert.ok((await trace()).some(entry => entry.kind === "close" && entry.id === previousAcp),
     "OMP /fresh must close the adapter's previous provider session too");
   await prompt("REQ_AFTER_FRESH");
-  assert.notEqual(prompts(await trace()).at(-1).id, previousAcp);
+  const postFreshAcp = prompts(await trace()).at(-1).id;
+  assert.notEqual(postFreshAcp, previousAcp);
   assert.match(current(prompts(await trace()).at(-1)), /REQ_AFTER_FRESH/);
+  const cleanupRegistryFile = (await fs.readdir(state)).find(name => name.startsWith("cleanup-sessions-"))!;
+  let postFreshSourceTracked = false;
+  for (let i = 0; i < 200; i++) {
+    const reg = JSON.parse(await fs.readFile(path.join(state, cleanupRegistryFile), "utf8"));
+    const postRecord = reg.sessions.find((s: any) => s.id === postFreshAcp);
+    const prevRecord = reg.sessions.find((s: any) => s.id === previousAcp);
+    if (postRecord?.ompSource?.file === path.resolve(fresh.sessionFile) && prevRecord?.replaced === true) {
+      postFreshSourceTracked = true;
+      break;
+    }
+    await delay(10);
+  }
+  assert.ok(postFreshSourceTracked, "Post-/fresh ACP session must be tracked against the OMP session file and supersede pre-/fresh session");
+  const savedAfterFresh = JSON.parse(await fs.readFile(path.join(state, "sessions.json"), "utf8"));
+  assert.ok(!savedAfterFresh.some((record: any) => record.acpSessionId === previousAcp), "Superseded pre-/fresh mapping must be removed from sessions.json");
   console.log("Actual OMP RPC: /fresh rotates provider identity and closes old runtime: PASS");
 
   const corrupted = path.join(temporary, "corrupt.jsonl");

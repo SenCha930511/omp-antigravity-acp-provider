@@ -34,7 +34,7 @@ function createRuntime(mode: string, mapping: string) {
     transport.sendRequest = (method: string, params: any, ...rest: any[]) => {
       if (["session/new", "session/load", "session/resume"].includes(method)) {
         const meta = params._meta?.antigravity;
-        report.sessions.push({ method, mode, systemAppend: meta?.systemPrompt?.append?.includes("OMP tool routing:") === true,
+        report.sessions.push({ method, mode, systemAppend: meta?.systemPrompt?.append?.includes("Supplied OMP tools") === true,
           eager: meta?.eagerMcpServers, enabledTools: meta?.enabledTools, disabledTools: meta?.disabledTools });
       }
       return send(method, params, ...rest);

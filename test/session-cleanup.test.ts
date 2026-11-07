@@ -642,3 +642,97 @@ test("a corrupt sibling journal cannot prove a missing source was deleted", asyn
   f.advance(1); assert.equal(await f.cleaner.collect(), 1);
   assert.equal(f.exists(id), false);
 });
+
+test("retired unmapped orphans whose confirmation chain broke are reclaimed after grace/idle period", async t => {
+  const f = fixture(t), brokenConservative = f.session(), brokenBalanced = f.session();
+  const t1 = await f.cleaner.acquire(brokenConservative, true, 987654);
+  await f.cleaner.retire("sid:abandoned", brokenConservative);
+  await f.cleaner.release(t1);
+  f.advance(6.9);
+  assert.equal(await f.cleaner.collect(), 0, "conservative waits full idleDays before reclaiming unconfirmed retired session");
+  f.advance(0.2);
+  assert.equal(await f.cleaner.collect(), 1);
+  assert.equal(f.exists(brokenConservative), false);
+
+  f.cleaner.configure("balanced");
+  const t2 = await f.cleaner.acquire(brokenBalanced, true, 987654);
+  await f.cleaner.retire("sid:abandoned-2", brokenBalanced);
+  await f.cleaner.release(t2);
+  f.advance(0.9);
+  assert.equal(await f.cleaner.collect(), 0, "balanced waits orphanGraceDays before reclaiming unconfirmed retired session");
+  f.advance(0.2);
+  assert.equal(await f.cleaner.collect(), 1);
+  assert.equal(f.exists(brokenBalanced), false);
+});
+
+test("sessionStore overwrite, expiry, cap eviction and clear notify cleanup to prevent orphan leaks", async t => {
+  const f = fixture(t);
+  const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
+  const oldId = f.session(), newId = f.session(), clearedId = f.session();
+  for (const id of [oldId, newId, clearedId]) {
+    const token = await f.cleaner.acquire(id, true, 987654);
+    await f.cleaner.release(token);
+  }
+  await store.save({ piSessionId: "chat", acpSessionId: oldId, acpModelId: "flash", cwd: f.root, messageCount: 1, historyFingerprint: "h1", lastActive: Date.now() });
+  await store.save({ piSessionId: "chat", acpSessionId: newId, acpModelId: "flash", cwd: f.root, messageCount: 2, historyFingerprint: "h2", lastActive: Date.now() });
+  await f.cleaner.confirm("sid:chat", newId);
+  assert.equal(f.exists(oldId), false, "overwritten acpSessionId is retired and cleaned up upon replacement confirmation");
+  assert.ok(f.exists(newId));
+
+  await store.save({ piSessionId: "other", acpSessionId: clearedId, acpModelId: "flash", cwd: f.root, messageCount: 1, historyFingerprint: "h1", lastActive: Date.now() });
+  await store.clear();
+  // Restarting SessionCleanup before collect() must still see the durable discard notes
+  assert.equal(await f.create().collect(), 2, "clear() durably marks all previously mapped owned sessions disposable");
+  assert.equal(f.exists(newId), false);
+  assert.equal(f.exists(clearedId), false);
+});
+
+test("sessionStore save flushes replacement and cap-eviction cleanup notes", async t => {
+  const f = fixture(t);
+  const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
+  let flushes = 0;
+  const originalFlush = f.cleaner.flushStoreNotes.bind(f.cleaner);
+  f.cleaner.flushStoreNotes = async () => { flushes++; await originalFlush(); };
+  const record = (piSessionId: string, acpSessionId: string, lastActive = Date.now()) => ({
+    piSessionId, acpSessionId, acpModelId: "flash", cwd: f.root, messageCount: 1, historyFingerprint: "h", lastActive,
+  });
+  await store.save(record("chat", randomUUID()));
+  await store.save(record("chat", randomUUID()));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.ok(flushes > 0, "replacement notes must reach the cleanup ledger");
+  const afterReplacement = flushes;
+  for (let i = 0; i < 256; i++) await store.save(record(`cap-${i}`, randomUUID(), i));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.ok(flushes > afterReplacement, "cap eviction notes must reach the cleanup ledger");
+  assert.equal((await store.list()).length, 256);
+});
+
+test("trackSource after /fresh rotation associates the rotated routing ID with the journal file and cleans up on file deletion", async t => {
+  const f = fixture(t), preFresh = f.session(), postFresh = f.session();
+  for (const id of [preFresh, postFresh]) {
+    const token = await f.cleaner.acquire(id, true, 987654);
+    await f.cleaner.release(token);
+  }
+  const root = path.join(f.root, "sessions"), file = path.join(root, "workspace", "chat.jsonl");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ type: "session", id: "header-id" }) + "\n");
+  const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
+  await store.save({ piSessionId: "header-id", acpSessionId: preFresh, acpModelId: "flash", cwd: f.root, messageCount: 1, historyFingerprint: "h1", lastActive: Date.now() });
+  await f.cleaner.trackSource("header-id", file);
+
+  // Real OMP /fresh keeps the old mapping in sessions.json while adding the rotated provider sessionId on the same file
+  await store.save({ piSessionId: "rotated-id", acpSessionId: postFresh, acpModelId: "flash", cwd: f.root, messageCount: 1, historyFingerprint: "h2", lastActive: Date.now() });
+  await f.cleaner.trackSource("rotated-id", file);
+  assert.equal(await store.get("header-id"), undefined, "superseded pre-/fresh mapping is removed from sessions.json");
+  assert.equal(await f.cleaner.collect(), 1, "pre-/fresh session for the same file is marked disposable and reclaimed");
+  assert.equal(f.exists(preFresh), false);
+  assert.ok(f.exists(postFresh));
+
+  // Deleting the OMP .jsonl file also cleans up the post-/fresh session and its rotated mapping
+  fs.unlinkSync(file);
+  await f.cleaner.collect();
+  f.advance(61 / 86400);
+  assert.equal(await f.cleaner.collect(), 1);
+  assert.equal(f.exists(postFresh), false);
+  assert.equal(await store.get("rotated-id"), undefined);
+});

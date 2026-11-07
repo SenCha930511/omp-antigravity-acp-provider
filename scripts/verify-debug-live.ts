@@ -62,7 +62,7 @@ try {
     assert.ok(answer.includes(marker));
     assert.ok(thinking.includes(thought), "Real thought event path was suppressed");
     const statusVisible = thinking.includes("[Antigravity tool");
-    assert.equal(statusVisible, mode === "on");
+    assert.equal(statusVisible, false, "Tool status must not pollute model reasoning");
     console.log(JSON.stringify({ mode, statusVisible, syntheticThoughtPreserved: true, ompToolCalls: toolCalls, answer, serverSessions: serverSessions.size }));
   }
   assert.equal(serverSessions.size, 1, "Debug toggles should not restart ACP");

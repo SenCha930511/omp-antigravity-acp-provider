@@ -29,9 +29,9 @@ TierConnection.prototype.prompt = async function(request: any, signal: AbortSign
   const report = active;
   const wire = JSON.stringify(request.prompt);
   report.requests.push({
-    routingPresent: wire.includes("OMP tool routing:"),
-    preferRulePresent: wire.includes("choose an appropriate supplied pi_ MCP tool"),
-    approvalRulePresent: wire.includes("obtain the user's explicit approval"),
+    routingPresent: wire.includes("Supplied OMP tools"),
+    preferRulePresent: wire.includes("Call them directly for user tasks"),
+    approvalRulePresent: wire.includes("obtain explicit approval"),
     piReadListed: wire.includes("OMP tool names: pi_read"),
     injectedSystemRetained: wire.includes("DIAGNOSTIC_SYSTEM_MARKER"),
     selectors: this.getSessionState(request.sessionId).configOptions?.map((option: any) => ({

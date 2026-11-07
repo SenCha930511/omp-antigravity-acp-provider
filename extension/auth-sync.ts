@@ -167,6 +167,7 @@ export interface AuthCoordinatorDeps {
 // this adapter finish the Antigravity-side logout when OMP reports removal.
 export class OmpAuthCoordinator {
   private watchingCredentials = false;
+  private activeContext: OmpCommandContext | undefined;
   private markerPresent: boolean | undefined;
   private suppressFollow = false;
   private selfLogout = false;
@@ -268,12 +269,14 @@ export class OmpAuthCoordinator {
   }
 
   private async finishFollowedLogout(ctx: OmpCommandContext): Promise<void> {
+    const activeCtx = this.activeContext ?? ctx;
     if (this.deps.isPoolBusy()) {
       // Never interrupt an in-flight Antigravity request; retry once idle.
       clearTimeout(this.followRetry);
       this.followRetry = setTimeout(() => {
         this.followRetry = undefined;
-        if (this.ompMarkerStored(ctx) === false) this.runFollowedLogout(ctx);
+        const currentCtx = this.activeContext ?? activeCtx;
+        if (this.ompMarkerStored(currentCtx) === false) this.runFollowedLogout(currentCtx);
       }, logoutFollow.retryMs);
       this.followRetry.unref?.();
       return;
@@ -282,27 +285,30 @@ export class OmpAuthCoordinator {
     await this.deps.closeAllRuntimes();
     // A quick re-login can restore the marker while the steps above await;
     // a restored or unknown marker keeps the new keychain entry untouched.
-    if (this.ompMarkerStored(ctx) !== false) return;
+    if (this.ompMarkerStored(this.activeContext ?? activeCtx) !== false) return;
     const keychainRemoved = await this.removeKeychainCredentialDurably();
     // Keep the confirmation terse; /antigravity-acp account shows the details.
     try {
-      ctx?.ui?.notify?.(formatLogoutSummary({ keychainRemoved, followed: true }), "info");
+      (this.activeContext ?? activeCtx)?.ui?.notify?.(formatLogoutSummary({ keychainRemoved, followed: true }), "info");
     } catch { /* the host UI may already be gone */ }
   }
 
   // The follow-up runs detached from timer callbacks; a failure must not
   // become an unhandled rejection, and the notice stays credential-free.
   private runFollowedLogout(ctx: OmpCommandContext): void {
-    void this.finishFollowedLogout(ctx).catch(() => {
+    const activeCtx = this.activeContext ?? ctx;
+    void this.finishFollowedLogout(activeCtx).catch(() => {
       try {
-        ctx?.ui?.notify?.("Antigravity ACP: the logout OMP started could not be finished. Run /antigravity-acp logout to retry.", "error");
+        (this.activeContext ?? activeCtx)?.ui?.notify?.("Antigravity ACP: the logout OMP started could not be finished. Run /antigravity-acp logout to retry.", "error");
       } catch { /* the host UI may already be gone */ }
     });
   }
 
   watchOmpCredentials(ctx: OmpCommandContext | undefined): void {
-    if (this.watchingCredentials || !ctx) return;
+    if (!ctx) return;
     const credentials = ctx.modelRegistry?.authStorage?.credentials;
+    if (credentials?.getOAuth && credentials.onGeneration) this.activeContext = ctx;
+    if (this.watchingCredentials) return;
     if (!credentials?.getOAuth || !credentials.onGeneration) return;
     const initial = this.ompMarkerStored(ctx);
     if (initial === undefined) return;
@@ -317,7 +323,8 @@ export class OmpAuthCoordinator {
       }
     });
     credentials.onGeneration(() => {
-      const current = this.ompMarkerStored(ctx);
+      const activeCtx = this.activeContext ?? ctx;
+      const current = this.ompMarkerStored(activeCtx);
       if (current === undefined) return;
       const wasPresent = this.markerPresent === true;
       this.markerPresent = current;
@@ -342,12 +349,13 @@ export class OmpAuthCoordinator {
           return;
         }
         // A quick re-login after the removal cancels the cleanup.
-        if (this.ompMarkerStored(ctx) !== false) {
+        const currentCtx = this.activeContext ?? activeCtx;
+        if (this.ompMarkerStored(currentCtx) !== false) {
           this.apiKeyFallback = true;
           this.deps.onSyncProvider();
           return;
         }
-        this.runFollowedLogout(ctx);
+        this.runFollowedLogout(currentCtx);
       }, logoutFollow.delayMs);
       this.followTimer.unref?.();
     });

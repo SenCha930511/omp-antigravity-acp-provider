@@ -29,6 +29,8 @@ async function fixture(maxIdleEntries = 2) {
   const hangs: Array<{ promise: Promise<void>; resolve: () => void }> = [];
   const muted: string[] = [];
   let failResume = false, failLoad = false;
+  let promptUsage: any;
+  const okResponse = () => ({ stopReason: "end_turn", ...(promptUsage ? { usage: promptUsage } : {}) });
   const pool = new SessionRuntimePool<any>(() => {
     let runtime: any;
     runtime = new AntigravityRuntime((options: any) => {
@@ -105,7 +107,7 @@ async function fixture(maxIdleEntries = 2) {
               } finally {
                 if (dribble) clearInterval(dribble);
               }
-              return { stopReason: "end_turn" };
+              return okResponse();
             }
             if (action === "foreign") {
               const foreign = randomUUID();
@@ -115,9 +117,14 @@ async function fixture(maxIdleEntries = 2) {
               options.handlers.onUpdate({ sessionId: foreign, update: { sessionUpdate: "agent_message_chunk",
                 content: { type: "text", text: "FOREIGN_SESSION_OUTPUT" } } });
             }
+            if (action === "presentation") {
+              connection.emit({ sessionUpdate: "plan", entries: [{ status: "in_progress", content: "Synthetic plan" }] });
+              connection.emit({ sessionUpdate: "tool_call", toolCallId: "synthetic-call", title: "Synthetic tool", status: "in_progress" });
+              connection.emit({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "REAL_THOUGHT" } });
+            }
             connection.emit({ sessionUpdate: "agent_message_chunk",
               content: { type: "text", text: `ACK:${connection.id}:${connection.prompts.length}` } });
-            return { stopReason: "end_turn" };
+            return okResponse();
           } finally { connection.activePrompts--; }
         },
         async close() {
@@ -145,6 +152,7 @@ async function fixture(maxIdleEntries = 2) {
   return { root, store, pool, connections, actions, turn, cancel: cancelState, hangs, muted,
     releaseHangs() { for (const hang of hangs) hang.resolve(); },
     failRestoration(resume: boolean, load: boolean) { failResume = resume; failLoad = load; },
+    setPromptUsage(value: any) { promptUsage = value; },
     async close() { await pool.closeAll(); await fs.rm(root, { recursive: true, force: true }); },
   };
 }
@@ -161,6 +169,18 @@ test("A → new B → resume A keeps ACP identities separate and sends only A's 
     assert.equal(request.sessionId, a);
     assert.match(current(request), /REQ_A_NEXT/);
     assert.doesNotMatch(payload(request), /REQ_A_FIRST|REQ_B_FIRST/);
+  } finally { await f.close(); }
+});
+
+test("ACP plan and tool status stay out of the thinking stream", async () => {
+  const f = await fixture();
+  try {
+    f.actions.push("presentation");
+    const message = await f.turn("presentation", [user("REQ_PRESENTATION")]);
+    assert.ok(message);
+    const thinking = message.content.filter((block: any) => block.type === "thinking").map((block: any) => block.thinking).join("");
+    assert.equal(thinking, "REAL_THOUGHT");
+    assert.doesNotMatch(thinking, /Antigravity (plan|tool)/);
   } finally { await f.close(); }
 });
 
@@ -517,4 +537,157 @@ test("queue mode waits for the active streaming turn and reuses it", { timeout: 
     else process.env.OMP_ACP_STEER_MODE = previousMode;
     await f.close();
   }
+});
+
+test("mid-session tool changes and volatile system-reminder/tool-name updates keep the warm session", async () => {
+  const f = await fixture();
+  try {
+    const readTool = { name: "read", description: "Read", parameters: { type: "object", properties: {} } };
+    const writeTool = { name: "write", description: "Write", parameters: { type: "object", properties: {} } };
+    const first = user("REQ_TOOLS_FIRST");
+    const answer = await f.turn("warm-tools", [first], {
+      systemPrompt: "CORE_POLICY\n\nOMP tool names: pi_read",
+      tools: [readTool],
+    });
+    const sessionId = (await f.store.get("warm-tools"))!.acpSessionId;
+    await f.turn("warm-tools", [first, answer, user("REQ_TOOLS_SECOND")], {
+      systemPrompt: "CORE_POLICY\n\n<system-reminder>\nToday: 2026-11-08\n</system-reminder>\n\nOMP tool names: pi_read, pi_write",
+      tools: [readTool, writeTool],
+    });
+    assert.equal(f.connections.length, 1, "tool and reminder updates must not tear down the warm session");
+    assert.equal((await f.store.get("warm-tools"))!.acpSessionId, sessionId);
+    assert.equal(f.connections[0].prompts.length, 2);
+    assert.match(current(f.connections[0].prompts[1]), /REQ_TOOLS_SECOND/);
+    assert.doesNotMatch(payload(f.connections[0].prompts[1]), /REQ_TOOLS_FIRST/);
+  } finally { await f.close(); }
+});
+
+test("assistant boundary tolerates stripped thinking blocks and host metadata normalization", async () => {
+  const f = await fixture();
+  try {
+    const first = user("REQ_BOUNDARY_FIRST");
+    const answer = await f.turn("boundary", [first]);
+    const sessionId = (await f.store.get("boundary"))!.acpSessionId;
+    const normalizedAnswer = {
+      role: "assistant",
+      provider: "",
+      model: "custom-alias",
+      content: [
+        { type: "thinking", thinking: "HOST_ADDED_OR_STRIPPED_THOUGHT" },
+        { type: "text", text: "" },
+        ...answer.content.map((b: any) => ({ ...b, extraHostField: 123 })),
+      ],
+    };
+    await f.turn("boundary", [first, normalizedAnswer, user("REQ_BOUNDARY_NEXT")], { model: otherModel });
+    assert.equal(f.connections.length, 1, "normalized assistant message must still match the warm boundary even when setModel updates binding.modelId");
+    assert.equal((await f.store.get("boundary"))!.acpSessionId, sessionId);
+    assert.equal(f.connections[0].prompts.length, 2);
+    assert.doesNotMatch(payload(f.connections[0].prompts[1]), /REQ_BOUNDARY_FIRST|ACK:/, "normalized assistant message must be skipped as already seen");
+  } finally { await f.close(); }
+});
+
+test("large multi-message cold replay seeds history in sequential steps before the current user request", async () => {
+  const f = await fixture();
+  try {
+    const messages = [
+      user("SEED_PART_1_" + "a".repeat(75_000)),
+      { role: "assistant", content: [{ type: "text", text: "SEED_PART_2_" + "b".repeat(75_000) }] },
+      user("SEED_PART_3_" + "c".repeat(75_000)),
+      { role: "assistant", content: [{ type: "text", text: "SEED_PART_4_" + "d".repeat(75_000) }] },
+      user("FINAL_SEEDED_QUESTION"),
+    ];
+    const answer = await f.turn("seeded", messages);
+    assert.equal(f.connections.length, 1);
+    assert.ok(f.connections[0].prompts.length >= 2, "expected at least one seed prompt before the final prompt");
+    const finalPrompt = f.connections[0].prompts.at(-1);
+    assert.match(current(finalPrompt), /FINAL_SEEDED_QUESTION/);
+    // Seed step responses must not leak into the final assistant message content
+    const finalText = answer.content.map((b: any) => b.text).join("");
+    assert.equal(finalText, `ACK:${f.connections[0].id}:${f.connections[0].prompts.length}`);
+  } finally { await f.close(); }
+});
+
+test("single oversized current message is sent as hidden seed steps before the final request", async () => {
+  const f = await fixture();
+  try {
+    const text = "SINGLE_REQUEST_START_" + "x".repeat(220_000) + "_SINGLE_REQUEST_END";
+    const answer = await f.turn("single-seeded", [user(text)]);
+    const prompts = f.connections[0].prompts;
+    assert.ok(prompts.length >= 2, "expected at least one seed prompt before the final prompt");
+    assert.match(current(prompts[0]), /Current OMP user request \(part; not yet actionable\)/);
+    assert.match(current(prompts[0]), /Reply only with: OK/);
+    const finalPrompt = prompts.at(-1);
+    assert.match(current(finalPrompt), /Current OMP user request \(final part\)/);
+    assert.match(current(finalPrompt), /_SINGLE_REQUEST_END/);
+    assert.equal(answer.content.map((b: any) => b.text).join(""),
+      `ACK:${f.connections[0].id}:${prompts.length}`);
+  } finally { await f.close(); }
+});
+
+test("multi-step seed usage is included in the final assistant usage", async () => {
+  const f = await fixture();
+  try {
+    f.setPromptUsage({ inputTokens: 10, outputTokens: 2, thoughtTokens: 1 });
+    const messages = [
+      user("USAGE_SEED_1_" + "a".repeat(75_000)),
+      { role: "assistant", content: [{ type: "text", text: "USAGE_SEED_2_" + "b".repeat(75_000) }] },
+      user("USAGE_SEED_3_" + "c".repeat(75_000)),
+      { role: "assistant", content: [{ type: "text", text: "USAGE_SEED_4_" + "d".repeat(75_000) }] },
+      user("FINAL_USAGE_QUESTION"),
+    ];
+    const answer = await f.turn("seed-usage", messages);
+    const prompts = f.connections[0].prompts.length;
+    assert.ok(prompts >= 2, "expected seed steps before the final prompt");
+    assert.equal(answer.usage.input, 10 * prompts);
+    assert.equal(answer.usage.output, 2 * prompts);
+    assert.equal(answer.usage.reasoning, prompts);
+    assert.equal(answer.usage.totalTokens, 12 * prompts);
+  } finally { await f.close(); }
+});
+
+test("aborting mid-way through multi-step seedSteps invalidates the partial session and forces clean cold reconstruction on resume", async () => {
+  const f = await fixture();
+  try {
+    const messages = [
+      user("ABORT_SEED_1_" + "a".repeat(75_000)),
+      { role: "assistant", content: [{ type: "text", text: "ABORT_SEED_2_" + "b".repeat(75_000) }] },
+      user("ABORT_SEED_3_" + "c".repeat(75_000)),
+      { role: "assistant", content: [{ type: "text", text: "ABORT_SEED_4_" + "d".repeat(75_000) }] },
+      user("FINAL_AFTER_SEED_ABORT"),
+    ];
+    f.actions.push("hang");
+    const controller = new AbortController();
+    const pending = f.turn("seeded-abort", messages, { signal: controller.signal });
+    while (f.hangs.length === 0) await tick();
+    controller.abort(new Error("user cancelled during seed step"));
+    f.hangs[0]!.resolve();
+    await assert.rejects(pending);
+    assert.equal(await f.store.get("seeded-abort"), undefined, "aborted seed step must not persist a partial checkpoint");
+    const answer = await f.turn("seeded-abort", messages);
+    assert.equal(f.connections.length, 2, "next turn must reconstruct on a fresh ACP session");
+    const allPrompts = JSON.stringify(f.connections[1].prompts);
+    assert.match(allPrompts, /ABORT_SEED_1_/);
+    assert.match(allPrompts, /FINAL_AFTER_SEED_ABORT/);
+    assert.ok(answer.content.length > 0);
+  } finally { await f.close(); }
+});
+
+test("steering turn with changed core system instructions forces cold reconstruction instead of reusing warm binding", async () => {
+  const f = await fixture();
+  try {
+    f.actions.push("hang");
+    const first = user("REQ_STEER_POLICY_FIRST");
+    const oldTurn = f.turn("steer-policy", [first], { systemPrompt: "POLICY_OLD" }).catch(() => {});
+    while (!f.connections.length || f.connections[0].prompts.length < 1) await tick();
+    const oldId = f.connections[0].id;
+    const nextTurn = f.turn("steer-policy", [first, user("REQ_STEER_POLICY_NEW")], { systemPrompt: "POLICY_NEW" });
+    await nextTurn;
+    await oldTurn;
+    assert.equal(f.connections.length, 2, "changed core system instructions during steering must force cold reconstruction");
+    assert.notEqual(f.connections[1].id, oldId);
+    const secondPrompt = JSON.stringify(f.connections[1].prompts[0]);
+    assert.match(secondPrompt, /POLICY_NEW/);
+    assert.match(secondPrompt, /REQ_STEER_POLICY_FIRST/);
+    assert.match(secondPrompt, /REQ_STEER_POLICY_NEW/);
+  } finally { await f.close(); }
 });

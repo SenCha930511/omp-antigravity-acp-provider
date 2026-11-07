@@ -10,9 +10,10 @@ import { Diagnostics, instrumentRuntime } from "./diagnostics.ts";
 import { stableTools } from "./tool-order.ts";
 import { toolDeclarations, normalizeOmpSystemDeltas, type OmpToolDeclaration } from "./omp-context.ts";
 import { OmpSessionLifecycle, type OmpProviderSessionState } from "./omp-session-lifecycle.ts";
-import { loadContextSettings } from "./context-settings.ts";
+import { DEFAULT_USAGE_MODE, loadContextSettings } from "./context-settings.ts";
 import { selectRuntimeModel, type PublicCatalogModel } from "./model-catalog.ts";
 import { TOOL_ROUTING } from "./tool-routing.ts";
+import { TranscriptRouting } from "./transcript-routing.ts";
 import { loadToolPolicy } from "./tool-policy.ts";
 import {
   MARKER,
@@ -25,6 +26,7 @@ import {
 } from "./auth-sync.ts";
 import { CatalogStore } from "./catalog-store.ts";
 import { createAntigravityCommandHandler, type RuntimeBundleView, type ToolAuditSummary } from "./commands.ts";
+import { formatCompactionNotice } from "./acp-compaction.ts";
 import {
   AcpSessionStore,
   AntigravityRuntime,
@@ -109,7 +111,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   }
 
   const connections = new Set<TierConnection>();
-  const idleTimeoutMs = Number(process.env.OMP_ACP_IDLE_TIMEOUT_MS ?? 300_000);
+  const idleTimeoutMs = Number(process.env.OMP_ACP_IDLE_TIMEOUT_MS ?? 900_000);
   if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 0 || idleTimeoutMs > 2_147_483_647 || (idleTimeoutMs > 0 && idleTimeoutMs < 1000)) {
     throw new Error("OMP_ACP_IDLE_TIMEOUT_MS must be 0 (disabled) or an integer between 1000 and 2147483647");
   }
@@ -136,7 +138,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
         ...options,
         ompNativeTools: toolPolicy.nativeTools,
         ompDebugToolUpdates: toolPolicy.debugToolUpdates,
-        ompUsageMode: contextSettings.defaults.usageMode ?? "auto",
+        ompUsageMode: contextSettings.defaults.usageMode ?? DEFAULT_USAGE_MODE,
         ompCleanup: cleanup,
         ompDiagnostics: diagnostics,
       });
@@ -159,15 +161,18 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
 
   async function closePool() { await lifecycle.closeAll(); await runtimes.closeAll(); }
 
+  const routing = new TranscriptRouting();
   const sessionIdOf = (ctx: OmpCommandContext | undefined): string | undefined => ctx?.sessionManager?.getSessionId?.();
   pi.on("session_shutdown", async (_event: unknown, ctx: OmpCommandContext) => {
     const sessionId = sessionIdOf(ctx);
+    if (sessionId) routing.forget(sessionId);
     if (sessionId) {
       await Promise.all([lifecycle.closeSession(sessionId), lifecycle.waitClosing(), runtimes.closeIdle()]);
     } else {
       await closePool();
     }
     await sessionStore.flush();
+    await cleanup.flushStoreNotes();
     if (!runtimes.values().length) await cleanup.stop();
   });
 
@@ -195,14 +200,33 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   });
 
   const trackOmpSource = async (_event: unknown, ctx: OmpCommandContext) => {
-    const id = ctx.sessionManager?.getSessionId?.(), file = ctx.sessionManager?.getSessionFile?.();
-    if (id && file) try { await cleanup.trackSource(id, file); } catch { /* Unproven or not-yet-persisted sources remain protected. */ }
+    const transcriptId = ctx.sessionManager?.getSessionId?.(), file = ctx.sessionManager?.getSessionFile?.();
+    if (!transcriptId || !file || transcriptId.includes(":side:")) return;
+    const id = routing.take(transcriptId);
+    try { await cleanup.trackSource(id, file); } catch { /* Unproven or not-yet-persisted sources remain protected. */ }
+  };
+
+  const notifyAcpCompactions = (ctx: OmpCommandContext) => {
+    for (const connection of connections) {
+      for (const notice of connection.takeCompactionNotices?.() ?? []) {
+        try { ctx.ui.notify(formatCompactionNotice(notice), notice.status === "failed" ? "warning" : "info"); }
+        catch { /* A notification failure must not affect inference. */ }
+      }
+    }
   };
   pi.on("session_start", async (event: unknown, ctx: OmpCommandContext) => {
-    auth.watchOmpCredentials(ctx); await trackOmpSource(event, ctx); cleanup.start();
+    routing.clearPending();
+    auth.watchOmpCredentials(ctx); await trackOmpSource(event, ctx); notifyAcpCompactions(ctx); cleanup.start();
   });
-  pi.on("agent_end", trackOmpSource);
-  pi.on("session_switch", trackOmpSource);
+  pi.on("agent_end", async (event: unknown, ctx: OmpCommandContext) => {
+    await trackOmpSource(event, ctx);
+    notifyAcpCompactions(ctx);
+  });
+  pi.on("session_switch", async (event: unknown, ctx: OmpCommandContext) => {
+    routing.clearPending();
+    await trackOmpSource(event, ctx);
+    notifyAcpCompactions(ctx);
+  });
 
   pi.registerTool({
     name: PERMISSION_TOOL_NAME,
@@ -228,6 +252,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     prepareRuntime,
     () => [...(FALLBACK_MODELS as PublicCatalogModel[])],
     requireAcpAuth,
+    createConnection,
   );
   let initialModels = catalogStore.loadInitialOrCached(contextSettings);
 
@@ -326,6 +351,9 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
           // OMP needs a stream synchronously. Defer runtime setup behind it so
           // loading/selecting/listing models performs no ACP process activity.
           const deferred = new PiEventWriter(model);
+          const routingId = options?.sessionId;
+          routing.noteStream(routingId);
+          let routingFailed = false;
           const ticket = lifecycle.capture(options?.sessionId, options?.providerSessionState);
           void (async () => {
             try {
@@ -355,8 +383,12 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
                 }
               } finally { lease.release(); }
             } catch (error) {
+              routingFailed = true;
               deferred.fail(error, options?.signal?.aborted === true);
-            } finally { lifecycle.finish(ticket); }
+            } finally {
+              if (routingFailed) routing.noteFailure(routingId);
+              lifecycle.finish(ticket);
+            }
           })();
           return deferred.stream;
         },

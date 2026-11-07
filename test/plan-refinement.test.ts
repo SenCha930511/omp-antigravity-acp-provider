@@ -8,7 +8,7 @@ const model = { id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp", p
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 const user = (content: string) => ({ role: "user", content, timestamp: 1 });
 
-test("built runtime rejects oversized plan refinement before prompting, then accepts compacted decisions and the new question", async () => {
+test("built runtime splits oversized plan refinement, then accepts compacted decisions and the new question", async () => {
   const requests: any[] = [];
   const modes = { currentModeId: "yolo", availableModes: [{ id: "yolo", name: "Yolo" }] };
   const models = { currentModelId: model.id, availableModels: [{ modelId: model.id, name: "Flash" }] };
@@ -41,15 +41,17 @@ test("built runtime rejects oversized plan refinement before prompting, then acc
       { role: "assistant", provider: model.provider, model: model.id,
         content: [{ type: "text", text: "SOURCE_HISTORY ".repeat(50_000) }], timestamp: 2 },
       user("EXPLAIN_THE_APPROVED_ARCHITECTURE")]);
-    assert.equal(requests.length, 0, "Never send a replay whose latest user question would be truncated");
-    const error = oversized.find(event => event.type === "error")?.error;
-    assert.match(error?.errorMessage, /Maximum context length exceeded:.*single-step/s);
-    assert.ok(!error.errorMessage.includes("ORIGINAL_PLAN_REQUEST"), "Error messages must not disclose conversation content");
+    assert.equal(oversized.some(event => event.type === "error"), false);
+    assert.ok(requests.length >= 2, "expected history seed steps before the final request");
+    assert.match(JSON.stringify(requests), /SOURCE_HISTORY/);
+    assert.match(JSON.stringify(requests.at(-1)), /EXPLAIN_THE_APPROVED_ARCHITECTURE/);
+    const beforeCompacted = requests.length;
     const compacted = await turn([user("Compacted plan: Magpie; named tunnel; fixed upstream key. PLAN_COMPLETE."),
       user("EXPLAIN_THE_APPROVED_ARCHITECTURE")]);
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].prompt.at(-1).text, "EXPLAIN_THE_APPROVED_ARCHITECTURE");
-    assert.match(JSON.stringify(requests[0].prompt), /Magpie; named tunnel; fixed upstream key/);
+    assert.ok(requests.length > beforeCompacted);
+    const compactedPrompt = requests.at(-1);
+    assert.equal(compactedPrompt.prompt.at(-1).text, "EXPLAIN_THE_APPROVED_ARCHITECTURE");
+    assert.match(JSON.stringify(compactedPrompt.prompt), /Magpie; named tunnel; fixed upstream key/);
     assert.equal(compacted.find(event => event.type === "done")?.message.content[0].text, "REFINEMENT_ANSWER");
   } finally { await runtime.close(); }
 });

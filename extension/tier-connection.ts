@@ -4,7 +4,9 @@ import { AntigravityAcpConnection } from "./vendor/pi-antigravity-acp-provider/s
 import { choices, resolveSelection, selector } from "./selectors.ts";
 import { installSessionRouting, type NativeToolMode } from "./tool-routing.ts";
 import { showAcpUpdate } from "./activity-presentation.ts";
+import { alignContextTokens, applyCompactionChunk, applyCompactionUpdate, isTerminalCompaction, type AcpCompactionNotice, type AcpCompactionRecord } from "./acp-compaction.ts";
 import { parseSessionUsage, usageDelta, type SessionUsage } from "./usage-accounting.ts";
+import { DEFAULT_USAGE_MODE } from "./context-settings.ts";
 import type { SessionCleanup } from "./session-cleanup.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import { deferredAbortSignal, isSteerAbort, steerMode as resolveSteerMode, steerTimings as resolveSteerTimings, type SteerMode, type SteerTimings } from "./turn-cancellation.ts";
@@ -20,7 +22,9 @@ export class TierConnection extends AntigravityAcpConnection {
   usageQueryMs = 0;
   usageMode: "auto" | "off" = "auto";
   readonly contextUsage = new Map<string, { used: number; size: number }>();
+  readonly compactions = new Map<string, Map<string, AcpCompactionRecord>>();
   readonly usageStatus = new Map<string, { source: string; cache: string; error?: string }>();
+  private readonly ompContextWindows = new Map<string, number>();
   private readonly usageBaselines = new Map<string, SessionUsage>();
   private readonly usageCaptures = new Map<string, { text: string }>();
   private readonly usageCommands = new Set<string>();
@@ -43,7 +47,7 @@ export class TierConnection extends AntigravityAcpConnection {
     this.cleanup?.start();
     void this.process.exited.then(() => this.releaseCleanupLeases()).catch(() => {});
     this.debugToolUpdates = options.ompDebugToolUpdates ?? false;
-    this.usageMode = options.ompUsageMode ?? "auto";
+    this.usageMode = options.ompUsageMode ?? DEFAULT_USAGE_MODE;
     this.steerMode = options.ompSteerMode ?? resolveSteerMode();
     this.steerTimings = options.ompSteerTimings ?? resolveSteerTimings();
     this.setHandlers({ ...options.handlers, onUpdate: async notification => {
@@ -53,6 +57,10 @@ export class TierConnection extends AntigravityAcpConnection {
         used?: number;
         size?: number;
         content?: { type?: string; text?: string };
+        compactionId?: unknown;
+        status?: unknown;
+        summary?: unknown;
+        error?: unknown;
       };
       if (update.sessionUpdate === "available_commands_update") {
         if (update.availableCommands?.some(command => command.name === "usage")) this.usageCommands.add(notification.sessionId);
@@ -60,6 +68,13 @@ export class TierConnection extends AntigravityAcpConnection {
       }
       if (update.sessionUpdate === "usage_update" && typeof update.used === "number" && Number.isSafeInteger(update.used) && typeof update.size === "number" && Number.isSafeInteger(update.size)) {
         this.contextUsage.set(notification.sessionId, { used: update.used, size: update.size });
+      }
+      if (update.sessionUpdate === "compaction_update" || update.sessionUpdate === "compaction_summary_chunk") {
+        this.recordCompaction(notification.sessionId, update);
+        // Keep the server-owned summary out of OMP's transcript, but let the
+        // runtime mark a binding unsafe when a tool/permission is parked.
+        if (showAcpUpdate(notification, this.debugToolUpdates)) await options.handlers?.onUpdate?.(notification);
+        return;
       }
       const capture = this.usageCaptures.get(notification.sessionId);
       if (capture) {
@@ -94,6 +109,52 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageMode = mode;
     this.usageBaselines.clear();
   }
+
+  setOmpContextWindow(sessionId: string, contextWindow: number): void {
+    if (Number.isSafeInteger(contextWindow) && contextWindow > 0) this.ompContextWindows.set(sessionId, contextWindow);
+  }
+
+  getOmpContextWindow(sessionId: string): number | undefined {
+    return this.ompContextWindows.get(sessionId);
+  }
+
+  recordCompaction(sessionId: string, update: {
+    sessionUpdate?: string;
+    compactionId?: unknown;
+    status?: unknown;
+    summary?: unknown;
+    error?: unknown;
+    content?: unknown;
+  }): void {
+    let records = this.compactions.get(sessionId);
+    if (!records) this.compactions.set(sessionId, (records = new Map()));
+    const id = typeof update.compactionId === "string" ? update.compactionId : undefined;
+    if (!id) return;
+    const current = records.get(id);
+    const next = update.sessionUpdate === "compaction_summary_chunk"
+      ? applyCompactionChunk(current, sessionId, { compactionId: id, content: update.content })
+      : applyCompactionUpdate(current, sessionId, update);
+    if (next) records.set(id, next);
+  }
+
+  takeCompactionNotices(): AcpCompactionNotice[] {
+    const notices: AcpCompactionNotice[] = [];
+    for (const [sessionId, records] of this.compactions) {
+      for (const record of records.values()) {
+        if (record.notified || !isTerminalCompaction(record.status)) continue;
+        record.notified = true;
+        notices.push({
+          sessionId,
+          compactionId: record.compactionId,
+          status: record.status,
+          summary: record.summary,
+          ...(record.error !== undefined ? { error: record.error } : {}),
+        });
+      }
+    }
+    return notices;
+  }
+
 
   // drainCancelledTurn calls this while waiting for a turn the server cannot
   // cancel, so retained partial output stays frozen at the steering boundary
@@ -140,6 +201,8 @@ export class TierConnection extends AntigravityAcpConnection {
   }
   private dropSessionState(id: string) {
     this.contextUsage?.delete(id);
+    this.compactions?.delete(id);
+    this.ompContextWindows?.delete(id);
     this.usageStatus?.delete(id);
     this.usageBaselines?.delete(id);
     this.usageCommands?.delete(id);
@@ -147,6 +210,7 @@ export class TierConnection extends AntigravityAcpConnection {
     this.steerActivity?.delete(id);
   }
   async retireForReplacement(key: string, id: string) {
+    await this.retryOwnership();
     const unloaded = !Object.keys(this.getSessionState(id)).length;
     if (!this.activePrompts) this.dropSessionState(id);
     if (unloaded) {
@@ -176,6 +240,8 @@ export class TierConnection extends AntigravityAcpConnection {
     await super.close();
     await this.releaseCleanupLeases();
     this.contextUsage?.clear();
+    this.compactions?.clear();
+    this.ompContextWindows?.clear();
     this.usageStatus?.clear();
     this.usageBaselines?.clear();
     this.usageCommands?.clear();
@@ -248,7 +314,16 @@ export class TierConnection extends AntigravityAcpConnection {
       if (abortedAt !== undefined && ["cancelled", "end_turn"].includes(response.stopReason)) this.diagnostics?.record("acp.cancel-confirmation", performance.now() - abortedAt);
       const withContext = <T extends { _meta?: Record<string, unknown> }>(value: T): T => {
         const context = this.contextUsage.get(id);
-        return context ? { ...value, _meta: { ...value._meta, ompContextTokens: context.used } } : value;
+        if (!context) return value;
+        const ompContextWindow = this.ompContextWindows?.get(id);
+        return {
+          ...value,
+          _meta: {
+            ...value._meta,
+            ompContextTokens: alignContextTokens(context.used, context.size, ompContextWindow),
+            ompAcpContext: { used: context.used, size: context.size, ...(ompContextWindow ? { ompContextWindow } : {}) },
+          },
+        };
       };
       if (response.usage || response.stopReason === "cancelled" || process.env.OMP_ACP_USAGE === "off" || this.usageMode === "off" || !this.usageCommands.has(id) || signal?.aborted) {
         this.usageBaselines.delete(id);

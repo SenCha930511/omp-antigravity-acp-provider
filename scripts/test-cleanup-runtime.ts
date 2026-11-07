@@ -12,6 +12,7 @@ fs.mkdirSync(path.join(acpDir, "conversations"), { recursive: true });
 const cleanup = new SessionCleanup(stateDir, acpDir);
 const connections: any[] = [];
 let fail = false;
+let failSetModel = false;
 let stopReason = "end_turn";
 const modes = { currentModeId: "yolo", availableModes: [{ id: "yolo", name: "Yolo" }] };
 const models = { currentModelId: "gemini-3.8-flash", availableModels: [{ modelId: "gemini-3.8-flash", name: "Flash" }] };
@@ -29,6 +30,7 @@ function factory() {
       return { sessionId: id, modes, models };
     },
     getSessionState() { return { modes, models }; },
+    async setModel() { if (failSetModel) throw new Error("synthetic setModel failure"); },
     async prompt() { if (fail) throw new Error("synthetic replacement failure"); return { stopReason }; },
     async retireForReplacement(key: string, session: string) { await cleanup.retire(key, session); },
     async confirmReplacement(key: string, session: string) { await cleanup.confirm(key, session); },
@@ -72,6 +74,29 @@ try {
   assert.equal(fs.existsSync(path.join(acpDir, "conversations", `${first}.db`)), false, "Actual runtime must confirm successful reconstruction");
   const current = connections.at(-1).id;
   assert.ok(fs.existsSync(path.join(acpDir, "conversations", `${current}.db`)));
+
+  // Ephemeral (!persistent) session ending with max_tokens or error must still be discarded and cleaned up
+  stopReason = "max_tokens";
+  const ephemeralEvents: any[] = [];
+  for await (const e of runtime.stream(model, { messages: [{ role: "user", content: "ephemeral turn", timestamp: 1 }], tools: [] }).stream) {
+    ephemeralEvents.push(e);
+  }
+  assert.ok(ephemeralEvents.some(e => e.type === "done"));
+  const ephemeralId = connections.at(-1).id;
+  assert.equal(fs.existsSync(path.join(acpDir, "conversations", `${ephemeralId}.db`)), false, "Ephemeral session must be discarded even when stopReason is max_tokens");
+
+  // Partial createBinding initialization failure after newSession() must discard the half-initialized session
+  failSetModel = true;
+  const altModel = { ...model, id: "gemini-4-argon" };
+  const initFailEvents: any[] = [];
+  for await (const e of runtime.stream(altModel as any, { messages: [{ role: "user", content: "init fail", timestamp: 1 }], tools: [] }, { sessionId: "partial-init" }).stream) {
+    initFailEvents.push(e);
+  }
+  failSetModel = false;
+  assert.ok(initFailEvents.some(e => e.type === "error"));
+  const partialInitId = connections.at(-1).id;
+  assert.equal(fs.existsSync(path.join(acpDir, "conversations", `${partialInitId}.db`)), false, "Half-initialized session must be discarded when createBinding fails after newSession()");
+
   await runtime.close();
   assert.ok(fs.existsSync(path.join(acpDir, "conversations", `${current}.db`)), "Normal shutdown must retain resumable state");
   console.log("Built runtime reconstruction, failed replacement, successful cleanup and normal shutdown: PASS");

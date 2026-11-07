@@ -12,6 +12,7 @@ export interface ContextSettings {
   defaults: ContextOptions & { usageMode?: "auto" | "off" };
   models: Record<string, ContextOptions>;
 }
+export const DEFAULT_USAGE_MODE: "auto" | "off" = "off";
 const ranges: Record<keyof ContextOptions, [number, number]> = {
   contextWindow: [4096, 16_777_216], maxTokens: [1, 1_048_576], inputTokenBudget: [1, 16_777_216],
   reserveTokens: [0, 1_048_576], maxTransferBytes: [65_536, 134_217_728], maxImageBytes: [0, 100_663_296],
@@ -87,5 +88,5 @@ export function resolveContextOptions(model: { id: string; contextWindow: number
 // confuse payload bytes with tokens. Non-ASCII receives a larger allowance.
 export function estimateTransferTokens(text: string, images = 0, utf8Bytes = Buffer.byteLength(text, "utf8")) {
   const nonAscii = Math.min(text.length, Math.ceil((utf8Bytes - text.length) / 2));
-  return Math.ceil((text.length - nonAscii) / 3 + nonAscii * 1.5) + images * 4096;
+  return Math.ceil((text.length - nonAscii) / 3.6 + nonAscii * 1.1) + images * 1024;
 }

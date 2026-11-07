@@ -98,6 +98,30 @@ test("model discovery is single-flight, shares failure and retries on next refre
   } finally { await fs.rm(state, { recursive: true, force: true }); }
 });
 
+test("catalog discovery skips a model that rejects selection", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-discovery-skip-"));
+  try {
+    const sessionState = { configOptions: [{
+      id: "model", category: "model", type: "select", currentValue: "good",
+      options: [{ value: "bad", name: "Bad" }, { value: "good", name: "Good" }],
+    }] };
+    const connection = {
+      async initialize() {},
+      async newSession() { return { sessionId: "session", ...sessionState }; },
+      async setModel(_sessionId: string, value: string) {
+        if (value === "bad") throw new Error("unavailable");
+      },
+      getSessionState() { return sessionState; },
+      async discardSession() {},
+      async close() {},
+    };
+    const store = new CatalogStore(path.join(state, "models.json"), {} as any, async () => {}, () => [],
+      async () => {}, () => connection as any);
+    const models = await store.discoverModels();
+    assert.deepEqual(models.map(model => model.modelId), ["good"]);
+  } finally { await fs.rm(state, { recursive: true, force: true }); }
+});
+
 test("shared refresh uses the latest settings and removes stale model entries", async () => {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-refresh-settings-"));
   try {

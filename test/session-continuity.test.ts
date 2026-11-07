@@ -307,18 +307,50 @@ test("legacy mappings without a durable dispatch marker are rebuilt once", async
   } finally { await f.close(); }
 });
 
-test("oversized local input leaves a completed warm session usable", async () => {
+test("legacy checkpoint without normalized fingerprint rebuilds an edited assistant boundary", async () => {
+  const f = fixture();
+  try {
+    const r = f.create(), first = user("LEGACY_EDIT_FIRST"), answer = f.reply(await f.run(r, [first]));
+    delete f.saved.get("chat").ompExpectedAssistantNormalized;
+    delete f.saved.get("chat").ompExpectedAssistantHasOutput;
+    answer.content = [{ type: "text", text: "LEGACY_EDITED_BOUNDARY" }];
+    await r.close();
+    await f.run(f.create(), [first, answer, user("LEGACY_EDIT_NEXT")]);
+    assert.deepEqual(f.connections.at(-1).resumed, [], "legacy edited boundary must rebuild, not accept any assistant message");
+    assert.match(JSON.stringify(f.connections.at(-1).prompts.at(-1).prompt), /LEGACY_EDIT_FIRST/);
+  } finally { await f.close(); }
+});
+
+test("legacy checkpoint without output flag rebuilds when the expected assistant is missing", async () => {
+  const f = fixture();
+  try {
+    const r = f.create(), first = user("LEGACY_MISSING_FIRST");
+    await f.run(r, [first]);
+    delete f.saved.get("chat").ompExpectedAssistantNormalized;
+    delete f.saved.get("chat").ompExpectedAssistantHasOutput;
+    await r.close();
+    await f.run(f.create(), [first, user("LEGACY_MISSING_NEXT")]);
+    assert.deepEqual(f.connections.at(-1).resumed, [], "legacy missing answer must rebuild");
+    assert.match(JSON.stringify(f.connections.at(-1).prompts.at(-1).prompt), /LEGACY_MISSING_FIRST/);
+  } finally { await f.close(); }
+});
+
+test("oversized local input is split without breaking a completed warm session", async () => {
   const f = fixture();
   try {
     const r = f.create(), first = user("FIRST"), answer = f.reply(await f.run(r, [first]));
-    const failed = await f.run(r, [first, answer, user("x".repeat(200_000))]);
-    assert.match(failed.find(e => e.type === "error")?.error.errorMessage, /single-step/);
+    const huge = user("OVERSIZED_" + "x".repeat(200_000) + "_END");
+    const events = await f.run(r, [first, answer, huge]);
+    assert.equal(events.some(e => e.type === "error"), false);
+    assert.ok(f.connections[0].prompts.length >= 3, "expected a seed prompt and a final prompt");
     assert.equal(f.connections[0].process.alive, true);
-    assert.equal(f.connections[0].prompts.length, 1);
     assert.equal(f.saved.get("chat").ompInFlight, false);
-    await f.run(r, [first, answer, user("SMALLER_REQUEST")]);
+    const beforeFollowup = f.connections[0].prompts.length;
+    const oversizedAnswer = f.reply(events);
+    assert.ok(oversizedAnswer);
+    await f.run(r, [first, answer, huge, oversizedAnswer, user("SMALLER_REQUEST")]);
     assert.equal(f.connections.length, 1);
-    assert.equal(f.connections[0].prompts.length, 2);
+    assert.equal(f.connections[0].prompts.length, beforeFollowup + 1);
   } finally { await f.close(); }
 });
 

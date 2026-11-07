@@ -12,7 +12,7 @@ export function parseSessionUsage(text: string): SessionUsage | undefined {
   if (!Object.keys(counts).length && total > 0) return;
   const usage = { input: counts.prompt ?? 0, completion: counts.completion ?? 0, thinking: counts.thinking ?? 0, cached: counts.cached, total };
   if (usage.cached !== undefined && usage.cached > usage.input) return;
-  if (usage.input + usage.completion + usage.thinking !== usage.total) return;
+  if (usage.input + usage.completion + usage.thinking > usage.total) return;
   return usage;
 }
 

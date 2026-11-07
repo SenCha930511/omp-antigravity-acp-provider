@@ -1,18 +1,11 @@
 export type NativeToolMode = "prefer" | "disabled";
 
-export const TOOL_ROUTING = `
-OMP tool routing:
-The supplied OMP tools are exposed by the authenticated pi-bridge MCP server with pi_ prefixes. When eagerly registered, call these tools directly using their advertised names.
-For workspace reads, searches, edits, command execution, and other user tasks, choose an appropriate supplied pi_ MCP tool before considering an Antigravity-native tool. Their results return through the OMP tool loop.
-You may use Antigravity's normal MCP discovery mechanism to inspect the pi-bridge tool manifests if required. Do not search unrelated directories or configuration files to locate MCP tools.
-If an OMP tool fails, inspect the error and correct its arguments when appropriate. Do not switch to a native tool merely because the OMP call failed.
-If no suitable OMP tool is available, explain the missing capability. Before substituting an Antigravity-native tool for a user task, state the proposed tool and reason and obtain the user's explicit approval. Without approval, stop that operation and report the limitation.
-This exception does not require approval for normal pi-bridge MCP manifest discovery; it applies to performing the user's task with native tools.
-`;
+export const TOOL_ROUTING =
+  "Supplied OMP tools are exposed by the authenticated pi-bridge MCP server with pi_ prefixes. Call them directly for user tasks. If no OMP tool fits, report the missing capability and obtain explicit approval before using an Antigravity-native tool.";
 
 export function systemRouting(mode: NativeToolMode): string {
   return TOOL_ROUTING + (mode === "disabled"
-    ? "\nNative built-in tools are disabled for this session. Use the supplied OMP MCP tools and report missing capabilities instead of substituting a native tool."
+    ? "\nAntigravity-native tools are disabled for this session. Report a missing capability instead of substituting one."
     : "");
 }
 

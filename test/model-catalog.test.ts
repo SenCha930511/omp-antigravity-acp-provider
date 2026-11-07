@@ -59,11 +59,24 @@ test("unknown labels retain a usable model without fictional OMP effort choices"
 });
 
 test("unknown limits and prices use conservative metadata without copying Gemini specifications", () => {
-  const [known, unknown] = projectCatalog(["gemini-4-argon", "claude-example"].map(modelId => ({ modelId, name: modelId, selector: true })));
+  const [known, gemini25, geminiProAgent, unknown] = projectCatalog(
+    ["gemini-4-argon", "gemini-2.5-pro", "gemini-pro-agent", "claude-example"].map(modelId => ({ modelId, name: modelId, selector: true })),
+  );
   assert.equal(known.contextWindow, 1_000_000);
+  assert.equal(gemini25.contextWindow, 1_000_000);
+  assert.equal(geminiProAgent.contextWindow, 1_000_000);
   assert.equal(unknown.contextWindow, 32_768);
   assert.equal(unknown.maxTokens, 8192);
   assert.equal(unknown.cost.input, 0);
+});
+
+test("unversioned or older Gemini aliases keep conservative limits", () => {
+  const models = projectCatalog(["gemini-pro", "gemini-flash", "gemini-exp", "gemini-2.0-flash", "gemini-1.5-pro"]
+    .map(modelId => ({ modelId, name: modelId, selector: true })));
+  for (const model of models) {
+    assert.equal(model.contextWindow, 32_768, `${model.id} must not claim a 1M window without a known version`);
+    assert.equal(model.maxTokens, 8192);
+  }
 });
 
 test("cache validation accepts all vendors and rejects malformed data", () => {

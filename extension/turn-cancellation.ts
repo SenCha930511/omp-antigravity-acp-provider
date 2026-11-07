@@ -143,9 +143,10 @@ export async function drainCancelledTurn(
   if (!completion || signal?.aborted) return false;
   const deadline = Promise.withResolvers<boolean>();
   const cancelled = () => deadline.resolve(false);
-  let timer = setTimeout(cancelled, timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let giveup: { dispose: () => void } | undefined;
   let finished = false;
+  let cancelSettled = false;
   signal?.addEventListener("abort", cancelled, { once: true });
   // session/cancel is an ACP notification: a successful send only means the
   // server received it, not that the prompt already stopped. Freeze retained
@@ -157,15 +158,24 @@ export async function drainCancelledTurn(
     clearTimeout(timer);
     giveup = armSteerGiveup(binding.connection, binding.session.sessionId, timings, cancelled);
   };
+  timer = setTimeout(() => {
+    // A slow cancel RPC is not the same as a transport that never sent the
+    // notification. Give an unacknowledged-but-pending cancel the same grace
+    // as an acknowledged one before deciding to rebuild.
+    if (!cancelSettled && timings.idleMs > 0) extendForNaturalCompletion();
+    else cancelled();
+  }, timeoutMs);
   try {
     abort();
     // A blocked cancel transport must not block the fallback deadline.
     void (async () => {
       try {
         await binding.connection.cancel(binding.session.sessionId);
+        cancelSettled = true;
         if (timings.idleMs > 0) extendForNaturalCompletion();
         else deadline.resolve(false);
       } catch (error) {
+        cancelSettled = true;
         if (timings.idleMs > 0 && isCancelUnsupported(error)) extendForNaturalCompletion();
         else deadline.resolve(false);
       }

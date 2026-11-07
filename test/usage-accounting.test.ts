@@ -20,3 +20,7 @@ test("missing zero fields are valid but missing, malformed and inconsistent tota
   assert.equal(parseSessionUsage("**Session total:** 50 tokens (prompt: 50, cached: 60)"), undefined);
   assert.equal(parseSessionUsage("**Session total:** 50 tokens (prompt: 50)")?.completion, 0);
 });
+test("unknown future usage categories do not hide known counts", () => {
+  const usage = parseSessionUsage("**Session total:** 50 tokens (prompt: 40, completion: 5, thinking: 2, grounding: 3)");
+  assert.deepEqual(usage, { input: 40, completion: 5, thinking: 2, cached: undefined, total: 50 });
+});

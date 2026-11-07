@@ -277,3 +277,29 @@ test("a generation event after the command logout triggers no redundant follow",
     logoutFollow.delayMs = originalDelayMs;
   }
 });
+
+test("credential watcher sends followed-logout notices to the latest OMP context", async () => {
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  keychain.present = async () => false;
+  keychain.remove = async () => true;
+  const originalDelayMs = logoutFollow.delayMs;
+  logoutFollow.delayMs = 5;
+  try {
+    const fixture = authCoordinatorFixture();
+    const secondNotices: string[] = [];
+    const secondCtx = { ...fixture.ctx, ui: { notify: (text: string) => { secondNotices.push(text); } } };
+    fixture.coordinator.watchOmpCredentials(fixture.ctx);
+    fixture.coordinator.watchOmpCredentials(secondCtx);
+    fixture.coordinator.watchOmpCredentials({ ui: { notify: () => {} } } as OmpCommandContext);
+    fixture.storeMarker();
+    fixture.removeMarker();
+    await settle(40);
+    assert.ok(secondNotices.some(text => text.includes("finished the logout OMP started")));
+    assert.equal(fixture.followedNotices().length, 0, "the stale first context must not receive the notice");
+  } finally {
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+  }
+});

@@ -13,7 +13,7 @@ const request = { cwd: "/fixture", mcpServers: [{ name: "pi-bridge", type: "http
 test("routing uses advertised system extension and eagerly loads only the bridge", () => {
   const result = sessionRoutingRequest(request, initialize, "prefer");
   const meta = result._meta.antigravity;
-  assert.match(meta.systemPrompt.append, /OMP tool routing:/);
+  assert.match(meta.systemPrompt.append, /Supplied OMP tools/);
   assert.match(meta.systemPrompt.append, /explicit approval/);
   assert.deepEqual(meta.eagerMcpServers, ["pi-bridge"]);
   assert.deepEqual(meta.disabledTools, []);
@@ -62,7 +62,7 @@ test("all session creation and restoration RPCs receive the same policy", async 
   for (const call of calls) {
     assert.deepEqual(call.request._meta.antigravity.enabledTools, []);
     assert.deepEqual(call.request._meta.antigravity.eagerMcpServers, ["pi-bridge"]);
-    assert.match(call.request._meta.antigravity.systemPrompt.append, /OMP tool routing:/);
+    assert.match(call.request._meta.antigravity.systemPrompt.append, /Supplied OMP tools/);
   }
 });
 

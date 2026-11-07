@@ -52,9 +52,13 @@ export function parseThoughtRoute(value: string): { modelId: string; effort: str
   throw new Error("Invalid local ACP thought selector route");
 }
 
+export function isKnownGemini1MModel(id: string): boolean {
+  return /^(?:models\/)?gemini-(?:2\.5(?:$|[-/])|3(?:\.\d+)?(?:$|[-/])|4(?:\.\d+)?(?:$|[-/])|pro-agent(?:$|[-/]))/i.test(id);
+}
+
 function publicModel(id: string, name: string, map: Record<string, string> = {}, current?: string): PublicCatalogModel {
   const efforts = EFFORTS.filter(effort => map[effort]);
-  const knownGemini = id === "gemini-4-argon" || id === "gemini-3.8-flash";
+  const knownGemini = isKnownGemini1MModel(id);
   const defaultLevel = current && (efforts as readonly string[]).includes(current) ? current
     : efforts.includes("high") ? "high" : efforts.includes("medium") ? "medium" : efforts[0];
   return {

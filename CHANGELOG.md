@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.35 — 2026-11-08
+
+- Keep ACP `plan` and tool status updates out of the model thinking stream. Only `agent_thought_chunk` text reaches `thinking_delta`; debug tool status still travels through OMP notifications.
+- Disable supplemental synchronous `/usage` queries by default. ACP `usage_update` still supplies context occupancy, and `/antigravity-acp usage auto` restores the detailed query.
+- Shorten `TOOL_ROUTING` while keeping the native-tool approval rule. Modern ACP removes the legacy routing copy from the instructions resource.
+- Keep idle ACP runtimes warm for 15 minutes by default. `OMP_ACP_IDLE_TIMEOUT_MS=0` still keeps them until OMP exits.
+
+
+
+## 0.1.34 — 2026-11-08
+
+- Restore the missing `showAcpUpdate` import in `TierConnection`. Without it, normal ACP `agent_message_chunk` and `usage_update` notifications threw `ReferenceError`, so OMP saw usage but no text or tool calls and eventually reported an empty stop after its retry cap.
+- Clear `TranscriptRouting` ambiguity after the last pending stream is consumed, and make the credential watcher use the latest OMP context instead of the context that first installed it.
+- Give a slow `session/cancel` RPC the natural-completion grace instead of treating the send deadline as a failed cancellation; hold a runtime lease while `status`/`tools` snapshot a runtime; skip advertised catalog models whose selector is unavailable instead of failing the whole refresh.
+- Keep oversized system instructions in the final prompt when they cannot share a seed step with its acknowledgement, and accept future `/usage` categories as long as the known counts do not exceed the reported total.
+- Preserve `TOOL_ROUTING` in the system-instruction fingerprint so legacy prompt mode cannot keep a warm session after the routing text changes, and route catalog discovery through the adapter's connection factory.
+
+
+## 0.1.33 — 2026-11-08
+
+- Split a single oversized current user request into hidden request seed steps and a final request part, so messages above the official 188,000-byte per-step limit no longer fail immediately. UTF-8 boundaries, images, usage accounting and wire/image budgets are preserved, and oversized historical text records are chunked on cold replay.
+- Surface server-owned ACP compaction as a one-shot OMP notice, align ACP context occupancy to OMP's configured window, and retire a compacted binding only when a tool or permission is parked.
+- Keep warm ACP sessions across volatile system reminders, tool-set changes, normalized assistant boundaries and common session transitions; tighten cleanup leases, transcript routing and checkpoint restoration.
 
 ## 0.1.32 — 2026-11-06
 

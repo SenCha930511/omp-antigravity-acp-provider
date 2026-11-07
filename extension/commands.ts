@@ -2,7 +2,7 @@ import { describeCredentialStorage, inspectAntigravityAuth, savePermissionMode }
 import { antigravityAccountEmail, authReady, formatLogoutSummary, keychain, ompCredentialSummary, type OmpAuthCoordinator, type OmpCommandContext } from "./auth-sync.ts";
 import { parseNativeToolMode, type NativeToolMode } from "./tool-routing.ts";
 import { saveToolPolicy, type ToolPolicy } from "./tool-policy.ts";
-import { updateContextSettings, resolveContextOptions, saveContextSettings, type ContextSettings } from "./context-settings.ts";
+import { DEFAULT_USAGE_MODE, updateContextSettings, resolveContextOptions, saveContextSettings, type ContextSettings } from "./context-settings.ts";
 import type { CatalogStore, ConfiguredCatalogModel } from "./catalog-store.ts";
 import type { SessionCleanup, CleanupMode } from "./session-cleanup.ts";
 import type { Diagnostics } from "./diagnostics.ts";
@@ -254,10 +254,16 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     if (command === "usage") {
       const currentSettings = deps.getContextSettings();
       ctx.ui.notify(JSON.stringify({
-        configured: currentSettings.defaults.usageMode ?? "auto",
-        effective: process.env.OMP_ACP_USAGE === "off" ? "off" : currentSettings.defaults.usageMode ?? "auto",
+        configured: currentSettings.defaults.usageMode ?? DEFAULT_USAGE_MODE,
+        effective: process.env.OMP_ACP_USAGE === "off" ? "off" : currentSettings.defaults.usageMode ?? DEFAULT_USAGE_MODE,
         connections: [...deps.connections].map(connection => ({
-          context: [...connection.contextUsage.values()],
+          context: [...connection.contextUsage].map(([sessionId, usage]) => ({
+            sessionId,
+            ...usage,
+            ompContextWindow: connection.getOmpContextWindow?.(sessionId),
+          })),
+          compactions: [...connection.compactions].flatMap(([sessionId, records]) =>
+            [...records.values()].map(record => ({ sessionId, ...record }))),
           accounting: [...connection.usageStatus.values()],
           activePrompts: connection.activePrompts,
         })),
@@ -291,17 +297,23 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
 
     // Only the tools inspection and the status display below need a live
     // runtime; every earlier command runs without one.
-    const { runtime } = deps.getRuntimeForSession(sessionIdOf(ctx));
-    const snapshot = await runtime.snapshot();
-    if (command === "tools") {
-      const lastToolAudit = deps.getLastToolAudit();
-      ctx.ui.notify(lastToolAudit
-        ? `OMP ACP tool bridge\nAvailable: ${lastToolAudit.available.join(", ")}\nOmitted: ${JSON.stringify(lastToolAudit.omitted)}\nLive ACP checks: ${JSON.stringify(snapshot.processes.map(item => ({ mcpHttp: item.mcpHttp, omittedTools: item.omittedTools })))}`
-        : "No model request yet. Send a message with this ACP model to inspect its offered OMP tools.", "info");
-      return;
-    }
+    const lease = deps.acquireRuntimeForSession
+      ? deps.acquireRuntimeForSession(sessionIdOf(ctx))
+      : { value: deps.getRuntimeForSession(sessionIdOf(ctx)), release: () => {} };
+    try {
+      const snapshot = await lease.value.runtime.snapshot();
+      if (command === "tools") {
+        const lastToolAudit = deps.getLastToolAudit();
+        ctx.ui.notify(lastToolAudit
+          ? `OMP ACP tool bridge\nAvailable: ${lastToolAudit.available.join(", ")}\nOmitted: ${JSON.stringify(lastToolAudit.omitted)}\nLive ACP checks: ${JSON.stringify(snapshot.processes.map(item => ({ mcpHttp: item.mcpHttp, omittedTools: item.omittedTools })))}`
+          : "No model request yet. Send a message with this ACP model to inspect its offered OMP tools.", "info");
+        return;
+      }
 
-    const policy = deps.getToolPolicy();
-    ctx.ui.notify(`Antigravity ACP (OMP adapter)\nAuth storage: ${(await authReady()) ? "configured (ACP-owned token file or macOS keychain)" : inspectAntigravityAuth().status}\nPermissions: ${snapshot.permissionMode}\nNative tools: ${policy.nativeTools}\nDebug tool updates: ${policy.debugToolUpdates ? "on" : "off"}\nTool routing: ${JSON.stringify([...deps.connections].map(connection => connection.toolRouting).filter(Boolean))}\nActive sessions: ${snapshot.bindings}\nConfirmed thinking: ${JSON.stringify([...deps.connections].map(connection => connection.confirmedThinking).filter(Boolean))}\nUsage: ${JSON.stringify(snapshot.metrics)}\n${JSON.stringify(snapshot.processes)}`, "info");
+      const policy = deps.getToolPolicy();
+      ctx.ui.notify(`Antigravity ACP (OMP adapter)\nAuth storage: ${(await authReady()) ? "configured (ACP-owned token file or macOS keychain)" : inspectAntigravityAuth().status}\nPermissions: ${snapshot.permissionMode}\nNative tools: ${policy.nativeTools}\nDebug tool updates: ${policy.debugToolUpdates ? "on" : "off"}\nTool routing: ${JSON.stringify([...deps.connections].map(connection => connection.toolRouting).filter(Boolean))}\nActive sessions: ${snapshot.bindings}\nConfirmed thinking: ${JSON.stringify([...deps.connections].map(connection => connection.confirmedThinking).filter(Boolean))}\nUsage: ${JSON.stringify(snapshot.metrics)}\n${JSON.stringify(snapshot.processes)}`, "info");
+    } finally {
+      lease.release();
+    }
   };
 }

@@ -79,12 +79,32 @@ const result = await build({
           {
             name: "context",
             anchor: "buildPromptParts(context, fresh, unseenStart)",
-            replacement: "buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy }, ompRetryResend)",
+            replacement: "buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy, sessionRouting: (binding.connection as any).toolRouting ? (binding.connection as any).toolRouting.channel === 'system-append' : supportsSessionRouting(binding.initialize) }, ompRetryResend)",
+          },
+          {
+            name: "keep tool and plan status out of model reasoning",
+            anchor: 'else if (activity.type === "tool" || activity.type === "plan") binding.writer.thinking(activity.text);',
+            replacement: '// ACP tool and plan status are UI activity, not model reasoning.',
+          },
+          {
+            name: "track ACP compaction against pending work",
+            anchor: "\tprivate consumeUpdate(binding: Binding | undefined, notification: SessionNotification): void {\n\t\tif (!binding || notification.sessionId !== binding.session.sessionId) return;",
+            replacement: "\tprivate consumeUpdate(binding: Binding | undefined, notification: SessionNotification): void {\n\t\tif (!binding || notification.sessionId !== binding.session.sessionId) return;\n\t\tif (notification.update.sessionUpdate === \"compaction_update\" || notification.update.sessionUpdate === \"compaction_summary_chunk\") {\n\t\t\tif (binding.permission || binding.pendingTools.size > 0) {\n\t\t\t\tbinding.needsReconstruction = true;\n\t\t\t\tbinding.ompCompactionInvalidated = true;\n\t\t\t}\n\t\t\treturn;\n\t\t}",
+          },
+          {
+            name: "invalidate a compacted binding before continuation",
+            anchor: "\t\tlet binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);\n\t\tawait this.modeChanges;",
+            replacement: "\t\tlet binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);\n\t\tif (binding.ompCompactionInvalidated) {\n\t\t\tawait this.invalidateBinding(binding);\n\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);\n\t\t}\n\t\tawait this.modeChanges;",
+          },
+          {
+            name: "refresh OMP context window on model change",
+            anchor: "\t\t\tif (binding.modelId !== acpModelId) {\n\t\t\t\tawait binding.connection.setModel(binding.session.sessionId, acpModelId, options.signal);\n\t\t\t\tbinding.modelId = acpModelId;\n\t\t\t}",
+            replacement: "\t\t\tif (binding.modelId !== acpModelId) {\n\t\t\t\tawait binding.connection.setModel(binding.session.sessionId, acpModelId, options.signal);\n\t\t\t\tbinding.modelId = acpModelId;\n\t\t\t\t(binding.connection as any).setOmpContextWindow?.(binding.session.sessionId, model.contextWindow);\n\t\t\t}",
           },
           {
             name: "workspace and parked model boundaries",
-            anchor: "if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||\n\t\t\tbinding.toolFingerprint !== piToolFingerprint(tools)) {",
-            replacement: "const ompContinuation = Boolean(binding.turnCompletion) && (binding.permission !== undefined || binding.pendingTools.size > 0);\n\t\tif (binding.cwd !== process.cwd() ||\n\t\t\t(binding.turnCompletion && binding.modelId !== acpModelId) ||\n\t\t\tbinding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||\n\t\t\t(!ompContinuation && binding.toolFingerprint !== piToolFingerprint(tools))) {",
+            anchor: "if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||\n\t\t\tbinding.toolFingerprint !== piToolFingerprint(tools)) {\n\t\t\tawait this.invalidateBinding(binding);\n\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);\n\t\t}",
+            replacement: "const ompContinuation = Boolean(binding.turnCompletion) && (binding.permission !== undefined || binding.pendingTools.size > 0);\n\t\tif (binding.cwd !== process.cwd() ||\n\t\t\t(binding.turnCompletion && binding.modelId !== acpModelId) ||\n\t\t\tbinding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||\n\t\t\t(!ompContinuation && !this.ompCanSyncTools(binding, tools))) {\n\t\t\tawait this.invalidateBinding(binding);\n\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);\n\t\t}\n\t\tif (!ompContinuation) this.ompSyncTools(binding, tools);",
           },
           {
             name: "new request supersedes continuation",
@@ -102,13 +122,14 @@ const result = await build({
               "\t\t\tif (ompNewUser || ompConversationPrefixChanged) {",
               "\t\t\t\tconst prefixMatches = context.messages.length >= binding.pendingContextCount &&",
               "\t\t\t\t\t(!ompPrefixChanged || (binding.pendingConversationFingerprint !== undefined &&",
-              "\t\t\t\t\t\tompConversationPrefixFingerprint === binding.pendingConversationFingerprint));",
+              "\t\t\t\t\t\tompConversationPrefixFingerprint === binding.pendingConversationFingerprint &&",
+              "\t\t\t\t\t\tbinding.instructionsFingerprint !== undefined && binding.instructionsFingerprint === instructionFingerprint(context)));",
               "\t\t\t\t// Queue mode can safely wait only for a streaming turn with no",
               "\t\t\t\t// parked tool/permission; those need the existing steer drain.",
-              "\t\t\t\tconst ompQueueSteer = prefixMatches && steerMode() === 'queue' &&",
-              "\t\t\t\t\tBoolean(binding.turnCompletion) && !binding.permission && binding.pendingTools.size === 0;",
+              "\t\t\t\tconst ompQueueSteer = steerMode() === 'queue' &&",
+              "\t\t\t\t\tBoolean(binding.turnCompletion) && !binding.permission && binding.pendingTools.size === 0 && !binding.ompSeeding;",
               "\t\t\t\tif (ompQueueSteer) {",
-              "\t\t\t\t\tbinding.connection.muteSteerChunks?.(binding.session.sessionId);",
+              "\t\t\t\t\tif (prefixMatches) binding.connection.muteSteerChunks?.(binding.session.sessionId);",
               "\t\t\t\t} else {",
               "\t\t\t\t\tconst drained = prefixMatches && await drainCancelledTurn(binding, () => abortTurn(binding), options.signal);",
               "\t\t\t\t\tif (!drained || !binding.connection.process.alive || binding.needsReconstruction ||",
@@ -116,7 +137,7 @@ const result = await build({
               "\t\t\t\t\t\tawait this.invalidateBinding(binding);",
               "\t\t\t\t\t}",
               "\t\t\t\t\tif (drained && prefixMatches) {",
-              "\t\t\t\t\t\tbinding.toolFingerprint = piToolFingerprint(tools);",
+              "\t\t\t\t\t\tthis.ompSyncTools(binding, tools);",
               "\t\t\t\t\t\tbinding.historyFingerprint = messagesFingerprint(context.messages.slice(0, binding.messageCount));",
               "\t\t\t\t\t}",
               "\t\t\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);",
@@ -133,16 +154,20 @@ const result = await build({
             replacement: [
               "if (isAbort(error) || binding.abortRequested) {",
               "\t\t\t\tabortTurn(binding);",
-              "\t\t\t\tif (binding.connection.process.alive && !binding.ompInvalidated && !binding.needsReconstruction &&",
+              "\t\t\t\tif (binding.connection.process.alive && !binding.ompInvalidated && !binding.needsReconstruction && !binding.ompSeeding &&",
               "\t\t\t\t\t['cancelled', 'end_turn', 'max_turn_requests', 'max_tokens'].includes(binding.ompTerminalStopReason)) {",
+              "\t\t\t\t\tconst ompWasWarm = binding.messageCount > 0;",
               "\t\t\t\t\tbinding.messageCount = binding.pendingContextCount;",
               "\t\t\t\t\tbinding.historyFingerprint = binding.pendingContextFingerprint;",
+              "\t\t\t\t\tbinding.ompConversationFingerprint = binding.pendingConversationFingerprint;",
               "\t\t\t\t\tbinding.expectedAssistantFingerprint = messageFingerprint((binding.writer ?? writer).message);",
+              "\t\t\t\t\tbinding.ompExpectedAssistantNormalized = messageFingerprint(this.ompNormalizeAssistantForBoundary((binding.writer ?? writer).message));",
               "\t\t\t\t\tbinding.ompCancelledCheckpoint = true;",
               "\t\t\t\t\tbinding.ompCancelledHadOutput = (binding.writer ?? writer).message.content.length > 0;",
               "\t\t\t\t\tbinding.ompExpectedAssistantHasOutput = binding.ompCancelledHadOutput;",
               "\t\t\t\t\tbinding.ompInFlight = false;",
               "\t\t\t\t\ttry { this.persistBinding(binding); } catch (checkpointError) { await this.invalidateBinding(binding); throw checkpointError; }",
+              "\t\t\t\t\tif (ompWasWarm) binding.connection.confirmReplacement?.(key, binding.session.sessionId);",
               "\t\t\t\t} else await this.invalidateBinding(binding);",
               "\t\t\t} else if (ompDispatched) await this.invalidateBinding(binding);",
               "\t\t\telse binding.ompInFlight = false;",
@@ -193,7 +218,7 @@ const result = await build({
             anchor: "\t\t\t\tonTurnAbort = () => abortTurn(promptBinding);",
             replacement: [
               "\t\t\t\tonTurnAbort = () => {",
-              "\t\t\t\t\tif (steerMode() === 'queue' && isSteerAbort(options.signal)) {",
+              "\t\t\t\t\tif (steerMode() === 'queue' && isSteerAbort(options.signal) && !promptBinding.ompSeeding) {",
               "\t\t\t\t\t\tpromptBinding.connection.muteSteerChunks?.(promptBinding.session.sessionId);",
               "\t\t\t\t\t} else abortTurn(promptBinding);",
               "\t\t\t\t};",
@@ -206,29 +231,55 @@ const result = await build({
           },
           {
             name: "generated assistant boundary must match retained OMP history",
-            anchor: "binding.needsReconstruction || binding.mode !== this.permissionMode ||",
+            anchor: "\t\t\tif (\n\t\t\t\tbinding.needsReconstruction || binding.mode !== this.permissionMode ||",
             replacement: [
-              "binding.needsReconstruction || binding.cwd !== process.cwd() ||",
+              "\t\t\tif (this.ompCanSyncTools(binding, tools)) this.ompSyncTools(binding, tools);",
+              "\t\t\tif (!binding.needsReconstruction && context.messages.length >= binding.messageCount &&",
+              "\t\t\t\tmessagesFingerprint(context.messages.slice(0, binding.messageCount)) !== binding.historyFingerprint &&",
+              "\t\t\t\tcontext.messages.slice(0, binding.messageCount).some(message => message.role === 'system') &&",
+              "\t\t\t\tbinding.instructionsFingerprint !== undefined && binding.instructionsFingerprint === instructionFingerprint(context) &&",
+              "\t\t\t\tbinding.ompConversationFingerprint !== undefined &&",
+              "\t\t\t\tmessagesFingerprint(context.messages.slice(0, binding.messageCount).filter(message => message.role !== 'system')) === binding.ompConversationFingerprint) {",
+              "\t\t\t\tbinding.historyFingerprint = messagesFingerprint(context.messages.slice(0, binding.messageCount));",
+              "\t\t\t}",
+              "\t\t\tif (",
+              "\t\t\t\tbinding.needsReconstruction || binding.cwd !== process.cwd() ||",
+              "\t\t\t\t(binding.instructionsFingerprint !== undefined && binding.instructionsFingerprint !== instructionFingerprint(context)) ||",
               "\t\t\t\t(binding.expectedAssistantFingerprint && context.messages[binding.messageCount]?.role === 'assistant' &&",
-              "\t\t\t\t\tmessageFingerprint(context.messages[binding.messageCount]) !== binding.expectedAssistantFingerprint) ||",
+              "\t\t\t\t\t!this.ompAssistantMatches(binding, context.messages[binding.messageCount])) ||",
               "\t\t\t\t((binding.ompExpectedAssistantHasOutput || (binding.ompCancelledCheckpoint && binding.ompCancelledHadOutput)) &&",
               "\t\t\t\t\tcontext.messages[binding.messageCount]?.role !== 'assistant' && !ompRetryResend) || binding.mode !== this.permissionMode ||",
             ].join("\n"),
           },
           {
+            name: "assistant boundary skip uses normalized matcher",
+            anchor: "binding.expectedAssistantFingerprint === messageFingerprint(expected)",
+            replacement: "this.ompAssistantMatches(binding, expected)",
+          },
+          {
+            name: "multi-step seed capabilities",
+            anchor: "return { ...parts, prompt: output };",
+            replacement: "return { ...parts, prompt: output, ...(parts.seedSteps ? { seedSteps: parts.seedSteps.map(step => adaptPromptToCapabilities({ prompt: step, messageCount: parts.messageCount }, initialize).prompt) } : {}) };",
+          },
+          {
             name: "persist cancellation checkpoint flags",
             anchor: "acpModelId: binding.modelId,",
-            replacement: "acpModelId: binding.modelId,\n\t\t\tompCancelledCheckpoint: binding.ompCancelledCheckpoint === true,\n\t\t\tompCancelledHadOutput: binding.ompCancelledHadOutput === true,",
+            replacement: "acpModelId: binding.modelId,\n\t\t\tompCancelledCheckpoint: binding.ompCancelledCheckpoint === true,\n\t\t\tompCancelledHadOutput: binding.ompCancelledHadOutput === true,\n\t\t\t...(binding.ompExpectedAssistantNormalized ? { ompExpectedAssistantNormalized: binding.ompExpectedAssistantNormalized } : {}),\n\t\t\t...(binding.instructionsFingerprint ? { ompInstructionsFingerprint: binding.instructionsFingerprint } : {}),\n\t\t\t...(binding.ompConversationFingerprint ? { ompConversationFingerprint: binding.ompConversationFingerprint } : {}),",
           },
           {
             name: "restore cancellation checkpoint flags",
             anchor: "messageCount: restored && saved ? saved.messageCount : 0,",
-            replacement: "messageCount: restored && saved ? saved.messageCount : 0,\n\t\t\t\tompCancelledCheckpoint: restored && saved?.ompCancelledCheckpoint === true,\n\t\t\t\tompCancelledHadOutput: restored && saved?.ompCancelledHadOutput === true,",
+            replacement: "messageCount: restored && saved ? saved.messageCount : 0,\n\t\t\t\tompCancelledCheckpoint: restored && saved?.ompCancelledCheckpoint === true,\n\t\t\t\tompCancelledHadOutput: restored && saved?.ompCancelledHadOutput === true,\n\t\t\t\tompExpectedAssistantNormalized: restored ? saved?.ompExpectedAssistantNormalized : undefined,\n\t\t\t\tompConversationFingerprint: restored ? saved?.ompConversationFingerprint : undefined,",
+          },
+          {
+            name: "restore instructions fingerprint",
+            anchor: "instructionsFingerprint: undefined,",
+            replacement: "instructionsFingerprint: restored ? saved?.ompInstructionsFingerprint : undefined,",
           },
           {
             name: "connection retirement",
             anchor: "if (!persistent) await this.dropBinding(key, binding);",
-            replacement: "if (!persistent || !binding.connection.process.alive) await this.dropBinding(key, binding);",
+            replacement: "binding.ompSeeding = false;\n\t\t\tif (!persistent || !binding.connection.process.alive) await this.dropBinding(key, binding);",
           },
           {
             name: "cleanup retire",
@@ -238,7 +289,7 @@ const result = await build({
           {
             name: "cleanup confirm",
             anchor: "this.persistBinding(binding);\n\t\t\tswitch (response.stopReason)",
-            replacement: "if (response.stopReason !== 'cancelled') binding.ompCancelledCheckpoint = false;\n\t\t\tthis.persistBinding(binding);\n\t\t\tif (response.stopReason === 'end_turn') { binding.connection.confirmReplacement?.(key, binding.session.sessionId); if (!persistent) binding.connection.discardSession?.(binding.session.sessionId); }\n\t\t\tswitch (response.stopReason)",
+            replacement: "if (response.stopReason !== 'cancelled') binding.ompCancelledCheckpoint = false;\n\t\t\tthis.persistBinding(binding);\n\t\t\tif (response.stopReason === 'end_turn' || (!fresh && (response.stopReason === 'max_tokens' || response.stopReason === 'max_turn_requests'))) { binding.connection.confirmReplacement?.(key, binding.session.sessionId); }\n\t\t\tif (!persistent) { binding.connection.discardSession?.(binding.session.sessionId); await this.dropBinding(key, binding); }\n\t\t\tswitch (response.stopReason)",
           },
           {
             name: "discard discovery session",
@@ -255,6 +306,11 @@ const result = await build({
             anchor: "await authenticateForCredential(connection, initialize, apiKey, signal);\n\t\t\tthis.assertEpoch(epoch);\n\t\t\tawait connection.newSession(process.cwd(), signal);",
             replacement: "await authenticateForCredential(connection, initialize, apiKey, signal);\n\t\t\tthis.assertEpoch(epoch);\n\t\t\tconst session = await connection.newSession(process.cwd(), signal);\n\t\t\ttry { this.assertEpoch(epoch); } finally { await connection.discardSession?.(session.sessionId); }",
           },
+          {
+            name: "include seed usage",
+            anchor: "const usage = usageFromPrompt(response);",
+            replacement: "const usage = usageFromPrompt(response);\n\t\t\tif (ompSeedUsage) {\n\t\t\t\tusage.input += ompSeedUsage.input;\n\t\t\t\tusage.output += ompSeedUsage.output;\n\t\t\t\tusage.cacheRead += ompSeedUsage.cacheRead;\n\t\t\t\tusage.cacheWrite += ompSeedUsage.cacheWrite;\n\t\t\t\tusage.totalTokens += ompSeedUsage.totalTokens;\n\t\t\t\tif (ompSeedUsage.reasoning !== undefined) usage.reasoning = (usage.reasoning ?? 0) + ompSeedUsage.reasoning;\n\t\t\t}",
+          },
         ];
         let contents = await fs.readFile(file, "utf8");
         for (const patch of patches) {
@@ -268,7 +324,7 @@ const result = await build({
         const asyncPatches = [
           ["private persistBinding(binding: Binding): void", "private async persistBinding(binding: Binding): Promise<void>"],
           ["private noteContinuationInstructions(binding: Binding, context: Context): void", "private async noteContinuationInstructions(binding: Binding, context: Context): Promise<void>"],
-          ["private async closeBindings(): Promise<void> {", "private async closeBindings(): Promise<void> {\n const closingTurns = [...this.resolvedBindings].flatMap(binding => binding.turnCompletion ? [binding.turnCompletion] : []);"],
+          ["private async closeBindings(): Promise<void> {", "private async closeBindings(): Promise<void> {\n const closingTurns = [...this.resolvedBindings].flatMap(binding => binding.turnCompletion ? [binding.turnCompletion] : []);\n const ephemeralBindings = [...this.resolvedBindings].filter(binding => !binding.piSessionId);\n await Promise.allSettled(ephemeralBindings.map(async binding => binding.connection.discardSession?.(binding.session.sessionId)));"],
           ["\t\tthis.persistBinding(createdBinding);", "\t\tthis.persistBinding(createdBinding);\n\t\tthis.assertEpoch(epoch);"],
           ["if (removeSaved && binding.piSessionId) this.sessionStore?.remove(binding.piSessionId);\n\t\t\tthis.bindings.delete(key);", "this.bindings.delete(key);\n\t\t\tif (removeSaved && binding.piSessionId) this.sessionStore?.remove(binding.piSessionId);"],
         ];
@@ -287,10 +343,11 @@ const result = await build({
         // Continuity transactions are adapter-owned. Keep explicit pinned seams
         // so an upstream update cannot silently bypass the write-ahead marker.
         const continuityPatches = [
-          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string;'],
+          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string;'],
           ['let completeTurn: (() => void) | undefined;', 'let ompDispatched = false;\n\t\tlet completeTurn: (() => void) | undefined;'],
           ['if (existing) return existing;', `if (existing) {
             const value = await existing;
+            (value.connection as any).setOmpContextWindow?.(value.session.sessionId, model.contextWindow);
             if (!value.ompInvalidated) return value;
             await value.ompDropPromise;
             if (this.bindings.get(key) === existing) this.bindings.delete(key);
@@ -298,7 +355,8 @@ const result = await build({
           }`],
           ['if (value === createdBinding && this.bindings.get(key) === current) this.bindings.delete(key);',
             'if (value === createdBinding && this.bindings.get(key) === current && !createdBinding.ompInvalidated) this.bindings.delete(key);'],
-          ['const saved = piSessionId ? await this.sessionStore?.get(piSessionId) : undefined;', `let saved = piSessionId ? await this.sessionStore?.get(piSessionId) : undefined;
+          ['let bridge: PiMcpBridge | undefined;', 'let bridge: PiMcpBridge | undefined;\n\t\tconst piSessionId = key.startsWith("sid:") ? key.slice(4) : undefined;\n\t\tlet session: AcpNewSessionResponse | undefined;\n\t\tlet restored = false;'],
+          ['const piSessionId = key.startsWith("sid:") ? key.slice(4) : undefined;\n\t\t\tconst saved = piSessionId ? await this.sessionStore?.get(piSessionId) : undefined;\n\t\t\tlet session: AcpNewSessionResponse | undefined;\n\t\t\tlet restored = false;', `let saved = piSessionId ? await this.sessionStore?.get(piSessionId) : undefined;
             if (saved && (saved.ompCheckpointVersion !== 1 || saved.ompInFlight !== false)) {
               await connection.retireForReplacement?.(key, saved.acpSessionId);
               await this.ompRemoveSaved(saved.piSessionId, saved.acpSessionId);
@@ -307,7 +365,8 @@ const result = await build({
           ['const createdBinding: Binding = {', `const createdBinding: Binding = {
             ompInFlight: false, ompInvalidated: false,
             ompReleaseLease: releaseLease,
-            ompExpectedAssistantHasOutput: restored && saved?.ompExpectedAssistantHasOutput === true,
+            ompExpectedAssistantHasOutput: restored && (saved?.ompExpectedAssistantHasOutput === true ||
+              (saved?.ompExpectedAssistantHasOutput === undefined && Boolean(saved?.expectedAssistantFingerprint))),
             pendingConversationFingerprint: messagesFingerprint([]),`],
           ['const response = await binding.connection.prompt(', `if (options.signal?.aborted) throw abortError();
             binding.ompInFlight = true;
@@ -316,9 +375,38 @@ const result = await build({
             if (binding.ompInvalidated || !binding.connection.process.alive) throw new AntigravityAcpError('protocol', 'ACP session closed before prompt dispatch');
             if (options.signal?.aborted) throw abortError();
             ompDispatched = true;
+            let ompSeedUsage;
+            if (parts.seedSteps?.length) {
+              const savedWriter = binding.writer;
+              binding.writer = undefined;
+              binding.ompSeeding = true;
+              try {
+                for (const seedPrompt of parts.seedSteps) {
+                  if (options.signal?.aborted || binding.abortRequested) throw abortError();
+                  const seedResponse = await binding.connection.prompt({ sessionId: binding.session.sessionId, prompt: seedPrompt }, options.signal);
+                  if (binding.ompInvalidated) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost');
+                  if (binding.abortRequested || seedResponse.stopReason === 'cancelled' || options.signal?.aborted) throw abortError();
+                  if (seedResponse.stopReason !== 'end_turn') throw new AntigravityAcpError('protocol', \`ACP seed step stopped early with \${seedResponse.stopReason}\`);
+                  const seedUsage = usageFromPrompt(seedResponse);
+                  if (ompSeedUsage) {
+                    ompSeedUsage.input += seedUsage.input;
+                    ompSeedUsage.output += seedUsage.output;
+                    ompSeedUsage.cacheRead += seedUsage.cacheRead;
+                    ompSeedUsage.cacheWrite += seedUsage.cacheWrite;
+                    ompSeedUsage.totalTokens += seedUsage.totalTokens;
+                    ompSeedUsage.reasoning = (ompSeedUsage.reasoning ?? 0) + (seedUsage.reasoning ?? 0);
+                  } else ompSeedUsage = seedUsage;
+                }
+                binding.ompSeeding = false;
+              } finally {
+                binding.writer = savedWriter;
+              }
+            }
             const response = await binding.connection.prompt(`],
-          ['binding.expectedAssistantFingerprint = messageFingerprint(activeWriter.message);', `binding.expectedAssistantFingerprint = messageFingerprint(activeWriter.message.content.length
+          ['binding.expectedAssistantFingerprint = messageFingerprint(activeWriter.message);', `binding.ompConversationFingerprint = binding.pendingConversationFingerprint;
+            binding.expectedAssistantFingerprint = messageFingerprint(activeWriter.message.content.length
               ? activeWriter.message : { ...activeWriter.message, content: [{ type: 'text', text: '' }] });
+            binding.ompExpectedAssistantNormalized = messageFingerprint(this.ompNormalizeAssistantForBoundary(activeWriter.message));
             binding.ompExpectedAssistantHasOutput = activeWriter.message.content.some(block => block.type !== 'text' || block.text.length > 0);
             binding.ompInFlight = false;`],
           ['if (!binding.piSessionId) return;', 'if (!binding.piSessionId || binding.ompInvalidated) return;'],
@@ -379,9 +467,14 @@ const result = await build({
             void Promise.resolve(retiring ?? completion).then(() => createdBinding.ompReleaseLease?.()).catch(() => {});
 \t\t\t\tcancelPermission(createdBinding);`],
           ['binding = createdBinding;\n\t\t\tawait this.persistBinding(createdBinding);', `binding = createdBinding;
+            (binding.connection as any).setOmpContextWindow?.(binding.session.sessionId, model.contextWindow);
             if (leaseLost) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost during initialization');
 \t\t\tawait this.persistBinding(createdBinding);`],
-          ['await Promise.allSettled([connection.close(), bridge?.close() ?? Promise.resolve()]);\n\t\t\tthrow error;', `await Promise.allSettled([connection.close(), bridge?.close() ?? Promise.resolve()]);
+          ['await Promise.allSettled([connection.close(), bridge?.close() ?? Promise.resolve()]);\n\t\t\tthrow error;', `if (session?.sessionId && !restored) {
+              if (piSessionId) await this.ompRemoveSaved(piSessionId, session.sessionId).catch(() => {});
+              try { await connection.discardSession?.(session.sessionId); } catch {}
+            }
+            await Promise.allSettled([connection.close(), bridge?.close() ?? Promise.resolve()]);
             await releaseLease?.();
 \t\t\tthrow error;`],
         ];
@@ -398,7 +491,7 @@ const result = await build({
         const claimEnd = 'await this.awaitContinuation(binding, options.signal);\n\t\t\t\treturn;';
         if (contents.split(claimStart).length !== 3 || contents.split(claimEnd).length !== 3) throw new Error('Pinned continuation ownership seams changed');
         contents = contents.replaceAll(claimStart, 'await claimContinuation(binding, async () => {\n\t\t\t\t' + claimStart)
-          .replaceAll(claimEnd, '}, () => this.invalidateBinding(binding));\n\t\t\t\tbinding.toolFingerprint = piToolFingerprint(tools);\n\t\t\t\tawait this.awaitContinuation(binding, options.signal);\n\t\t\t\treturn;');
+          .replaceAll(claimEnd, '}, () => this.invalidateBinding(binding));\n\t\t\t\tthis.ompSyncTools(binding, tools);\n\t\t\t\tawait this.awaitContinuation(binding, options.signal);\n\t\t\t\treturn;');
         const dropPattern = /\tprivate async dropBinding\([\s\S]*?\n\tprivate confirmedMode\(/g;
         if ([...contents.matchAll(dropPattern)].length !== 1) throw new Error('Pinned binding teardown seam changed');
         contents = contents.replace(dropPattern, `\tprivate async ompRemoveSaved(piSessionId: string, acpSessionId: string): Promise<void> {
@@ -409,9 +502,11 @@ const result = await build({
           if (removeSaved) binding.ompInvalidated = true;
           if (binding.ompDropPromise) {
             await binding.ompDropPromise;
-            if (removeSaved) {
+            if (!binding.piSessionId) {
+              binding.connection.discardSession?.(binding.session.sessionId);
+            } else if (removeSaved) {
               binding.connection.retireForReplacement?.(key, binding.session.sessionId);
-              if (binding.piSessionId) await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId);
+              await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId);
             }
             return;
           }
@@ -420,14 +515,15 @@ const result = await build({
             this.resolvedBindings.delete(binding);
             cancelPermission(binding);
             cancelPiTools(binding, 'Antigravity session closed before Pi returned the tool result');
-            const closing = Promise.allSettled([binding.connection.close(), binding.bridge?.close() ?? Promise.resolve()]);
             try {
-              if (removeSaved) {
+              if (!binding.piSessionId) {
+                binding.connection.discardSession?.(binding.session.sessionId);
+              } else if (removeSaved) {
                 binding.connection.retireForReplacement?.(key, binding.session.sessionId);
-                if (binding.piSessionId) await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId);
+                await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId);
               }
             } finally {
-              await closing;
+              await Promise.allSettled([binding.connection.close(), binding.bridge?.close() ?? Promise.resolve()]);
               await binding.ompReleaseLease?.(true);
               if (current && (await current) === binding && this.bindings.get(key) === current) this.bindings.delete(key);
             }
@@ -456,6 +552,57 @@ const result = await build({
           private ompMessagesFingerprint(messages: Context["messages"]): string { return messagesFingerprint(messages, this.ompSystemMemo); }
           private ompMessageFingerprint(message: Context["messages"][number]): string { return messageFingerprint(message, this.ompSystemMemo); }
           private ompToolsFingerprint(tools: NonNullable<Context["tools"]>): string { return this.ompToolsMemo(tools, () => piToolFingerprint(tools)); }
+          private ompCanSyncTools(binding: Binding, tools: NonNullable<Context["tools"]>): boolean {
+            const nextFp = this.ompToolsFingerprint(tools);
+            if (binding.toolFingerprint === nextFp) return true;
+            if (binding.initialize.agentCapabilities?.mcpCapabilities?.http === true) {
+              return binding.bridge !== undefined || tools.length === 0;
+            }
+            return true;
+          }
+          private ompSyncTools(binding: Binding, tools: NonNullable<Context["tools"]>): void {
+            const nextFp = this.ompToolsFingerprint(tools);
+            if (binding.toolFingerprint === nextFp) return;
+            if (binding.bridge) {
+              (binding.bridge as any).updateTools?.(tools);
+              binding.omittedTools = [...binding.bridge.omissions];
+            } else {
+              binding.omittedTools = binding.initialize.agentCapabilities?.mcpCapabilities?.http === true
+                ? planToolProjection(tools)
+                : tools.filter((tool) => tool.name !== PERMISSION_TOOL_NAME).map((tool) => ({ name: tool.name, reason: "Agent did not advertise MCP over HTTP" }));
+            }
+            binding.toolFingerprint = nextFp;
+          }
+          private ompNormalizeAssistantForBoundary(message: Context["messages"][number]): Context["messages"][number] {
+            if (message.role !== "assistant") return message;
+            const rawContent = typeof (message as any).content === "string"
+              ? [{ type: "text", text: (message as any).content }]
+              : Array.isArray(message.content) ? message.content : [];
+            const filtered = rawContent
+              .filter((block: any) => block && (
+                (block.type === "text" && typeof block.text === "string" && block.text.length > 0) ||
+                block.type === "toolCall"
+              ))
+              .map((block: any) => block.type === "toolCall"
+                ? { type: "toolCall" as const, id: block.id, name: block.name, arguments: block.arguments }
+                : { type: "text" as const, text: block.text });
+            const content = filtered.length ? filtered : [{ type: "text" as const, text: "" }];
+            return {
+              ...message,
+              role: "assistant",
+              provider: "antigravity-acp",
+              model: "",
+              content: content as any,
+            };
+          }
+          private ompAssistantMatches(binding: Binding, message: Context["messages"][number] | undefined): boolean {
+            if (!message || message.role !== "assistant" || !binding.expectedAssistantFingerprint) return false;
+            if (this.ompMessageFingerprint(message) === binding.expectedAssistantFingerprint) return true;
+            // Older checkpoints predate the normalized fingerprint. Without a
+            // trusted expected value, never compare a message with itself.
+            if (!binding.ompExpectedAssistantNormalized) return false;
+            return this.ompMessageFingerprint(this.ompNormalizeAssistantForBoundary(message)) === binding.ompExpectedAssistantNormalized;
+          }
         `);
         const fingerprintPatches = [
           ['function messagesFingerprint(messages: Context["messages"]): string {', 'function messagesFingerprint(messages: Context["messages"], systemMemo?: any): string {'],
@@ -468,6 +615,7 @@ const result = await build({
           if (contents.split(anchor).length !== 2) throw new Error(`Pinned structured fingerprint seam changed: ${anchor}`);
           contents = contents.replace(anchor, replacement);
         }
+        contents = `import { supportsSessionRouting } from ${JSON.stringify(path.join(root, "extension/tool-routing.ts"))};\n` + contents;
         contents = `import { createStructuredFingerprintMemo } from ${JSON.stringify(path.join(root, "extension/structured-fingerprint.ts"))};\n` + contents;
         contents = contents.replaceAll("binding.connection.retireForReplacement?.(", "await binding.connection.retireForReplacement?.(")
           .replaceAll("binding.connection.confirmReplacement?.(", "await binding.connection.confirmReplacement?.(")
@@ -475,6 +623,17 @@ const result = await build({
         contents = `import { drainCancelledTurn, isSteerAbort, steerMode } from ${JSON.stringify(path.join(root, "extension/turn-cancellation.ts"))};\n` + contents;
         contents = `import { claimContinuation } from ${JSON.stringify(path.join(root, "extension/continuation-claim.ts"))};\n` + contents;
         contents = `import { createHistoryFingerprintMemo } from ${JSON.stringify(path.join(root, "extension/history-fingerprint.ts"))};\nconst ompMessageFingerprintMemo = createHistoryFingerprintMemo();\n` + contents;
+        return { contents, loader: "ts" };
+      });
+      builder.onLoad({ filter: /\/src\/mcp\/bridge\.ts$/ }, async ({ path: file }) => {
+        if (file !== path.join(upstream, "src/mcp/bridge.ts")) return;
+        let contents = await fs.readFile(file, "utf8");
+        const anchor = "\treadonly fingerprint: string;\n\treadonly omissions: ToolOmission[] = [];\n\tprivate readonly token = crypto.randomUUID().replaceAll(\"-\", \"\");\n\tprivate readonly tools: BridgeTool[];";
+        if (contents.split(anchor).length !== 2) throw new Error("Pinned upstream MCP bridge seam changed; review compatibility");
+        contents = contents.replace(anchor, "\tfingerprint: string;\n\treadonly omissions: ToolOmission[] = [];\n\tprivate readonly token = crypto.randomUUID().replaceAll(\"-\", \"\");\n\tprivate tools: BridgeTool[];");
+        const ctorAnchor = "\t\tthis.tools = projectTools(options.tools, this.omissions);\n\t\tthis.fingerprint = projectionFingerprint(this.tools, this.omissions);\n\t}";
+        if (contents.split(ctorAnchor).length !== 2) throw new Error("Pinned upstream MCP bridge constructor seam changed; review compatibility");
+        contents = contents.replace(ctorAnchor, `${ctorAnchor}\n\n\tupdateTools(tools: readonly Tool[]): void {\n\t\tthis.omissions.length = 0;\n\t\tthis.tools = projectTools(tools, this.omissions);\n\t\tthis.fingerprint = projectionFingerprint(this.tools, this.omissions);\n\t}`);
         return { contents, loader: "ts" };
       });
       builder.onLoad({ filter: /\/src\/acp\/connection\.ts$/ }, async ({ path: file }) => {
@@ -488,6 +647,10 @@ const result = await build({
         if (contents.split(detailAnchor).length !== 2) throw new Error("Pinned upstream structured error detail seam changed; review compatibility");
         contents = contents.replace(detailAnchor,
           "const record = data as { details?: unknown; message?: unknown };\n\tconst detail = record.details ?? record.message;");
+        const capabilitiesAnchor = "\t\t\t\tclientCapabilities: {\n\t\t\t\t\tfs: { readTextFile: false, writeTextFile: false },\n\t\t\t\t\tterminal: false,\n\t\t\t\t},";
+        if (contents.split(capabilitiesAnchor).length !== 2) throw new Error("Pinned ACP client capability seam changed; review compatibility");
+        contents = contents.replace(capabilitiesAnchor,
+          "\t\t\t\tclientCapabilities: {\n\t\t\t\t\tfs: { readTextFile: false, writeTextFile: false },\n\t\t\t\t\tterminal: false,\n\t\t\t\t\tsession: { compaction: {} },\n\t\t\t\t},");
         return { contents, loader: "ts" };
       });
       builder.onLoad({ filter: /\/(?:process|runtime-manifest)\.ts$/ }, async ({ path: file }) => {

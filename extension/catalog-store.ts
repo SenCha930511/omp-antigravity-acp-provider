@@ -26,6 +26,8 @@ export class CatalogStore {
     private readonly prepareRuntime: () => Promise<void>,
     private readonly fallbackModels: () => PublicCatalogModel[],
     private readonly requireAuth: () => Promise<void> = async () => {},
+    private readonly createConnection: (options: ConstructorParameters<typeof TierConnection>[0]) => TierConnection =
+      options => new TierConnection(options),
   ) {}
 
   projectWithSettings(models: PublicCatalogModel[], settings: ContextSettings): ConfiguredCatalogModel[] {
@@ -111,7 +113,7 @@ export class CatalogStore {
   private async discoverOnce(): Promise<AdvertisedModel[]> {
     await this.requireAuth();
     await this.prepareRuntime();
-    const connection = new TierConnection({ cwd: process.cwd(), ompCleanup: this.cleanup });
+    const connection = this.createConnection({ cwd: process.cwd(), ompCleanup: this.cleanup });
     let discoveredSession: string | undefined;
     try {
       await connection.initialize();
@@ -123,9 +125,15 @@ export class CatalogStore {
         for (const option of modern) {
           // Model changes can alter reasoning choices; inspect each model's
           // confirmed configuration rather than sharing one global tier list.
-          await connection.setModel(session.sessionId, option.value);
-          models.push(advertisedRecord(connection.getSessionState(session.sessionId), option.value, option.name));
+          try {
+            await connection.setModel(session.sessionId, option.value);
+            models.push(advertisedRecord(connection.getSessionState(session.sessionId), option.value, option.name));
+          } catch {
+            // An advertised preview/retired model can reject selection without
+            // making the remaining models unusable.
+          }
         }
+        if (!models.length) throw new Error("Antigravity advertised models but none could be selected");
         return models;
       }
       const models = readModels(session.models?.availableModels);

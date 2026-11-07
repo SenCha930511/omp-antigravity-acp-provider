@@ -109,9 +109,13 @@ The installation runbook is in [AGENT_INSTALL.md](AGENT_INSTALL.md). Hand that f
 | `/antigravity-acp debug on\|off` | ACP tool-status lines |
 | `/antigravity-acp permissions default\|auto-edit\|yolo` | Permission mode |
 
+Supplemental `/usage` queries are off by default. Context occupancy still comes from ACP `usage_update`. Run `/antigravity-acp usage auto` to opt into the extra query.
+
 ## Steering and queued messages
 
 By default a new user message waits for the active ACP turn to finish (`OMP_ACP_STEER_MODE=queue`) and then continues on the warm session, avoiding a full replay and OMP auto-compaction. Set `OMP_ACP_STEER_MODE=steer` to restore immediate interruption. At tool/permission boundaries the adapter falls back to steer and waits for the ACP terminal response; `OMP_ACP_STEER_GRACE_MS` (default 60000) and `OMP_ACP_STEER_GRACE_MAX_MS` (default 300000) bound that wait.
+
+ACP runtimes stay warm for 15 minutes by default. Set `OMP_ACP_IDLE_TIMEOUT_MS=0` to keep them until OMP exits, or lower the value to reclaim memory sooner.
 
 Inference and `/antigravity-acp refresh` refuse to start ACP when no local Google login is available; run `/login` (or `/antigravity-acp login`) first instead of waiting for an interactive consent flow inside `session/new`.
 
