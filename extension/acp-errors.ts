@@ -1,5 +1,3 @@
-import { AntigravityAcpError } from "./vendor/pi-antigravity-acp-provider/src/acp/errors.ts";
-
 // OMP decides whether to retry from the assistant error text. Keep the
 // transport's distinction between account exhaustion and a transient throttle
 // visible instead of collapsing both into "protocol".
@@ -13,6 +11,7 @@ export type AcpFailureCode =
   | "transport"
   | "protocol"
   | "model"
+  | "refusal"
   | "aborted";
 
 export class AcpFailure extends Error {
@@ -91,9 +90,18 @@ const RULES: FailureRule[] = [
 function appendHint(message: string, rule: FailureRule): string {
   return rule.ensure.test(message) ? message : `${message} (${rule.append})`;
 }
+interface AntigravityAcpErrorLike extends Error {
+  name: "AntigravityAcpError";
+  code: string;
+}
+
+function isAntigravityAcpError(error: unknown): error is AntigravityAcpErrorLike {
+  return error instanceof Error && error.name === "AntigravityAcpError"
+    && typeof (error as { code?: unknown }).code === "string";
+}
 
 export function classifyAcpFailure(error: unknown): Error {
-  if (error instanceof AntigravityAcpError) {
+  if (isAntigravityAcpError(error)) {
     if (error.code === "aborted") return error;
     if (error.code === "auth") return new AcpFailure("auth", appendHint(error.message, AUTH_RULE), { cause: error });
     if (error.code === "timeout") return new AcpFailure("timeout", appendHint(error.message, TIMEOUT_RULE), { cause: error });

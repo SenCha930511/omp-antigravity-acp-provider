@@ -11,6 +11,7 @@ import { DEFAULT_USAGE_MODE } from "./context-settings.ts";
 import type { SessionCleanup } from "./session-cleanup.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import { deferredAbortSignal, isSteerAbort, steerMode as resolveSteerMode, steerTimings as resolveSteerTimings, type SteerMode, type SteerTimings } from "./turn-cancellation.ts";
+import { PermissionIdentityRegistry } from "./permission-identity.ts";
 
 const CONTINUATION_PROMPT = "Continue exactly where your previous output stopped. Do not repeat any earlier text.";
 function continuationLimit(): number {
@@ -24,6 +25,7 @@ function continuationLimit(): number {
 // Updates that would extend the retained turn output stay frozen while a
 // turn the server cannot cancel drains towards its natural end.
 const STEER_FROZEN_UPDATES = new Set(["agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]);
+type UpdateHandler = NonNullable<NonNullable<ConstructorParameters<typeof AntigravityAcpConnection>[0]["handlers"]>["onUpdate"]>;
 export class TierConnection extends AntigravityAcpConnection {
   confirmedThinking: { model: string; effort: string } | undefined;
   debugToolUpdates: boolean;
@@ -52,6 +54,10 @@ export class TierConnection extends AntigravityAcpConnection {
   private readonly maxContinuations: number;
   private readonly steerMuted = new Set<string>();
   private readonly steerActivity = new Map<string, Set<() => void>>();
+  private readonly permissionIdentity = new PermissionIdentityRegistry();
+  private readonly permissionTurns = new Map<string, number>();
+  private readonly noticeHandler: UpdateHandler | undefined;
+  private readonly noticeClosed = new Set<string>();
 
   constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompSteerMode?: SteerMode; ompSteerTimings?: SteerTimings; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics }) {
     super(options);
@@ -64,7 +70,14 @@ export class TierConnection extends AntigravityAcpConnection {
     this.steerMode = options.ompSteerMode ?? resolveSteerMode();
     this.steerTimings = options.ompSteerTimings ?? resolveSteerTimings();
     this.maxContinuations = continuationLimit();
-    this.setHandlers({ ...options.handlers, onUpdate: async notification => {
+    this.noticeHandler = options.handlers?.onUpdate;
+    const permissionHandler = options.handlers?.onPermission;
+    this.setHandlers({ ...options.handlers, onPermission: async request => {
+      await this.emitHeldNotice(request.sessionId);
+      const decision = this.permissionIdentity?.check(request.sessionId, this.permissionTurn(request.sessionId), request);
+      if (decision) return decision;
+      return permissionHandler ? permissionHandler(request) : { outcome: { outcome: "cancelled" } };
+    }, onUpdate: async notification => {
       const update = notification.update as {
         sessionUpdate?: string;
         availableCommands?: Array<{ name?: string }>;
@@ -76,6 +89,8 @@ export class TierConnection extends AntigravityAcpConnection {
         summary?: unknown;
         error?: unknown;
       };
+      this.permissionIdentity?.record(notification.sessionId, this.permissionTurn(notification.sessionId), update);
+      if (this.noticeClosed?.has(notification.sessionId) && STEER_FROZEN_UPDATES.has(update.sessionUpdate ?? "")) return;
       if (update.sessionUpdate === "available_commands_update") {
         if (update.availableCommands?.some(command => command.name === "usage")) this.usageCommands.add(notification.sessionId);
         else this.usageCommands.delete(notification.sessionId);
@@ -84,6 +99,7 @@ export class TierConnection extends AntigravityAcpConnection {
         this.contextUsage.set(notification.sessionId, { used: update.used, size: update.size });
       }
       if (update.sessionUpdate === "compaction_update" || update.sessionUpdate === "compaction_summary_chunk") {
+        await this.emitHeldNotice(notification.sessionId);
         this.recordCompaction(notification.sessionId, update);
         // Keep the server-owned summary out of OMP's transcript, but let the
         // runtime mark a binding unsafe when a tool/permission is parked.
@@ -105,14 +121,9 @@ export class TierConnection extends AntigravityAcpConnection {
         if (text !== update.content.text) {
           forward = { ...notification, update: { ...update, content: { ...update.content, text } } } as typeof notification;
         }
-      }
-      if (update.sessionUpdate === "agent_thought_chunk") {
-        const held = this.noticeFilter.flush(notification.sessionId);
-        if (held !== undefined) {
-          this.markFirstOutput(notification.sessionId);
-          const synthetic = { ...notification, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: held } } } as typeof notification;
-          if (showAcpUpdate(synthetic, this.debugToolUpdates)) await options.handlers?.onUpdate?.(synthetic);
-        }
+      } else if (update.sessionUpdate !== "agent_message_chunk" ||
+        update.content?.type !== "text" || typeof update.content.text !== "string") {
+        await this.emitHeldNotice(notification.sessionId);
       }
       if (this.steerMuted.has(notification.sessionId)) {
         // The turn cannot be cancelled and is draining towards its natural
@@ -235,8 +246,24 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageCommands?.delete(id);
     this.usageReads?.delete(id);
     this.noticeFilter?.forget(id);
+    this.noticeClosed?.delete(id);
+    this.permissionIdentity?.forget(id);
+    this.permissionTurns?.delete(id);
     this.steerMuted?.delete(id);
     this.steerActivity?.delete(id);
+  }
+  private permissionTurn(sessionId: string): number {
+    return this.permissionTurns?.get(sessionId) ?? 0;
+  }
+  private async emitHeldNotice(sessionId: string): Promise<void> {
+    const held = this.noticeFilter?.flush(sessionId);
+    if (held === undefined) return;
+    this.markFirstOutput(sessionId);
+    const synthetic = {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: held } },
+    } as Parameters<NonNullable<typeof this.noticeHandler>>[0];
+    await this.noticeHandler?.(synthetic);
   }
   async retireForReplacement(key: string, id: string) {
     await this.retryOwnership();
@@ -277,7 +304,10 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageCaptures?.clear();
     this.firstOutput?.clear();
     this.noticeFilter?.clear();
+    this.noticeClosed?.clear();
     this.usageReads?.clear();
+    this.permissionIdentity?.clear();
+    this.permissionTurns?.clear();
     this.steerMuted?.clear();
     this.steerActivity?.clear();
   }
@@ -343,6 +373,10 @@ export class TierConnection extends AntigravityAcpConnection {
   override async prompt(request: Parameters<AntigravityAcpConnection["prompt"]>[0], signal?: AbortSignal) {
     this.activePrompts++;
     const id = request.sessionId;
+    this.noticeClosed?.delete(id);
+    const permissionTurn = this.permissionTurn(id) + 1;
+    this.permissionTurns?.set(id, permissionTurn);
+    this.permissionIdentity?.beginTurn(id, permissionTurn);
     // The next dispatch owns this session's stream again; updates from a
     // drained turn must no longer be frozen once it starts.
     this.steerMuted?.delete(id);
@@ -408,6 +442,8 @@ export class TierConnection extends AntigravityAcpConnection {
       deferred?.dispose();
       signal?.removeEventListener("abort", aborted);
       this.firstOutput?.delete(id);
+      this.noticeClosed?.add(id);
+      await this.emitHeldNotice(id);
       this.noticeFilter?.forget(id);
       this.activePrompts--;
       try { await this.cleanup?.touch(id); } catch { /* Keep accounting optional. */ }

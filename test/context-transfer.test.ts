@@ -35,6 +35,12 @@ test("cold handoff after a tool result explicitly resumes the active request ins
   assert.ok(parsed.includes("call-active") && parsed.includes("ALREADY_READ"));
   assert.equal(output.prompt.at(-1).text, "ACTIVE_REQUEST");
 });
+test("tool results without any user record stay an explicit error", () => {
+  assert.throws(() => buildPromptParts({ messages: [
+    { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }] },
+    { role: "toolResult", toolName: "read", toolCallId: "call-1", content: [{ type: "text", text: "RESULT" }] },
+  ] }, true), /No user message to send to Antigravity ACP/);
+});
 test("warm new user turn has an explicit current-request boundary without replaying old tasks", () => {
   const output = buildPromptParts({ messages: [user("OLD_REQUEST"),
     { role: "assistant", content: [{ type: "text", text: "DONE" }] }, user("NEW_REQUEST")] }, false, 2);

@@ -7,6 +7,11 @@
 - Disable Node's MCP bridge keep-alive, request and header timeouts so a long parked tool call is not cut off by the HTTP server defaults.
 - Coalesce concurrent `/usage` reads. The query is a per-turn delta baseline, so it is not TTL-cached.
 - Continue a turn that ends at the model's output limit on the same ACP session, up to three times. If agy already reported its own output-cap continuation, the adapter skips its own continuation. `OMP_ACP_MAX_CONTINUATIONS=0` disables the loop.
+- Relay a tool call that outlives `OMP_ACP_TOOL_RELAY_MS` (default 85000, `0` disables, otherwise 5000 through 165000) instead of holding the MCP request open. The model calls `pi_omp_await_result` on a separate control MCP server and receives the same original result. A result that arrives after the ACP turn ends is replayed in a fresh turn, never delivered as a second tool execution.
+- Correlate permission requests by session, turn and `toolCallId` with structured `mcpServerName`/`mcpToolName` metadata. A conflicting update, a previous-turn id, or a permission-before-update that claims MCP identity fails closed with `reject_once` when available, otherwise `cancelled`. Normal requests still go through OMP's human review.
+- Keep the bridge's MCP `tools/list` on the current OMP tool set. The offline wire test covers add, remove and restore on one warm ACP session; a live agent re-list against official agy is not claimed.
+- Report a `refusal` stop reason as an explicit provider refusal. An empty `end_turn` remains tolerated for OMP's warm `/retry` path.
+- Add a multi-session fake ACP server with a real loopback MCP client, plus wire tests for tool calls, parallel relay results, cancellation, permission identity, refusal, notice flushing and bounded runtime shutdown.
 
 
 ## 0.1.35 — 2026-11-08

@@ -23,6 +23,9 @@ This is an independent adaptation, **NOT** an official Google or OMP integration
 - Lazy ACP startup and warm session reuse.
 - `/login` plus `/antigravity-acp` account, usage and cleanup commands.
 - API-equivalent cost estimates, not subscription billing.
+- Long-running OMP tools survive the MCP request window through a relay. The model resumes the same result with `pi_omp_await_result`; the control tool is a separate MCP server and never appears in OMP's tool list.
+- Permission requests are tied to the originating session, turn and tool call. Forged, conflicting or previous-turn identities fail closed, while normal requests still use OMP's human review.
+- The MCP `tools/list` reflects the current OMP tool set. The offline wire test covers add, remove and restore on one warm ACP session.
 
 ## Install: for human
 
@@ -87,6 +90,7 @@ This shows the runtime, native-tool mode and usage state. Send a short prompt to
 | Login opens the wrong Google account | Both login paths always start a fresh sign-in. Choose the intended account (or "Use another account") on Google's consent screen. |
 | `disabled` native-tool mode rejects the session | The official runtime must advertise system-append support (1.4.1+). Upgrade the runtime or run `/antigravity-acp native-tools prefer`. |
 | The first request is slow | Runtime download and cold ACP start happen once; later turns reuse the warm session. |
+| A tool call returns a relay notice | The model should call `pi_omp_await_result` with the notice's `call_id`. Lower `OMP_ACP_TOOL_RELAY_MS` or set it to `0` to disable relay. |
 
 ## Install: for agents
 
@@ -120,6 +124,17 @@ ACP runtimes stay warm for 15 minutes by default. Set `OMP_ACP_IDLE_TIMEOUT_MS=0
 An ACP turn that ends at the model's output limit is continued on the same session up to three times. `OMP_ACP_MAX_CONTINUATIONS=0` disables the loop; if agy already reported its own output-cap continuation, the adapter does not add another.
 
 Inference and `/antigravity-acp refresh` refuse to start ACP when no local Google login is available; run `/login` (or `/antigravity-acp login`) first instead of waiting for an interactive consent flow inside `session/new`.
+
+## Long tools and relay
+
+A tool call that outlives `OMP_ACP_TOOL_RELAY_MS` (default 85000, `0` disables, otherwise 5000 through 165000) returns a relay notice instead of holding the MCP request open. The model calls `pi_omp_await_result` with the notice's `call_id`; the adapter returns the same original result, not a second execution. The control tool is a separate MCP server and is not added to OMP's tool list. If the ACP turn ends before the result arrives, the adapter retries the same result in a fresh ACP turn; it never delivers a stale result to a new writer.
+
+Permission requests are correlated by session, turn and `toolCallId` with structured `mcpServerName`/`mcpToolName` metadata. A conflicting update, a previous-turn id, or a permission-before-update that claims MCP identity is rejected with `reject_once` when available, otherwise `cancelled`. Normal requests still go through OMP's human review.
+
+The bridge's MCP `tools/list` always reflects the current OMP tool set. The offline wire test covers add, remove and restore on one warm ACP session. A live agent re-list has not been verified against the official agy runtime, so the adapter does not claim that the agent will always see a changed list.
+
+A `refusal` stop reason is reported as an explicit provider refusal. An empty `end_turn` remains tolerated to preserve OMP's warm `/retry` path.
+
 
 ## Limitations vs direct OAuth
 

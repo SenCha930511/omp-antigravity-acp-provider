@@ -311,6 +311,61 @@ const result = await build({
             anchor: "const usage = usageFromPrompt(response);",
             replacement: "const usage = usageFromPrompt(response);\n\t\t\tif (ompSeedUsage) {\n\t\t\t\tusage.input += ompSeedUsage.input;\n\t\t\t\tusage.output += ompSeedUsage.output;\n\t\t\t\tusage.cacheRead += ompSeedUsage.cacheRead;\n\t\t\t\tusage.cacheWrite += ompSeedUsage.cacheWrite;\n\t\t\t\tusage.totalTokens += ompSeedUsage.totalTokens;\n\t\t\t\tif (ompSeedUsage.reasoning !== undefined) usage.reasoning = (usage.reasoning ?? 0) + ompSeedUsage.reasoning;\n\t\t\t}",
           },
+          {
+            name: "deliver orphaned relay results in a new turn",
+            anchor: "\t\t\t} else {\n\t\t\t\tbinding.writer = writer;\n\t\t\t\tthis.noteContinuationInstructions(binding, context);\n\t\t\t\tbinding.pendingContextCount = context.messages.length;\n\t\t\t\tbinding.pendingContextFingerprint = messagesFingerprint(context.messages);\n\t\t\t\tfor (const { pending, message } of results) {",
+            replacement: "\t\t\t} else if (!binding.turnCompletion) {\n\t\t\t\tcancelPiTools(binding, \"The previous ACP turn ended before the relayed tool result arrived; the result will be replayed as history in a new continuation\");\n\t\t\t\tbinding.pendingTools.clear();\n\t\t\t\tbinding.needsReconstruction = true;\n\t\t\t} else {\n\t\t\t\tbinding.writer = writer;\n\t\t\t\tthis.noteContinuationInstructions(binding, context);\n\t\t\t\tbinding.pendingContextCount = context.messages.length;\n\t\t\t\tbinding.pendingContextFingerprint = messagesFingerprint(context.messages);\n\t\t\t\tfor (const { pending, message } of results) {",
+          },
+          {
+            name: "begin relay turn",
+            anchor: "\t\t\tbinding.turnCompletion = new Promise<void>((resolve) => {",
+            replacement: "\t\t\tbinding.relay.beginTurn();\n\t\t\tbinding.turnCompletion = new Promise<void>((resolve) => {",
+          },
+          {
+            name: "end relay turn",
+            anchor: "\t\t\tcompleteTurn?.();\n\t\t\tbinding.turnCompletion = undefined;",
+            replacement: "\t\t\tcompleteTurn?.();\n\t\t\tbinding.relay.endTurn();\n\t\t\tbinding.turnCompletion = undefined;",
+          },
+          {
+            name: "queued relay fingerprint check",
+            anchor: "binding.toolFingerprint !== piToolFingerprint(tools) ||",
+            replacement: "!this.ompCanSyncTools(binding, tools) ||",
+          },
+          {
+            name: "relay-aware MCP bridge",
+            anchor: "\t\t\tlet mcpServer;\n\t\t\tif (tools.length > 0 && initialize.agentCapabilities?.mcpCapabilities?.http === true) {\n\t\t\t\tbridge = new PiMcpBridge({\n\t\t\t\t\ttools,\n\t\t\t\t\tonCall: (invocation) => this.requestPiTool(binding, invocation),\n\t\t\t\t});\n\t\t\t\tmcpServer = await bridge.start();\n\t\t\t}\n\t\t\tconst mcpServers = mcpServer ? [mcpServer] : [];",
+            replacement: "\t\t\tconst relayConfig = this.ompRelayConfig();\n\t\t\tconst relay = new ToolRelay(relayConfig);\n\t\t\tconst relayCollision = relayConfig.enabled ? tools.find(tool => projectedMcpName(tool.name) === TOOL_RELAY_CONTROL_NAME) : undefined;\n\t\t\tif (relayCollision) throw new AntigravityAcpError(\"invalid_input\", \"Tool \" + relayCollision.name + \" collides with the relay control tool \" + TOOL_RELAY_CONTROL_NAME + \"; rename it or disable OMP_ACP_TOOL_RELAY_MS\");\n\t\t\tlet mcpServer;\n\t\t\tlet relayServer;\n\t\t\tif (tools.length > 0 && initialize.agentCapabilities?.mcpCapabilities?.http === true) {\n\t\t\t\tbridge = new PiMcpBridge({\n\t\t\t\t\ttools,\n\t\t\t\t\tonCall: (invocation) => relay.call(invocation, () => this.requestPiTool(binding, invocation)),\n\t\t\t\t});\n\t\t\t\tmcpServer = await bridge.start();\n\t\t\t\tif (relayConfig.enabled) {\n\t\t\t\t\trelayBridge = new PiMcpBridge({\n\t\t\t\t\t\ttools: [relayControlTool],\n\t\t\t\t\t\tonCall: (invocation) => {\n\t\t\t\t\t\t\tconst callId = invocation.arguments.call_id;\n\t\t\t\t\t\t\treturn typeof callId === \"string\" && callId\n\t\t\t\t\t\t\t\t? relay.await(callId)\n\t\t\t\t\t\t\t\t: Promise.resolve({ content: [{ type: \"text\", text: \"call_id must be a non-empty string\" }], isError: true });\n\t\t\t\t\t\t},\n\t\t\t\t\t});\n\t\t\t\t\trelayServer = await relayBridge.start();\n\t\t\t\t\tif (relayServer) relayServer.name = \"pi-relay\";\n\t\t\t\t}\n\t\t\t}\n\t\t\tconst mcpServers = [];\n\t\t\tif (mcpServer) mcpServers.push(mcpServer);\n\t\t\tif (relayServer) mcpServers.push(relayServer);",
+          },
+          {
+            name: "close relay bridge on process exit",
+            anchor: "void bridge?.close().catch(() => undefined);",
+            replacement: "void bridge?.close().catch(() => undefined);\n\t\t\t\tvoid relayBridge?.close().catch(() => undefined);",
+          },
+          {
+            name: "relay threshold field",
+            anchor: "\tprivate permissionMode: PermissionMode;",
+            replacement: "\tprivate permissionMode: PermissionMode;\n\tprivate readonly ompRelayThresholdMs: number | undefined;",
+          },
+          {
+            name: "relay threshold constructor injection",
+            anchor: "\tconstructor(\n\t\tconnectionFactory?: AntigravityConnectionFactory,\n\t\tpermissionMode: PermissionMode = \"yolo\",\n\t\tsessionStore?: AcpSessionStore,\n\t) {",
+            replacement: "\tconstructor(\n\t\tconnectionFactory?: AntigravityConnectionFactory,\n\t\tpermissionMode: PermissionMode = \"yolo\",\n\t\tsessionStore?: AcpSessionStore,\n\t\trelayThresholdMs?: number,\n\t) {\n\t\tthis.ompRelayThresholdMs = relayThresholdMs;",
+          },
+          {
+            name: "classify provider refusal",
+            anchor: "\t\t\tswitch (response.stopReason) {\n\t\t\t\tcase \"cancelled\":\n\t\t\t\t\tthrow abortError();\n\t\t\t\tcase \"max_tokens\":\n\t\t\t\tcase \"max_turn_requests\":\n\t\t\t\t\tactiveWriter.done(\"length\");\n\t\t\t\t\tbreak;\n\t\t\t\tdefault:\n\t\t\t\t\tactiveWriter.done(\"stop\");\n\t\t\t}",
+            replacement: "\t\t\tswitch (response.stopReason) {\n\t\t\t\tcase \"cancelled\":\n\t\t\t\t\tthrow abortError();\n\t\t\t\tcase \"refusal\":\n\t\t\t\t\tthrow new AcpFailure(\"refusal\", \"Antigravity refused the request\");\n\t\t\t\tcase \"max_tokens\":\n\t\t\t\tcase \"max_turn_requests\":\n\t\t\t\t\tactiveWriter.done(\"length\");\n\t\t\t\t\tbreak;\n\t\t\t\tdefault:\n\t\t\t\t\tactiveWriter.done(\"stop\");\n\t\t\t}",
+          },
+          {
+            name: "close relay bridge on runtime shutdown",
+            anchor: "\t\t\t\tvalue.bridge?.close() ?? Promise.resolve(),",
+            replacement: "\t\t\t\tvalue.bridge?.close() ?? Promise.resolve(),\n\t\t\t\tvalue.relayBridge?.close() ?? Promise.resolve(),",
+          },
+          {
+            name: "cancel relay records with pending tools",
+            anchor: "function cancelPiTools(binding: Binding, reason: string): void {\n\tif (binding.toolBatchTimer) clearTimeout(binding.toolBatchTimer);",
+            replacement: "function cancelPiTools(binding: Binding, reason: string): void {\n\tbinding.relay.cancelAll(reason);\n\tif (binding.toolBatchTimer) clearTimeout(binding.toolBatchTimer);",
+          },
         ];
         let contents = await fs.readFile(file, "utf8");
         for (const patch of patches) {
@@ -343,7 +398,7 @@ const result = await build({
         // Continuity transactions are adapter-owned. Keep explicit pinned seams
         // so an upstream update cannot silently bypass the write-ahead marker.
         const continuityPatches = [
-          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string;'],
+          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; relayBridge?: PiMcpBridge; relayFingerprint: string;'],
           ['let completeTurn: (() => void) | undefined;', 'let ompDispatched = false;\n\t\tlet completeTurn: (() => void) | undefined;'],
           ['if (existing) return existing;', `if (existing) {
             const value = await existing;
@@ -355,7 +410,7 @@ const result = await build({
           }`],
           ['if (value === createdBinding && this.bindings.get(key) === current) this.bindings.delete(key);',
             'if (value === createdBinding && this.bindings.get(key) === current && !createdBinding.ompInvalidated) this.bindings.delete(key);'],
-          ['let bridge: PiMcpBridge | undefined;', 'let bridge: PiMcpBridge | undefined;\n\t\tconst piSessionId = key.startsWith("sid:") ? key.slice(4) : undefined;\n\t\tlet session: AcpNewSessionResponse | undefined;\n\t\tlet restored = false;'],
+          ['let bridge: PiMcpBridge | undefined;', 'let bridge: PiMcpBridge | undefined;\n\t\tlet relayBridge: PiMcpBridge | undefined;\n\t\tconst piSessionId = key.startsWith("sid:") ? key.slice(4) : undefined;\n\t\tlet session: AcpNewSessionResponse | undefined;\n\t\tlet restored = false;'],
           ['const piSessionId = key.startsWith("sid:") ? key.slice(4) : undefined;\n\t\t\tconst saved = piSessionId ? await this.sessionStore?.get(piSessionId) : undefined;\n\t\t\tlet session: AcpNewSessionResponse | undefined;\n\t\t\tlet restored = false;', `let saved = piSessionId ? await this.sessionStore?.get(piSessionId) : undefined;
             if (saved && (saved.ompCheckpointVersion !== 1 || saved.ompInFlight !== false)) {
               await connection.retireForReplacement?.(key, saved.acpSessionId);
@@ -367,6 +422,7 @@ const result = await build({
             ompReleaseLease: releaseLease,
             ompExpectedAssistantHasOutput: restored && (saved?.ompExpectedAssistantHasOutput === true ||
               (saved?.ompExpectedAssistantHasOutput === undefined && Boolean(saved?.expectedAssistantFingerprint))),
+            relay, relayBridge, relayFingerprint: relayConfig.fingerprint,
             pendingConversationFingerprint: messagesFingerprint([]),`],
           ['const response = await binding.connection.prompt(', `if (options.signal?.aborted) throw abortError();
             binding.ompInFlight = true;
@@ -474,7 +530,7 @@ const result = await build({
               if (piSessionId) await this.ompRemoveSaved(piSessionId, session.sessionId).catch(() => {});
               try { await connection.discardSession?.(session.sessionId); } catch {}
             }
-            await Promise.allSettled([connection.close(), bridge?.close() ?? Promise.resolve()]);
+            await Promise.allSettled([connection.close(), bridge?.close() ?? Promise.resolve(), relayBridge?.close() ?? Promise.resolve()]);
             await releaseLease?.();
 \t\t\tthrow error;`],
         ];
@@ -523,7 +579,7 @@ const result = await build({
                 await this.ompRemoveSaved(binding.piSessionId, binding.session.sessionId);
               }
             } finally {
-              await Promise.allSettled([binding.connection.close(), binding.bridge?.close() ?? Promise.resolve()]);
+              await Promise.allSettled([binding.connection.close(), binding.bridge?.close() ?? Promise.resolve(), binding.relayBridge?.close() ?? Promise.resolve()]);
               await binding.ompReleaseLease?.(true);
               if (current && (await current) === binding && this.bindings.get(key) === current) this.bindings.delete(key);
             }
@@ -552,7 +608,18 @@ const result = await build({
           private ompMessagesFingerprint(messages: Context["messages"]): string { return messagesFingerprint(messages, this.ompSystemMemo); }
           private ompMessageFingerprint(message: Context["messages"][number]): string { return messageFingerprint(message, this.ompSystemMemo); }
           private ompToolsFingerprint(tools: NonNullable<Context["tools"]>): string { return this.ompToolsMemo(tools, () => piToolFingerprint(tools)); }
+          private ompRelayConfig() {
+            const base = resolveRelayConfig();
+            return this.ompRelayThresholdMs === undefined
+              ? base
+              : { ...base, thresholdMs: this.ompRelayThresholdMs, fingerprint: \`\${base.fingerprint}:test:\${this.ompRelayThresholdMs}\` };
+          }
+          private ompRelayCollision(tools: NonNullable<Context["tools"]>): string | undefined {
+            if (!this.ompRelayConfig().enabled) return undefined;
+            return tools.find(tool => projectedMcpName(tool.name) === TOOL_RELAY_CONTROL_NAME)?.name;
+          }
           private ompCanSyncTools(binding: Binding, tools: NonNullable<Context["tools"]>): boolean {
+            if (binding.relayFingerprint !== this.ompRelayConfig().fingerprint) return false;
             const nextFp = this.ompToolsFingerprint(tools);
             if (binding.toolFingerprint === nextFp) return true;
             if (binding.initialize.agentCapabilities?.mcpCapabilities?.http === true) {
@@ -561,6 +628,8 @@ const result = await build({
             return true;
           }
           private ompSyncTools(binding: Binding, tools: NonNullable<Context["tools"]>): void {
+            const relayCollision = this.ompRelayCollision(tools);
+            if (relayCollision) throw new AntigravityAcpError("invalid_input", "Tool " + relayCollision + " collides with the relay control tool " + TOOL_RELAY_CONTROL_NAME + "; rename it or disable OMP_ACP_TOOL_RELAY_MS");
             const nextFp = this.ompToolsFingerprint(tools);
             if (binding.toolFingerprint === nextFp) return;
             if (binding.bridge) {
@@ -572,6 +641,7 @@ const result = await build({
                 : tools.filter((tool) => tool.name !== PERMISSION_TOOL_NAME).map((tool) => ({ name: tool.name, reason: "Agent did not advertise MCP over HTTP" }));
             }
             binding.toolFingerprint = nextFp;
+            binding.relayFingerprint = this.ompRelayConfig().fingerprint;
           }
           private ompNormalizeAssistantForBoundary(message: Context["messages"][number]): Context["messages"][number] {
             if (message.role !== "assistant") return message;
@@ -623,6 +693,8 @@ const result = await build({
         contents = `import { drainCancelledTurn, isSteerAbort, steerMode } from ${JSON.stringify(path.join(root, "extension/turn-cancellation.ts"))};\n` + contents;
         contents = `import { claimContinuation } from ${JSON.stringify(path.join(root, "extension/continuation-claim.ts"))};\n` + contents;
         contents = `import { createHistoryFingerprintMemo } from ${JSON.stringify(path.join(root, "extension/history-fingerprint.ts"))};\nconst ompMessageFingerprintMemo = createHistoryFingerprintMemo();\n` + contents;
+        contents = `import { ToolRelay, resolveRelayConfig, relayControlTool, projectedMcpName, TOOL_RELAY_CONTROL_NAME } from ${JSON.stringify(path.join(root, "extension/tool-relay.ts"))};\n` + contents;
+        contents = `import { AcpFailure } from ${JSON.stringify(path.join(root, "extension/acp-errors.ts"))};\n` + contents;
         return { contents, loader: "ts" };
       });
       builder.onLoad({ filter: /\/src\/stream\/pi-events\.ts$/ }, async ({ path: file }) => {
@@ -646,6 +718,15 @@ const result = await build({
         const ctorAnchor = "\t\tthis.tools = projectTools(options.tools, this.omissions);\n\t\tthis.fingerprint = projectionFingerprint(this.tools, this.omissions);\n\t}";
         if (contents.split(ctorAnchor).length !== 2) throw new Error("Pinned upstream MCP bridge constructor seam changed; review compatibility");
         contents = contents.replace(ctorAnchor, `${ctorAnchor}\n\n\tupdateTools(tools: readonly Tool[]): void {\n\t\tthis.omissions.length = 0;\n\t\tthis.tools = projectTools(tools, this.omissions);\n\t\tthis.fingerprint = projectionFingerprint(this.tools, this.omissions);\n\t}`);
+        const responsesAnchor = "\tprivate server: ReturnType<typeof createServer> | undefined;\n\tprivate url: string | undefined;";
+        if (contents.split(responsesAnchor).length !== 2) throw new Error("Pinned upstream MCP bridge response seam changed; review compatibility");
+        contents = contents.replace(responsesAnchor, responsesAnchor + "\n\tprivate readonly responses = new Set<ServerResponse>();");
+        const closeAnchor = "\tasync close(): Promise<void> {\n\t\tconst server = this.server;\n\t\tthis.server = undefined;\n\t\tthis.url = undefined;\n\t\tif (!server) return;\n\t\tawait new Promise<void>((resolve) => server.close(() => resolve()));\n\t}";
+        if (contents.split(closeAnchor).length !== 2) throw new Error("Pinned upstream MCP bridge close seam changed; review compatibility");
+        contents = contents.replace(closeAnchor, "\tasync close(): Promise<void> {\n\t\tconst server = this.server;\n\t\tthis.server = undefined;\n\t\tthis.url = undefined;\n\t\tif (!server) return;\n\t\tconst closing = new Promise<void>((resolve) => server.close(() => resolve()));\n\t\tfor (const response of this.responses) response.destroy();\n\t\tthis.responses.clear();\n\t\tserver.closeAllConnections();\n\t\tawait closing;\n\t}");
+        const handleAnchor = "\tprivate async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {\n\t\tif (request.url !== \"/mcp\" || request.method !== \"POST\") {";
+        if (contents.split(handleAnchor).length !== 2) throw new Error("Pinned upstream MCP bridge handle seam changed; review compatibility");
+        contents = contents.replace(handleAnchor, "\tprivate async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {\n\t\tthis.responses.add(response);\n\t\tresponse.once(\"close\", () => this.responses.delete(response));\n\t\tif (request.url !== \"/mcp\" || request.method !== \"POST\") {");
         return { contents, loader: "ts" };
       });
       builder.onLoad({ filter: /\/src\/acp\/connection\.ts$/ }, async ({ path: file }) => {

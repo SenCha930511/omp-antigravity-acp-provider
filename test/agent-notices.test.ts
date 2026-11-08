@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AgentNoticeFilter, classifyOutputLimitNotice } from "../extension/agent-notices.ts";
 import { TierConnection } from "../extension/tier-connection.ts";
+import { AntigravityAcpConnection } from "../extension/vendor/pi-antigravity-acp-provider/src/acp/connection.ts";
 
 test("classifies the output-limit notice and its retry suffix", () => {
   const full = "Your previous response was cut off because it exceeded the output token limit Please continue from where you left off, keeping your response shorter";
@@ -75,6 +76,97 @@ test("TierConnection filters notices before forwarding ACP updates", async () =>
     });
     assert.equal(seen.length, 1);
     assert.equal(seen[0].update.content.text, "answer");
+  } finally {
+    await connection.close();
+  }
+});
+
+test("TierConnection flushes a held prefix at the terminal boundary", async () => {
+  const seen: any[] = [];
+  const connection: any = new TierConnection({
+    cwd: process.cwd(),
+    command: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 1000)"],
+    handlers: { onUpdate: async (notification: any) => { seen.push(notification); } },
+  });
+  const original = AntigravityAcpConnection.prototype.prompt;
+  let calls = 0;
+  AntigravityAcpConnection.prototype.prompt = async function () {
+    calls++;
+    await this.handlers.onUpdate({
+      sessionId: "session",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: calls === 1 ? "your previous response was cut off" : "second" },
+      },
+    });
+    return { stopReason: "end_turn" };
+  };
+  try {
+    await connection.prompt({ sessionId: "session", prompt: [] });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].update.content.text, "your previous response was cut off");
+    await connection.handlers.onUpdate({
+      sessionId: "session",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "late" } },
+    });
+    assert.equal(seen.length, 1, "a late chunk from the closed turn must be ignored");
+    await connection.prompt({ sessionId: "session", prompt: [] });
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1].update.content.text, "second");
+  } finally {
+    AntigravityAcpConnection.prototype.prompt = original;
+    await connection.close();
+  }
+});
+
+test("TierConnection drops a complete notice at the terminal boundary", async () => {
+  const seen: any[] = [];
+  const connection: any = new TierConnection({
+    cwd: process.cwd(),
+    command: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 1000)"],
+    handlers: { onUpdate: async (notification: any) => { seen.push(notification); } },
+  });
+  const original = AntigravityAcpConnection.prototype.prompt;
+  AntigravityAcpConnection.prototype.prompt = async function () {
+    await this.handlers.onUpdate({
+      sessionId: "session",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "your previous response was cut off because it exceeded the output token limit" },
+      },
+    });
+    return { stopReason: "end_turn" };
+  };
+  try {
+    await connection.prompt({ sessionId: "session", prompt: [] });
+    assert.equal(seen.length, 0);
+  } finally {
+    AntigravityAcpConnection.prototype.prompt = original;
+    await connection.close();
+  }
+});
+
+test("TierConnection flushes a held prefix before a tool update", async () => {
+  const seen: any[] = [];
+  const connection: any = new TierConnection({
+    cwd: process.cwd(),
+    command: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 1000)"],
+    handlers: { onUpdate: async (notification: any) => { seen.push(notification); } },
+  });
+  try {
+    await connection.handlers.onUpdate({
+      sessionId: "session",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "your previous response was cut off" } },
+    });
+    await connection.handlers.onUpdate({
+      sessionId: "session",
+      update: { sessionUpdate: "tool_call", toolCallId: "call-1", title: "Read", status: "pending" },
+    });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].update.content.text, "your previous response was cut off");
   } finally {
     await connection.close();
   }

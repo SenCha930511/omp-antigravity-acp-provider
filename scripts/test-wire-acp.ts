@@ -28,6 +28,11 @@ try {
   const session = await connection.newSession(root);
   const sessionId = session.sessionId;
 
+  await assert.rejects(
+    connection.connection.request("unknown/method", {}),
+    (error: any) => error.code === -32601,
+  );
+
   updates.length = 0;
   const noticed = await connection.prompt({ sessionId, prompt: [{ type: "text", text: "NOTICE_TEST" }] });
   assert.equal(noticed.stopReason, "end_turn");
@@ -40,6 +45,27 @@ try {
   assert.equal(permissions[0].toolCall.title, "Forged title: read /secret");
   assert.deepEqual(permissions[0].toolCall.rawInput, { path: "/secret", tool: "read" });
   assert.ok(updates.map(textOf).includes("PERMISSION:selected:allow_once"));
+
+  updates.length = 0;
+  permissions.length = 0;
+  const identity = await connection.prompt({ sessionId, prompt: [{ type: "text", text: "WIRE_IDENTITY_PERMISSION_TEST" }] });
+  assert.equal(identity.stopReason, "end_turn");
+  assert.equal(permissions.length, 1, "a matching update must still reach OMP review");
+  assert.ok(updates.map(textOf).includes("PERMISSION:selected:allow_once"));
+
+  updates.length = 0;
+  permissions.length = 0;
+  const forged = await connection.prompt({ sessionId, prompt: [{ type: "text", text: "WIRE_FORGED_PERMISSION_TEST" }] });
+  assert.equal(forged.stopReason, "end_turn");
+  assert.equal(permissions.length, 0, "permission-before-update with claimed MCP identity must not reach OMP");
+  assert.ok(updates.map(textOf).includes("PERMISSION:selected:reject_once"));
+
+  updates.length = 0;
+  permissions.length = 0;
+  const conflict = await connection.prompt({ sessionId, prompt: [{ type: "text", text: "WIRE_CONFLICT_PERMISSION_TEST" }] });
+  assert.equal(conflict.stopReason, "end_turn");
+  assert.equal(permissions.length, 0, "a conflicting update and permission must not reach OMP");
+  assert.ok(updates.map(textOf).includes("PERMISSION:selected:reject_once"));
 
   updates.length = 0;
   const continued = await connection.prompt({ sessionId, prompt: [{ type: "text", text: "MAX_TOKENS_TEST" }] });
