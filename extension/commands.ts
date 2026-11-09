@@ -84,6 +84,150 @@ export interface CommandControllerDeps {
   onModelsUpdated: (models: ConfiguredCatalogModel[]) => void;
 }
 
+// OMP's TUI forwards an extension command's getArgumentCompletions into its
+// slash-command autocomplete (same wiring the built-in autoresearch command
+// uses). Items replace the argument text after "/antigravity-acp ", so values
+// carry a trailing space to keep chained completion flowing.
+export interface AntigravityCompletionItem {
+  value: string;
+  label: string;
+  description: string;
+  hint?: string;
+}
+
+export interface AntigravityCompletionDeps {
+  catalog: { currentModels: ReadonlyArray<{ id: string }> };
+}
+
+interface SubcommandSpec {
+  name: string;
+  description: string;
+  usage?: string;
+  values?: Array<[label: string, description: string]>;
+}
+
+const CONTEXT_SETTING_KEYS: Array<[label: string, description: string]> = [
+  ["contextWindow", "Total context window in tokens"],
+  ["maxTokens", "Maximum output tokens"],
+  ["inputTokenBudget", "Maximum input tokens per request"],
+  ["reserveTokens", "Tokens reserved for replies"],
+  ["maxTransferBytes", "Context transfer byte budget"],
+  ["maxImageBytes", "Per-image byte budget"],
+];
+
+const SUBCOMMANDS: SubcommandSpec[] = [
+  { name: "status", description: "Runtime, permissions and usage report (default)" },
+  { name: "account", description: "Signed-in Google account and credential state" },
+  { name: "login", description: "Start a fresh Antigravity Google authorization" },
+  { name: "logout", description: "Clear Antigravity credentials, saved sessions and the OMP marker" },
+  { name: "tools", description: "Inspect the OMP↔ACP tool bridge" },
+  {
+    name: "usage",
+    description: "Usage accounting and connection state",
+    usage: "[auto|off]",
+    values: [["auto", "Query usage after each reply"], ["off", "Skip supplemental usage queries"]],
+  },
+  {
+    name: "context",
+    description: "Context window and transfer settings",
+    usage: "[set default|MODEL KEY NUMBER]",
+    values: [["set", "Override one setting for default or a model"]],
+  },
+  {
+    name: "cleanup",
+    description: "Collect saved ACP sessions now",
+    usage: "[off|conservative|timeout|balanced [DAYS]] | budget MAX_SESSIONS MAX_MIB",
+    values: [
+      ["off", "Keep every saved session"],
+      ["conservative", "Remove idle sessions (default)"],
+      ["timeout", "Remove sessions idle for DAYS"],
+      ["balanced", "Timeout cleanup plus budget enforcement"],
+      ["budget", "Cap MAX_SESSIONS and MAX_MIB"],
+    ],
+  },
+  {
+    name: "diagnostics",
+    description: "Diagnostics collection status",
+    usage: "[on|off|reset]",
+    values: [
+      ["on", "Enable diagnostics collection"],
+      ["off", "Disable diagnostics collection"],
+      ["reset", "Clear collected diagnostics"],
+    ],
+  },
+  {
+    name: "debug",
+    description: "Raw ACP tool-status display",
+    usage: "on|off",
+    values: [["on", "Show raw tool-status updates"], ["off", "Hide raw tool-status updates"]],
+  },
+  {
+    name: "native-tools",
+    description: "Native ACP tool exposure",
+    usage: "prefer|disabled",
+    values: [["prefer", "Let OMP tools shadow ACP natives (default)"], ["disabled", "Expose ACP-native tools only"]],
+  },
+  {
+    name: "permissions",
+    description: "Requested ACP permission mode",
+    usage: "default|auto-edit|yolo",
+    values: [
+      ["default", "Confirm edits and commands"],
+      ["auto-edit", "Auto-accept edits"],
+      ["yolo", "Auto-accept everything"],
+    ],
+  },
+  { name: "refresh", description: "Discover and cache advertised models" },
+];
+
+function completeValues(typed: string, values: Array<[label: string, description: string]>,
+  valueOf: (label: string) => string): AntigravityCompletionItem[] | null {
+  const prefix = typed.toLowerCase();
+  const matched = values.filter(([label]) => label.toLowerCase().startsWith(prefix));
+  return matched.length ? matched.map(([label, description]) => ({ value: valueOf(label), label, description })) : null;
+}
+
+export function createAntigravityArgumentCompletions(deps: AntigravityCompletionDeps) {
+  return function getArgumentCompletions(args: string): AntigravityCompletionItem[] | null {
+    const firstSpace = args.indexOf(" ");
+    if (firstSpace === -1) {
+      const typed = args.toLowerCase();
+      const matched = SUBCOMMANDS.filter(spec => spec.name.startsWith(typed));
+      return matched.length ? matched.map(spec => ({
+        value: `${spec.name} `,
+        label: spec.name,
+        description: spec.description,
+        hint: spec.usage ? `${spec.name.slice(typed.length)} ${spec.usage}` : undefined,
+      })) : null;
+    }
+    const name = args.slice(0, firstSpace).toLowerCase();
+    const spec = SUBCOMMANDS.find(entry => entry.name === name);
+    const rest = args.slice(firstSpace + 1);
+    if (!spec?.values) return null;
+    if (spec.name === "context") {
+      const restSpace = rest.indexOf(" ");
+      if (restSpace === -1) return completeValues(rest, spec.values, label => `context ${label} `);
+      if (rest.slice(0, restSpace).toLowerCase() !== "set") return null;
+      const target = rest.slice(restSpace + 1);
+      const targetSpace = target.indexOf(" ");
+      if (targetSpace === -1) {
+        const targets: Array<[label: string, description: string]> = [
+          ["default", "Applied to every model"],
+          ...deps.catalog.currentModels.map(model => [model.id, "Per-model override"] as [string, string]),
+        ];
+        return completeValues(target, targets, label => `context set ${label} `);
+      }
+      const targetName = target.slice(0, targetSpace);
+      const settingKey = target.slice(targetSpace + 1);
+      if (settingKey.includes(" ")) return null;
+      const keys = [...CONTEXT_SETTING_KEYS];
+      if (targetName === "default") keys.push(["usageMode", "auto or off"]);
+      return completeValues(settingKey, keys, label => `context set ${targetName} ${label} `);
+    }
+    return completeValues(rest, spec.values, label => `${spec.name} ${label} `);
+  };
+}
+
 export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
   const sessionIdOf = (ctx: OmpCommandContext | undefined): string | undefined => ctx?.sessionManager?.getSessionId?.();
 

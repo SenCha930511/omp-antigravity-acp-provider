@@ -25,7 +25,7 @@ import {
   type OmpCommandContext,
 } from "./auth-sync.ts";
 import { CatalogStore } from "./catalog-store.ts";
-import { createAntigravityCommandHandler, type RuntimeBundleView, type ToolAuditSummary } from "./commands.ts";
+import { createAntigravityArgumentCompletions, createAntigravityCommandHandler, type AntigravityCompletionItem, type RuntimeBundleView, type ToolAuditSummary } from "./commands.ts";
 import { formatCompactionNotice } from "./acp-compaction.ts";
 import { classifyAcpFailure } from "./acp-errors.ts";
 import {
@@ -52,7 +52,13 @@ interface OmpHostApi {
   registerProvider: (name: string, config: unknown) => void;
   unregisterProvider?: (name: string) => void;
   registerTool: (tool: unknown) => void;
-  registerCommand: (name: string, command: { description: string; handler: (args: string, ctx: OmpCommandContext) => Promise<void> }) => void;
+  registerCommand: (name: string, command: {
+    description: string;
+    handler: (args: string, ctx: OmpCommandContext) => Promise<void>;
+    // OMP's autocomplete calls this with the text after "/<name> " and renders
+    // the returned items; optional so older hosts simply skip completion.
+    getArgumentCompletions?: (args: string) => AntigravityCompletionItem[] | null | Promise<AntigravityCompletionItem[] | null>;
+  }) => void;
 }
 
 export function resolveAdapterStateDir(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
@@ -287,6 +293,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
         adapted.registerProvider();
       },
     }),
+    getArgumentCompletions: createAntigravityArgumentCompletions({ catalog: catalogStore }),
   });
 
   const adapted = new Proxy(pi, {

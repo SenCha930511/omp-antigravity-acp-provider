@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createAntigravityCommandHandler, type CommandControllerDeps, type RuntimeBundleView } from "../extension/commands.ts";
+import { createAntigravityArgumentCompletions, createAntigravityCommandHandler, type CommandControllerDeps, type RuntimeBundleView } from "../extension/commands.ts";
 import type { OmpCommandContext } from "../extension/auth-sync.ts";
 import { SessionCleanup } from "../extension/session-cleanup.ts";
 
@@ -150,4 +150,75 @@ test("status and tools hold a runtime lease for their snapshot", async () => {
   assert.equal(acquired, 2);
   assert.equal(released, 2);
   fs.rmSync(fixture.state, { recursive: true, force: true });
+});
+
+function makeCompletions(modelIds = ["gemini-3.8-flash", "gemini-4-argon"]) {
+  const complete = createAntigravityArgumentCompletions({ catalog: { currentModels: modelIds.map(id => ({ id })) } });
+  const items = (args: string) => {
+    const result = complete(args);
+    assert.ok(result, `expected completions for ${JSON.stringify(args)}`);
+    return result;
+  };
+  return { complete, items };
+}
+
+test("argument completions list every subcommand and stay in sync with the handler usage error", async () => {
+  const { items } = makeCompletions();
+  const all = items("");
+  const labels = all.map(item => item.label);
+  assert.deepEqual(labels,
+    ["status", "account", "login", "logout", "tools", "usage", "context", "cleanup", "diagnostics", "debug", "native-tools", "permissions", "refresh"]);
+  for (const item of all) {
+    assert.equal(item.value, `${item.label} `);
+    assert.ok(item.description.length > 0);
+  }
+  const fixture = makeHandler();
+  await assert.rejects(fixture.handler("__nosuch", fixture.ctx), (error: Error) => {
+    const listed = error.message.slice(error.message.indexOf("[") + 1, error.message.indexOf("]")).split("|");
+    assert.deepEqual(listed, labels);
+    return true;
+  });
+  fs.rmSync(fixture.state, { recursive: true, force: true });
+});
+
+test("argument completions filter by prefix, ignore case, and chain fixed values", () => {
+  const { complete, items } = makeCompletions();
+  assert.deepEqual(items("cl").map(item => item.label), ["cleanup"]);
+  assert.match(items("cl")[0]!.hint ?? "", /^eanup /);
+  const [status] = items("status");
+  assert.ok(status);
+  assert.equal(status.hint, undefined);
+  assert.equal(complete("zzz"), null);
+  assert.deepEqual(items("CLEANUP b").map(item => item.label), ["balanced", "budget"]);
+  assert.equal(items("CLEANUP b")[0]!.value, "cleanup balanced ");
+  assert.deepEqual(items("usage a").map(item => item.label), ["auto"]);
+  assert.equal(items("usage a")[0]!.value, "usage auto ");
+  assert.deepEqual(items("diagnostics res").map(item => item.label), ["reset"]);
+  assert.deepEqual(items("debug o").map(item => item.label), ["on", "off"]);
+  assert.deepEqual(items("native-tools p").map(item => item.label), ["prefer"]);
+  assert.deepEqual(items("permissions auto-e").map(item => item.label), ["auto-edit"]);
+  assert.deepEqual(items("permissions y").map(item => item.label), ["yolo"]);
+  assert.equal(complete("usage x"), null);
+  assert.equal(complete("status x"), null);
+  assert.equal(complete("refresh "), null);
+  assert.equal(complete("login x"), null);
+  assert.equal(complete(" "), null);
+});
+
+test("context set completions walk the target and setting-key positions", () => {
+  const { complete, items } = makeCompletions();
+  assert.deepEqual(items("context s").map(item => item.label), ["set"]);
+  assert.equal(items("context s")[0]!.value, "context set ");
+  assert.deepEqual(items("context set ").map(item => item.label), ["default", "gemini-3.8-flash", "gemini-4-argon"]);
+  assert.equal(items("context set gem").length, 2);
+  const [firstKey] = items("context set default ");
+  assert.ok(firstKey);
+  assert.equal(firstKey.value, "context set default contextWindow ");
+  assert.ok(items("context set default ").map(item => item.label).includes("usageMode"));
+  const modelKeys = items("context set gemini-4-argon ").map(item => item.label);
+  assert.ok(!modelKeys.includes("usageMode"));
+  assert.ok(modelKeys.includes("maxTokens"));
+  assert.deepEqual(items("context set default maxT").map(item => item.label), ["maxTokens", "maxTransferBytes"]);
+  assert.equal(complete("context set default usageMode "), null);
+  assert.equal(complete("context settypo default "), null);
 });

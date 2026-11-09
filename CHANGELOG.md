@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.37 — 2026-11-09
+
+- Complete `/antigravity-acp` in the OMP input. Typing the command plus a space lists every subcommand with its description, fixed argument values (`permissions`, `cleanup`, `debug`, `diagnostics`, `native-tools`, `usage`) filter as you type, and `context set` completes `default`, the cached model IDs and the setting keys. Requires OMP 18.x, which forwards an extension command's `getArgumentCompletions` to its autocomplete.
+
+
 ## 0.1.36 — 2026-11-08
 
 - Drop agy's transport-retry and output-cap continuation notices from the assistant transcript. A split notice is held until the next chunk settles it, and a thought chunk releases a held prefix that was model text.

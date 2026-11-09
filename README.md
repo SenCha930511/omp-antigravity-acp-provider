@@ -108,12 +108,13 @@ The installation runbook is in [AGENT_INSTALL.md](AGENT_INSTALL.md). Hand that f
 | `/antigravity-acp usage [auto\|off]` | Context occupancy and supplemental usage queries |
 | `/antigravity-acp context` | Per-model context budgets |
 | `/antigravity-acp cleanup [mode]` | Session-file cleanup policy |
+| `/antigravity-acp diagnostics [on\|off\|reset]` | Adapter stage timing samples |
 | `/antigravity-acp native-tools prefer\|disabled` | Native built-in tool policy |
 | `/antigravity-acp tools` | Available and omitted OMP tool schemas |
 | `/antigravity-acp debug on\|off` | ACP tool-status lines |
 | `/antigravity-acp permissions default\|auto-edit\|yolo` | Permission mode |
 
-Supplemental `/usage` queries are off by default. Context occupancy still comes from ACP `usage_update`. Run `/antigravity-acp usage auto` to opt into the extra query.
+The OMP input autocompletes this command. Type `/antigravity-acp ` to list the subcommands, and keep typing to filter them. Fixed values such as `permissions` modes and `context set` targets (default plus the cached model IDs) complete the same way.
 
 ## Steering and queued messages
 
