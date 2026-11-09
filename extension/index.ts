@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { applyApiCostEstimate } from "./pricing.ts";
+import { preferNewestAcpRuntime } from "./acp-runtime-source.ts";
 import { SessionRuntimePool } from "./runtime-pool.ts";
 import { createStructuredFingerprintMemo } from "./structured-fingerprint.ts";
 import { Diagnostics, instrumentRuntime } from "./diagnostics.ts";
@@ -101,8 +102,10 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
 
   // Loading this global extension must not start ACP or query Google.
   let readiness: Promise<void> | undefined;
+  let runtimePreference: Promise<void> | undefined;
   function prepareRuntime() {
-    readiness ??= ensureAntigravityAcpReady().catch((error: unknown) => {
+    runtimePreference ??= preferNewestAcpRuntime(stateDir).catch(() => undefined);
+    readiness ??= runtimePreference.then(() => ensureAntigravityAcpReady()).catch((error: unknown) => {
       readiness = undefined;
       throw error;
     });

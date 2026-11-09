@@ -3,6 +3,7 @@
 ## 0.1.37 — 2026-11-09
 
 - Complete `/antigravity-acp` in the OMP input. Typing the command plus a space lists every subcommand with its description, fixed argument values (`permissions`, `cleanup`, `debug`, `diagnostics`, `native-tools`, `usage`) filter as you type, and `context set` completes `default`, the cached model IDs and the setting keys. Requires OMP 18.x, which forwards an extension command's `getArgumentCompletions` to its autocomplete.
+- Auto-select the newest ACP server. When the `agy` CLI on PATH reports a newer `acp` subcommand version than the registry-installed runtime, the adapter writes an `agy-acp-cli.sh` wrapper into its state dir and routes the launch through upstream's `AGY_ACP_BIN` override, so models that ship in the CLI first (Claude Opus/Sonnet 5.5, GPT-OSS) appear without manual setup. An explicit `AGY_ACP_BIN` always wins, every OMP process re-evaluates the choice, the decision lands in `acp-runtime-source.json`, and Windows stays managed-only because the wrapper is a POSIX script.
 
 
 ## 0.1.36 — 2026-11-08

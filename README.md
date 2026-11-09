@@ -17,6 +17,7 @@ This is an independent adaptation, **NOT** an official Google or OMP integration
 ## Features
 
 - All server-advertised models, including Claude, GPT-OSS and future IDs when the ACP endpoint advertises them.
+- Newest-server auto-selection. When the `agy` CLI on PATH bundles a newer ACP server than the registry-installed runtime, the adapter launches it through a generated `AGY_ACP_BIN` wrapper, so CLI-first models appear without manual setup. An explicit `AGY_ACP_BIN` always wins.
 - Per-model thinking levels, exposed only when the server confirms them.
 - OMP tools through an authenticated loopback MCP bridge.
 - Optional `disabled` native-tool mode for strict OMP-only sessions.
