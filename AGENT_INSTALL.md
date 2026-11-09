@@ -18,5 +18,9 @@ Steps:
 5. Run `omp models antigravity-acp --json`. Cached listing must not start the ACP server. An empty catalog before sign-in is acceptable; report it instead of retrying in a loop.
 6. Tell the user to restart OMP, then run `/login` → "Google Antigravity (ACP)" and `/antigravity-acp refresh` inside OMP. Do not perform these steps yourself.
 
+Notes:
+- The adapter auto-selects the newer of the `agy` CLI's bundled server and its managed registry runtime; no channel configuration is required. An explicit `AGY_ACP_BIN` environment variable overrides the choice — do not set it unless the user asks.
+- ACP sessions are stored under `~/.gemini/antigravity-acp/`. The user's personal `agy` CLI chats under `~/.gemini/antigravity-cli/` are never read or deleted by the adapter.
+
 Acceptance: one adapter installed, `omp models antigravity-acp --json` returns valid JSON, and no credential material appears in any output. Report the commands run, the adapter version, any model IDs and the first step that failed.
 ```

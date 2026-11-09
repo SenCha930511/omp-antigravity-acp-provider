@@ -102,7 +102,10 @@ function compareVersions(left: string, right: string): number {
 }
 
 function writeCliWrapper(file: string, agyPath: string): void {
-  const script = `#!/bin/sh\nexec '${agyPath.replace(/'/g, "'\\''")}' acp "$@"\n`;
+  // --app_data_dir=antigravity-acp is the managed .par's own default: the CLI
+  // binary would otherwise default to antigravity-cli, mixing ACP sessions
+  // with personal CLI chats outside session cleanup's tracked tree.
+  const script = `#!/bin/sh\nexec '${agyPath.replace(/'/g, "'\\''")}' acp --app_data_dir=antigravity-acp "$@"\n`;
   try {
     if (fs.readFileSync(file, "utf8") === script) return;
   } catch {

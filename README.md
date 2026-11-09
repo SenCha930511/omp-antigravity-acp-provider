@@ -97,6 +97,23 @@ This shows the runtime, native-tool mode and usage state. Send a short prompt to
 
 The installation runbook is in [AGENT_INSTALL.md](AGENT_INSTALL.md). Hand that file to an agent with terminal access; it installs and verifies the adapter without starting an interactive login. For example: `Read AGENT_INSTALL.md and follow it.`
 
+## ACP server channels and selection
+
+Google ships the same ACP server through two channels; the adapter picks between them automatically at every OMP startup.
+
+- **`agy` CLI** — the self-updating command-line product. When its bundled server is newer than the registry runtime, the adapter launches it through a generated `AGY_ACP_BIN` wrapper, so CLI-first models (for example Claude and GPT-OSS) appear without manual setup.
+- **Managed runtime** — the registry-signed release downloaded and verified into `~/.local/opt/agy-acp/`. Used when the CLI is missing or not newer, and installed automatically when neither channel exists.
+
+Selection order:
+
+1. An explicit `AGY_ACP_BIN` always wins. Point it at an `agy acp`-capable executable or wrapper to force a channel.
+2. Otherwise the newer server version wins; ties go to the managed runtime.
+3. With neither present, the managed runtime is downloaded from Google's registry on next use.
+
+Session storage follows the server's own `--app_data_dir`. The generated wrapper pins `antigravity-acp` — the managed runtime's own default — so CLI-launched ACP sessions land in `~/.gemini/antigravity-acp/`, where `/antigravity-acp cleanup` and session ownership tracking operate. Personal `agy` CLI chats stay in `~/.gemini/antigravity-cli/` and are never read or deleted by the adapter. `GEMINI_HOME` relocates the managed runtime's tree (upstream behavior); the `agy` CLI stores under `~/.gemini` regardless.
+
+The active channel and its versions are recorded in `~/.omp/agent/antigravity-acp-provider/acp-runtime-source.json` whenever the CLI is chosen.
+
 ## Commands
 
 | Command | Purpose |

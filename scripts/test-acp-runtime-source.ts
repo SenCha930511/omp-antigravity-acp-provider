@@ -67,7 +67,7 @@ function freshEnv(): NodeJS.ProcessEnv {
   assert.equal(env.AGY_ACP_BIN, wrapper);
   const script = fs.readFileSync(wrapper, "utf8");
   assert.ok(script.startsWith("#!/bin/sh\n"));
-  assert.ok(script.includes(`exec '${path.join(bin, "agy")}' acp "$@"`));
+  assert.ok(script.includes(`exec '${path.join(bin, "agy")}' acp --app_data_dir=antigravity-acp "$@"`));
   fs.accessSync(wrapper, fs.constants.X_OK);
   const record = JSON.parse(fs.readFileSync(path.join(stateDir, "acp-runtime-source.json"), "utf8"));
   assert.equal(record.source, "cli");

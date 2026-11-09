@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.38 — 2026-11-09
+
+- Pin the CLI wrapper's ACP storage to the managed runtime's tree. The `agy` CLI binary defaults its ACP server to `--app_data_dir=antigravity-cli`, which mixed adapter sessions with personal CLI chats and put them outside session cleanup's tracked tree; the generated `agy-acp-cli.sh` now passes `--app_data_dir=antigravity-acp` (the managed `.par`'s own default), so CLI-launched sessions land in `~/.gemini/antigravity-acp/` where cleanup and ownership tracking operate, while personal `agy` chats in `~/.gemini/antigravity-cli/` are never read or deleted. Existing wrappers rewrite themselves on the next startup.
+- Document the two ACP server channels, the selection order (`AGY_ACP_BIN` override first, newer server version wins, managed runtime as fallback with automatic download) and the storage layout in the README and AGENT_INSTALL.md.
+
 ## 0.1.37 — 2026-11-09
 
 - Complete `/antigravity-acp` in the OMP input. Typing the command plus a space lists every subcommand with its description, fixed argument values (`permissions`, `cleanup`, `debug`, `diagnostics`, `native-tools`, `usage`) filter as you type, and `context set` completes `default`, the cached model IDs and the setting keys. Requires OMP 18.x, which forwards an extension command's `getArgumentCompletions` to its autocomplete.
