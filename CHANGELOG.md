@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.40 — 2026-11-10
+
+- Accept the official Antigravity ACP 1.5.3 agent name `Antigravity ACP Server` alongside `antigravity-acp`. Disabled native-tool mode still requires version 1.4.1 or newer and `systemPrompt.append`, sends `enabledTools: []`, and rejects unknown identities. This restores hard native-tool filtering when OMP selects the 1.5.3 CLI server.
+
 ## 0.1.39 — 2026-11-10
 
 - Plan cold-history prompt chunks from prefix byte metrics instead of rendering every candidate. Accepted boundaries and the first rejected candidate still render through the original path, so output and overflow behavior stay exact; a corrupt historical image attachment mapping now fails before transport. Exhaustive range tests cover small and large histories.
