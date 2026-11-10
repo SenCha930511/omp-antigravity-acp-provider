@@ -115,26 +115,69 @@ test("unknown subcommands and stray arguments fail with usage errors, not a runt
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
-test("valid permissions set the mode, persist it, and show status", async () => {
+test("valid permissions persist and expose the requested state before closing every runtime exactly once", async () => {
   const fixture = makeHandler();
+  let requested = "default", closed = 0;
+  const mutations: string[] = [], legacyCalls: string[] = [];
+  const runtimes = [bundle, bundle].map(existing => ({
+    ...existing,
+    runtime: { ...existing.runtime, setPermissionMode: async (mode: string) => { legacyCalls.push(mode); } },
+  }));
+  fixture.deps.getPermissionMode = () => requested;
+  fixture.deps.setPermissionModeState = mode => { requested = mode; mutations.push(mode); };
+  fixture.deps.getAllRuntimes = () => runtimes;
+  fixture.deps.closeAllRuntimes = async () => {
+    closed++;
+    assert.equal(requested, "yolo", "new state must be visible before pool teardown begins");
+    assert.deepEqual(mutations, ["yolo"]);
+    assert.equal(JSON.parse(fs.readFileSync(fixture.deps.configPath, "utf8")).permissions, "yolo", "persistence precedes teardown");
+  };
   await fixture.handler("permissions yolo", fixture.ctx);
   assert.equal(JSON.parse(fs.readFileSync(path.join(fixture.state, "config.json"), "utf8")).permissions, "yolo");
+  assert.equal(requested, "yolo");
+  assert.deepEqual(mutations, ["yolo"]);
+  assert.equal(closed, 1, "closeAllRuntimes owns teardown of the entire pool");
+  assert.deepEqual(legacyCalls, [], "a dangerous process must never receive a legacy in-place mode change");
   assert.match(fixture.notices[0]!, /Antigravity ACP \(OMP adapter\)/);
   // Only the status display needs the live runtime; the setter itself does not.
   assert.equal(fixture.runtimeCreates(), 1);
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
+test("reselecting the current permission mode does not close runtimes or rewrite settings", async () => {
+  const fixture = makeHandler();
+  let closed = 0, mutations = 0;
+  fixture.deps.getPermissionMode = () => "default";
+  fixture.deps.setPermissionModeState = () => { mutations++; };
+  fixture.deps.closeAllRuntimes = async () => { closed++; };
+  await fixture.handler("permissions default", fixture.ctx);
+  assert.equal(closed, 0);
+  assert.equal(mutations, 0);
+  assert.equal(fs.existsSync(fixture.deps.configPath), false);
+  fs.rmSync(fixture.state, { recursive: true, force: true });
+});
+
 test("permissions and native-tools do not mutate live state or close runtimes if persistence fails", async () => {
   const fixture = makeHandler();
-  let closed = 0;
+  let requested = "default", closed = 0;
+  const permissionMutations: string[] = [], policyMutations: string[] = [], legacyCalls: string[] = [];
+  fixture.deps.getPermissionMode = () => requested;
+  fixture.deps.setPermissionModeState = mode => { requested = mode; permissionMutations.push(mode); };
+  fixture.deps.setToolPolicy = policy => { policyMutations.push(policy.nativeTools); };
+  fixture.deps.getAllRuntimes = () => [{
+    ...bundle,
+    runtime: { ...bundle.runtime, setPermissionMode: async (mode: string) => { legacyCalls.push(mode); } },
+  }];
   fixture.deps.closeAllRuntimes = async () => { closed++; };
   fs.mkdirSync(fixture.deps.configPath, { recursive: true });
   fs.mkdirSync(fixture.deps.toolPolicyPath, { recursive: true });
   await assert.rejects(fixture.handler("permissions yolo", fixture.ctx));
-  assert.equal(fixture.deps.getPermissionMode(), "default");
+  assert.equal(requested, "default");
   await assert.rejects(fixture.handler("native-tools disabled", fixture.ctx));
   assert.equal(closed, 0);
+  assert.deepEqual(permissionMutations, []);
+  assert.deepEqual(policyMutations, []);
+  assert.deepEqual(legacyCalls, []);
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 

@@ -114,6 +114,10 @@ Session storage follows the server's own `--app_data_dir`. The generated wrapper
 
 The active channel and its versions are recorded in `~/.omp/agent/antigravity-acp-provider/acp-runtime-source.json` whenever the CLI is chosen.
 
+Permission IDs differ between the channels. Managed ACP 1.4.5 supports `default`, `auto_edit`, and `yolo` directly. CLI ACP 1.5.3 advertises `default`, `accept-edits`, and `plan` instead. The adapter maps `auto-edit` to `accept-edits`. For `yolo`, it selects wire mode `default` and passes the CLI's official `--dangerously-skip-permissions` flag. This preserves auto-approval instead of substituting `accept-edits`. Changing permission modes recreates the ACP runtime so a process with auto-approval cannot serve a later `default` or `auto-edit` request. An explicit `AGY_ACP_BIN` is left unchanged.
+
+CLI ACP 1.5.3 omits `mcpCapabilities` from its initialization response, but it still discovers HTTP MCP servers and calls `tools/list`. The adapter normalizes this capability for that server identity so OMP tools remain available. CLI 1.5.3 reports no audio input, while the adapter's model catalog already limits input to text and images.
+
 ## Commands
 
 | Command | Purpose |

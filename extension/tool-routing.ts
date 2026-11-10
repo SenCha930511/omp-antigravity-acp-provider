@@ -19,11 +19,16 @@ const OFFICIAL_AGENT_NAMES = new Set(["antigravity-acp", "Antigravity ACP Server
 export interface InitializeMetadata {
   agentInfo?: { name?: string; version?: string };
   agentCapabilities?: {
+    mcpCapabilities?: {
+      http?: boolean;
+      [key: string]: unknown;
+    };
     _meta?: {
       antigravity?: {
         systemPrompt?: { append?: boolean };
       };
     };
+    [key: string]: unknown;
   };
 }
 
@@ -42,13 +47,30 @@ export interface SessionRpcRequest {
   [key: string]: unknown;
 }
 
-export function supportsSessionRouting(initialize: InitializeMetadata | undefined): boolean {
+function isOfficialAgentAtLeast(initialize: InitializeMetadata | undefined, minor: number, patch: number): boolean {
   const name = initialize?.agentInfo?.name;
   const version = initialize?.agentInfo?.version?.match(/^(\d+)\.(\d+)\.(\d+)$/);
   return typeof name === "string" && OFFICIAL_AGENT_NAMES.has(name) &&
-    initialize.agentCapabilities?._meta?.antigravity?.systemPrompt?.append === true &&
     !!version && Number(version[1]) === 1 &&
-    (Number(version[2]) > 4 || (Number(version[2]) === 4 && Number(version[3]) >= 1));
+    (Number(version[2]) > minor || (Number(version[2]) === minor && Number(version[3]) >= patch));
+}
+
+export function supportsSessionRouting(initialize: InitializeMetadata | undefined): boolean {
+  return isOfficialAgentAtLeast(initialize, 4, 1) &&
+    initialize?.agentCapabilities?._meta?.antigravity?.systemPrompt?.append === true;
+}
+
+export function normalizeInitializeResponse<T extends InitializeMetadata>(initialize: T): T {
+  if (!isOfficialAgentAtLeast(initialize, 5, 3) || initialize.agentCapabilities?.mcpCapabilities?.http !== undefined) {
+    return initialize;
+  }
+  return {
+    ...initialize,
+    agentCapabilities: {
+      ...initialize.agentCapabilities,
+      mcpCapabilities: { ...initialize.agentCapabilities?.mcpCapabilities, http: true },
+    },
+  };
 }
 
 export function sessionRoutingRequest<T extends SessionRpcRequest>(request: T, initialize: InitializeMetadata | undefined, mode: NativeToolMode): T {

@@ -26,6 +26,46 @@ export interface AcpRuntimePreference {
   managedVersion?: string;
 }
 
+export type AcpRequestedPermissionMode = "default" | "auto_edit" | "yolo";
+
+export interface AcpPermissionProfile {
+  requestedMode: AcpRequestedPermissionMode;
+  wireMode: "default" | "auto_edit" | "yolo" | "accept-edits";
+  autoApproveProcess: boolean;
+}
+
+export function resolveAcpPermissionProfile(
+  preference: AcpRuntimePreference | undefined,
+  requestedMode: AcpRequestedPermissionMode,
+): AcpPermissionProfile {
+  const modernCli = preference?.source === "cli" && preference.cliVersion !== undefined &&
+    compareVersions(preference.cliVersion, "1.5.3") >= 0;
+  return {
+    requestedMode,
+    wireMode: modernCli && requestedMode === "yolo" ? "default"
+      : modernCli && requestedMode === "auto_edit" ? "accept-edits" : requestedMode,
+    autoApproveProcess: modernCli && requestedMode === "yolo",
+  };
+}
+
+export function assertSelectedAcpCliLaunch(
+  stateDir: string,
+  preference: AcpRuntimePreference | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (preference?.source !== "cli") return;
+  const wrapper = path.join(stateDir, "agy-acp-cli.sh");
+  let intact = false;
+  try {
+    intact = preference.cliPath !== undefined && fs.readFileSync(wrapper, "utf8") === cliWrapperScript(preference.cliPath);
+  } catch {
+    // Missing and unreadable wrappers fail the same launch check.
+  }
+  if (env.AGY_ACP_BIN !== wrapper || !isExecutableFile(wrapper) || !intact) {
+    throw new Error(`Selected ACP CLI wrapper is missing, changed, not executable, or not selected by AGY_ACP_BIN: ${wrapper}`);
+  }
+}
+
 export async function preferNewestAcpRuntime(
   stateDir: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -41,10 +81,11 @@ export async function preferNewestAcpRuntime(
     return { source: "managed", cliPath: cli?.path, cliVersion: cli?.version, managedVersion };
   }
   const wrapper = path.join(stateDir, "agy-acp-cli.sh");
+  const preference = { source: "cli", cliPath: cli.path, cliVersion: cli.version, managedVersion } as const;
   writeCliWrapper(wrapper, cli.path);
+  writeRuntimeSourceRecord(stateDir, preference);
   env.AGY_ACP_BIN = wrapper;
-  writeRuntimeSourceRecord(stateDir, { source: "cli", cliPath: cli.path, cliVersion: cli.version, managedVersion });
-  return { source: "cli", cliPath: cli.path, cliVersion: cli.version, managedVersion };
+  return preference;
 }
 
 async function findAgyCli(env: NodeJS.ProcessEnv): Promise<{ path: string; version: string } | undefined> {
@@ -101,11 +142,15 @@ function compareVersions(left: string, right: string): number {
   return 0;
 }
 
-function writeCliWrapper(file: string, agyPath: string): void {
+function cliWrapperScript(agyPath: string): string {
   // --app_data_dir=antigravity-acp is the managed .par's own default: the CLI
   // binary would otherwise default to antigravity-cli, mixing ACP sessions
   // with personal CLI chats outside session cleanup's tracked tree.
-  const script = `#!/bin/sh\nexec '${agyPath.replace(/'/g, "'\\''")}' acp --app_data_dir=antigravity-acp "$@"\n`;
+  return `#!/bin/sh\nif [ -n "\${OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS:-}" ]; then\n  set -- --dangerously-skip-permissions "$@"\nfi\nexec '${agyPath.replace(/'/g, "'\\''")}' acp --app_data_dir=antigravity-acp "$@"\n`;
+}
+
+function writeCliWrapper(file: string, agyPath: string): void {
+  const script = cliWrapperScript(agyPath);
   try {
     if (fs.readFileSync(file, "utf8") === script) return;
   } catch {

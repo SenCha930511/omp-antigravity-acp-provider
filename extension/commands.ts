@@ -373,7 +373,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       // when a runtime for this session already exists.
       const bundle = deps.peekRuntimeForSession(sessionIdOf(ctx));
       const snapshot = await bundle?.runtime.snapshot();
-      const permissionMode = snapshot?.permissionMode ?? deps.getPermissionMode();
+      const permissionMode = deps.getPermissionMode();
       const omp = ompCredentialSummary(ctx);
       const marker = omp.present === undefined ? "unknown (host did not expose the credential store)"
         : omp.present ? `present, authorized ${omp.authorizedAt ?? "unknown time"}${omp.email ? ` as ${omp.email}` : ""} (${omp.record})`
@@ -428,9 +428,11 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         throw new Error("Usage: /antigravity-acp permissions default|auto-edit|yolo");
       }
       const mode = value.replace("-", "_");
-      savePermissionMode(mode, deps.configPath);
-      deps.setPermissionModeState(mode);
-      await Promise.all(deps.getAllRuntimes().map(bundle => bundle.runtime.setPermissionMode(mode)));
+      if (mode !== deps.getPermissionMode()) {
+        savePermissionMode(mode, deps.configPath);
+        deps.setPermissionModeState(mode);
+        await deps.closeAllRuntimes();
+      }
     }
     const usageError = "Usage: /antigravity-acp [status|account|login|logout|tools|usage|context|cleanup|diagnostics|debug|native-tools|permissions|refresh]";
     if (command && command !== "status" && command !== "tools" && command !== "permissions") {
@@ -455,7 +457,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       }
 
       const policy = deps.getToolPolicy();
-      ctx.ui.notify(`Antigravity ACP (OMP adapter)\nAuth storage: ${(await authReady()) ? "configured (ACP-owned token file or macOS keychain)" : inspectAntigravityAuth().status}\nPermissions: ${snapshot.permissionMode}\nNative tools: ${policy.nativeTools}\nDebug tool updates: ${policy.debugToolUpdates ? "on" : "off"}\nTool routing: ${JSON.stringify([...deps.connections].map(connection => connection.toolRouting).filter(Boolean))}\nActive sessions: ${snapshot.bindings}\nConfirmed thinking: ${JSON.stringify([...deps.connections].map(connection => connection.confirmedThinking).filter(Boolean))}\nUsage: ${JSON.stringify(snapshot.metrics)}\n${JSON.stringify(snapshot.processes)}`, "info");
+      ctx.ui.notify(`Antigravity ACP (OMP adapter)\nAuth storage: ${(await authReady()) ? "configured (ACP-owned token file or macOS keychain)" : inspectAntigravityAuth().status}\nRequested permission mode: ${deps.getPermissionMode()}\nWire permission mode: ${snapshot.permissionMode}\nNative tools: ${policy.nativeTools}\nDebug tool updates: ${policy.debugToolUpdates ? "on" : "off"}\nTool routing: ${JSON.stringify([...deps.connections].map(connection => connection.toolRouting).filter(Boolean))}\nActive sessions: ${snapshot.bindings}\nConfirmed thinking: ${JSON.stringify([...deps.connections].map(connection => connection.confirmedThinking).filter(Boolean))}\nUsage: ${JSON.stringify(snapshot.metrics)}\n${JSON.stringify(snapshot.processes)}`, "info");
     } finally {
       lease.release();
     }

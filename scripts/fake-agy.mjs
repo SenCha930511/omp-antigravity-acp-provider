@@ -47,8 +47,35 @@ const toolCallUpdate = (toolCallId, patch) => ({
   ...patch,
 });
 
+const modern = process.env.FAKE_AGY_PROFILE === "cli-1.5.3";
+const agentName = process.env.FAKE_AGY_AGENT_NAME ?? "Antigravity ACP Server";
+const mcpHttpOverride = process.env.FAKE_AGY_MCP_HTTP;
 const modes = { currentModeId: "yolo", availableModes: [{ id: "yolo", name: "Yolo" }] };
 const models = { currentModelId: "gemini-3.8-flash", availableModels: [{ modelId: "gemini-3.8-flash", name: "Flash" }] };
+const modernModes = [
+  { value: "default", name: "Default" },
+  { value: "accept-edits", name: "Accept edits" },
+  { value: "plan", name: "Plan" },
+];
+const modernModels = [{ value: "gemini-3.8-flash", name: "Flash" }];
+
+function configOptions(state) {
+  return [
+    { id: "model", name: "Model", category: "model", type: "select", currentValue: state.model, options: modernModels },
+    { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: state.mode, options: modernModes },
+  ];
+}
+
+function logMode(state, method) {
+  log({ event: "mode", session: state.id, method, mode: state.mode });
+}
+
+log({
+  event: "start",
+  profile: modern ? "cli-1.5.3" : "legacy",
+  argv: process.argv.slice(2),
+  autoApproveMarker: process.env.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS ?? "",
+});
 
 function debug(text) {
   if (process.env.FAKE_AGY_DEBUG) process.stderr.write(`[fake-agy] ${text}\n`);
@@ -79,8 +106,11 @@ async function createSession(params) {
     tools: new Map(),
     cancelWaiters: [],
     cancelled: false,
+    mode: modern ? "default" : "yolo",
+    model: "gemini-3.8-flash",
   };
   sessions.set(id, state);
+  logMode(state, "session/new");
   for (const descriptor of params.mcpServers ?? []) {
     const connection = await connectMcp(descriptor);
     if (!connection) continue;
@@ -93,7 +123,9 @@ async function createSession(params) {
 }
 
 function sessionResponse(state) {
-  return { sessionId: state.id, modes, models };
+  return modern
+    ? { sessionId: state.id, configOptions: configOptions(state) }
+    : { sessionId: state.id, modes, models };
 }
 
 function ask(state, method, params) {
@@ -396,9 +428,12 @@ async function handleMessage(incoming) {
   if (incoming.method === "initialize") {
     respond(incoming.id, {
       protocolVersion: 1,
+      ...(modern ? { agentInfo: { name: agentName, title: agentName, version: "1.5.3" } } : {}),
       agentCapabilities: {
         promptCapabilities: { embeddedContext: true },
-        mcpCapabilities: { http: true },
+        ...(modern
+          ? mcpHttpOverride === undefined ? {} : { mcpCapabilities: { http: mcpHttpOverride === "true" } }
+          : { mcpCapabilities: { http: true } }),
       },
     });
     return;
@@ -413,7 +448,30 @@ async function handleMessage(incoming) {
     return;
   }
   if (incoming.method === "session/set_mode" || incoming.method === "session/set_config_option") {
-    respond(incoming.id, {});
+    if (!modern) {
+      respond(incoming.id, {});
+      return;
+    }
+    const state = sessions.get(incoming.params?.sessionId);
+    if (!state) {
+      respondError(incoming.id, -32602, "unknown session");
+      return;
+    }
+    const configId = incoming.method === "session/set_mode" ? "mode" : incoming.params?.configId;
+    const value = incoming.method === "session/set_mode" ? incoming.params?.modeId : incoming.params?.value;
+    const choices = configId === "mode" ? modernModes : configId === "model" ? modernModels : undefined;
+    if (!choices || typeof value !== "string" || !choices.some(choice => choice.value === value)) {
+      respondError(incoming.id, -32602, `invalid ${String(configId)} selection ${String(value)}`);
+      return;
+    }
+    if (configId === "mode") {
+      state.mode = value;
+      logMode(state, incoming.method);
+    } else {
+      state.model = value;
+    }
+    log({ event: "config", session: state.id, method: incoming.method, configId, value, configOptions: configOptions(state) });
+    respond(incoming.id, { configOptions: configOptions(state) });
     return;
   }
   if (incoming.method === "session/cancel") {

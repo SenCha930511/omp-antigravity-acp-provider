@@ -4,7 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { applyApiCostEstimate } from "./pricing.ts";
-import { preferNewestAcpRuntime } from "./acp-runtime-source.ts";
+import {
+  assertSelectedAcpCliLaunch,
+  preferNewestAcpRuntime,
+  resolveAcpPermissionProfile,
+  type AcpRuntimePreference,
+} from "./acp-runtime-source.ts";
 import { SessionRuntimePool } from "./runtime-pool.ts";
 import { createStructuredFingerprintMemo } from "./structured-fingerprint.ts";
 import { Diagnostics, instrumentRuntime } from "./diagnostics.ts";
@@ -102,9 +107,14 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
 
   // Loading this global extension must not start ACP or query Google.
   let readiness: Promise<void> | undefined;
-  let runtimePreference: Promise<void> | undefined;
+  let runtimePreference: Promise<AcpRuntimePreference | undefined> | undefined;
+  let selectedRuntimePreference: AcpRuntimePreference | undefined;
+  const currentPermissionProfile = () => resolveAcpPermissionProfile(selectedRuntimePreference, permissionMode);
   function prepareRuntime() {
-    runtimePreference ??= preferNewestAcpRuntime(stateDir).catch(() => undefined);
+    runtimePreference ??= preferNewestAcpRuntime(stateDir).then(preference => {
+      selectedRuntimePreference = preference;
+      return preference;
+    }).catch(() => undefined);
     readiness ??= runtimePreference.then(() => ensureAntigravityAcpReady()).catch((error: unknown) => {
       readiness = undefined;
       throw error;
@@ -138,13 +148,24 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     audit: ToolAuditSummary;
   } | undefined;
 
+  function spawnConnection(options: ConstructorParameters<typeof TierConnection>[0]): TierConnection {
+    const profile = currentPermissionProfile();
+    const env = {
+      ...process.env,
+      ...options.env,
+      OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS: profile.autoApproveProcess ? "1" : "",
+    };
+    assertSelectedAcpCliLaunch(stateDir, selectedRuntimePreference, env);
+    return createConnection({ ...options, env });
+  }
+
   const lifecycle = new OmpSessionLifecycle(id => runtimes.close(id), async id => {
     if (id) await cleanup.releaseSession(id);
   });
   const runtimes = new SessionRuntimePool<RuntimeBundleView>(() => {
     const ownedConnections = new Set<TierConnection>();
     const runtime = new AntigravityRuntime((options: ConstructorParameters<typeof TierConnection>[0]) => {
-      const connection = createConnection({
+      const connection = spawnConnection({
         ...options,
         ompNativeTools: toolPolicy.nativeTools,
         ompDebugToolUpdates: toolPolicy.debugToolUpdates,
@@ -159,7 +180,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
         ownedConnections.delete(connection);
       });
       return connection;
-    }, permissionMode, sessionStore);
+    }, currentPermissionProfile().wireMode, sessionStore);
     instrumentRuntime(runtime, diagnostics);
     return {
       runtime,
@@ -262,7 +283,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     prepareRuntime,
     () => [...(FALLBACK_MODELS as PublicCatalogModel[])],
     requireAcpAuth,
-    createConnection,
+    spawnConnection,
   );
   let initialModels = catalogStore.loadInitialOrCached(contextSettings);
 
@@ -365,7 +386,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
           const routingId = options?.sessionId;
           routing.noteStream(routingId);
           let routingFailed = false;
-          const ticket = lifecycle.capture(options?.sessionId, options?.providerSessionState);
+          const ticket = lifecycle.capture(routingId, options?.providerSessionState);
           void (async () => {
             try {
               if (options?.signal?.aborted) throw new Error("ACP request cancelled before startup");
@@ -377,11 +398,12 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
               const original = catalogStore.upstreamModels.get(model.id);
               if (!original) throw new Error(`Antigravity model was not discovered: ${model.id}. Run /antigravity-acp refresh.`);
               await lifecycle.ready(ticket);
-              const lease = runtimes.acquire(options?.sessionId);
+              const lease = runtimes.acquire(routingId);
               const { runtime, provider } = lease.value;
               try {
                 lifecycle.attach(ticket, lease.value);
-                const stream = provider.streamSimple(selectRuntimeModel(original, options?.reasoning), routedContext, options);
+                await runtime.setPermissionMode(currentPermissionProfile().wireMode);
+                const stream = provider.streamSimple(selectRuntimeModel(original, options?.reasoning), routedContext, { ...options, sessionId: routingId });
                 for await (const event of stream) {
                   const message = event.message ?? event.partial;
                   if (message?.usage) applyApiCostEstimate(model.id, message.usage, message.timestamp ?? Date.now());

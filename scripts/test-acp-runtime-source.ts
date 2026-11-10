@@ -4,11 +4,12 @@
 // runtime. Everything runs against stub binaries and fixture homes; no
 // network, no real agy, no ACP session.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { preferNewestAcpRuntime } from "../extension/acp-runtime-source.ts";
+import { assertSelectedAcpCliLaunch, preferNewestAcpRuntime } from "../extension/acp-runtime-source.ts";
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "acp-runtime-source-"));
 const bin = path.join(work, "bin");
@@ -55,7 +56,8 @@ function freshEnv(): NodeJS.ProcessEnv {
 // A newer CLI takes over through a generated executable wrapper and records
 // the decision.
 {
-  stubAgy("echo 9.9.9");
+  const argvRecord = path.join(work, "agy-argv.txt");
+  stubAgy(`if [ "$1" = "acp" ] && [ "$2" = "--version" ]; then\n  echo 9.9.9\n  exit 0\nfi\nprintf '%s\\n' "$@" > '${argvRecord}'`);
   setManagedVersion("1.4.5");
   const env = freshEnv();
   const stateDir = freshStateDir();
@@ -72,6 +74,36 @@ function freshEnv(): NodeJS.ProcessEnv {
   const record = JSON.parse(fs.readFileSync(path.join(stateDir, "acp-runtime-source.json"), "utf8"));
   assert.equal(record.source, "cli");
   assert.equal(record.cliVersion, "9.9.9");
+
+  for (const marker of ["1", undefined, ""]) {
+    const childEnv = freshEnv();
+    if (marker !== undefined) childEnv.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS = marker;
+    fs.rmSync(argvRecord, { force: true });
+    const result = spawnSync(wrapper, ["--fixture-argument"], { env: childEnv, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const argv = fs.readFileSync(argvRecord, "utf8").trimEnd().split("\n");
+    assert.equal(argv.filter(value => value === "--dangerously-skip-permissions").length, marker === "1" ? 1 : 0,
+      `dangerous flag count with marker ${JSON.stringify(marker)}`);
+    assert.deepEqual(argv.slice(0, 2), ["acp", "--app_data_dir=antigravity-acp"]);
+    assert.equal(argv.at(-1), "--fixture-argument");
+  }
+  assert.doesNotThrow(() => assertSelectedAcpCliLaunch(stateDir, preference, env));
+  assert.throws(() => assertSelectedAcpCliLaunch(stateDir, preference, { ...env, AGY_ACP_BIN: "/usr/bin/false" }), /not selected by AGY_ACP_BIN/);
+  fs.writeFileSync(wrapper, "#!/bin/sh\nexit 0\n");
+  assert.throws(() => assertSelectedAcpCliLaunch(stateDir, preference, env), /changed/);
+  fs.rmSync(wrapper);
+  assert.throws(() => assertSelectedAcpCliLaunch(stateDir, preference, env), /wrapper is missing, changed, not executable/);
+}
+
+// A record-write failure must abort CLI selection before AGY_ACP_BIN is set.
+{
+  stubAgy("echo 9.9.9");
+  setManagedVersion("1.4.5");
+  const env = freshEnv();
+  const stateDir = freshStateDir();
+  fs.mkdirSync(path.join(stateDir, "acp-runtime-source.json"));
+  await assert.rejects(preferNewestAcpRuntime(stateDir, env, home));
+  assert.equal(env.AGY_ACP_BIN, undefined);
 }
 
 // An equal or older CLI keeps the managed runtime.

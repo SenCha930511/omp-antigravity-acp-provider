@@ -2,7 +2,7 @@
 // OMP effort -> vendored advertised legacy ID -> official model/thought selectors.
 import { AntigravityAcpConnection } from "./vendor/pi-antigravity-acp-provider/src/acp/connection.ts";
 import { choices, resolveSelection, selector } from "./selectors.ts";
-import { installSessionRouting, type NativeToolMode } from "./tool-routing.ts";
+import { installSessionRouting, normalizeInitializeResponse, type NativeToolMode } from "./tool-routing.ts";
 import { showAcpUpdate } from "./activity-presentation.ts";
 import { alignContextTokens, applyCompactionChunk, applyCompactionUpdate, isTerminalCompaction, type AcpCompactionNotice, type AcpCompactionRecord } from "./acp-compaction.ts";
 import { AgentNoticeFilter } from "./agent-notices.ts";
@@ -141,6 +141,10 @@ export class TierConnection extends AntigravityAcpConnection {
         this.toolRouting!.channel = advanced ? "system-append" : "legacy-prompt";
       });
     }
+  }
+
+  async initialize(signal?: AbortSignal) {
+    return normalizeInitializeResponse(await super.initialize(signal));
   }
 
   configureUsage(mode: "auto" | "off") {
