@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { registerOmpAdapter, keychain, logoutFollow } from "../extension/index.ts";
+import { registerOmpAdapter, keychain, logoutFollow, secretService } from "../extension/index.ts";
 import { AntigravityRuntime } from "../extension/runtime.mjs";
 import { SessionRuntimePool } from "../extension/runtime-pool.ts";
 
@@ -18,6 +18,8 @@ process.env.GEMINI_HOME = geminiHome;
 process.env.AGY_ACP_BIN = process.execPath;
 const originalPresent = keychain.present;
 const originalRemove = keychain.remove;
+const originalSecretPresent = secretService.present;
+const originalSecretRemove = secretService.remove;
 const originalLoginGoogle = AntigravityRuntime.prototype.loginGoogle;
 const originalPoolValues = SessionRuntimePool.prototype.values;
 const originalDelayMs = logoutFollow.delayMs;
@@ -30,6 +32,10 @@ let command: any;
 try {
   let keychainEntry = true;
   let flushOnce = false;
+  // This fixture exercises the macOS keychain path on every host; keep the
+  // Linux Secret Service probe away from the real user keyring.
+  secretService.present = async () => undefined;
+  secretService.remove = async () => undefined;
   keychain.present = async () => { keychainCalls.push("present"); return keychainEntry; };
   keychain.remove = async () => {
     keychainCalls.push("remove");
@@ -84,7 +90,9 @@ try {
   assert.match(account, /Antigravity ACP account/);
   assert.match(account, /Google account: signed in \(token in macOS keychain; email not read\)/);
   assert.match(account, /Authentication: missing/);
-  assert.match(account, /Credential storage \(preflight\): server default \(expected: no refreshable token file to reuse\)/);
+  // The preflight wording is platform-specific: macOS reports the expected
+  // missing keychain entry, while Linux keeps the server default.
+  assert.match(account, /Credential storage \(preflight\): server default \((?:expected: no refreshable token file to reuse|secure file)\)/);
   assert.match(account, /OMP marker record: present, authorized 2009-02-13T23:31:30\.123Z as marker@example\.com \(non-secret managed marker\)/);
   assert.match(account, /OMP auth source: local store \(oauth marker\)/);
   assert.match(account, /Saved ACP sessions: 1/);
@@ -245,6 +253,8 @@ try {
 } finally {
   keychain.present = originalPresent;
   keychain.remove = originalRemove;
+  secretService.present = originalSecretPresent;
+  secretService.remove = originalSecretRemove;
   AntigravityRuntime.prototype.loginGoogle = originalLoginGoogle;
   SessionRuntimePool.prototype.values = originalPoolValues;
   logoutFollow.delayMs = originalDelayMs;

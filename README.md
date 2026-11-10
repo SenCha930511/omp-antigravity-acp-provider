@@ -64,6 +64,8 @@ The provider registers at startup. Restart every running OMP process so they agr
 
 Run `/login`, choose **Google Antigravity (ACP)**, and complete Google's consent in the browser. On a headless machine the provider relays the callback URL.
 
+On Linux the `agy` CLI stores the OAuth token in the Secret Service keyring (`service=gemini`, `username=antigravity`), not in `acp_token.json`. The adapter reads that item with `secret-tool` when the token file is absent, so install `libsecret-tools` (Fedora: `libsecret`) to make login detection work. `/antigravity-acp logout` and the follow-up to OMP's `/logout` clear the same item.
+
 ### 5. Load models and pick one
 
 ```text
