@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Detect the Linux Secret Service keyring login. The `agy` CLI stores its Google OAuth token under `service=gemini`, `username=antigravity`; the adapter now reads that item with `secret-tool` when no `acp_token.json` exists, so `authReady()` and `/antigravity-acp account` no longer report `missing` after a successful login and inference is not rejected as signed out. The same item is cleared on `/antigravity-acp logout`, the OMP `/logout` follow-up, and before a fresh `/login`, with a fail-closed refusal when removal cannot be confirmed. Requires `secret-tool` (libsecret) on Linux; when it is unavailable the previous file/API-key behavior is unchanged.
+
 ## 0.1.42 — 2026-11-10
 
 - Preserve the selected CLI profile when `AGY_ACP_BIN` already points at the adapter's own generated wrapper. A second extension instance now re-detects the CLI version and refreshes the runtime record instead of treating the wrapper as an explicit environment override, so CLI 1.5.3 `yolo` remains mapped to wire `default` plus `--dangerously-skip-permissions` and `auto_edit` remains `accept-edits`. A non-wrapper explicit `AGY_ACP_BIN` still keeps its original behavior.

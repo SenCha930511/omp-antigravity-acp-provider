@@ -38,13 +38,15 @@ test("inference refuses to start ACP when the local Google login is absent", asy
   const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-preflight-"));
   const geminiHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-preflight-home-"));
   const previousHome = process.env.GEMINI_HOME, previousKey = process.env.GEMINI_API_KEY;
-  const { keychain } = await import("../extension/auth-sync.ts");
+  const { keychain, secretService } = await import("../extension/auth-sync.ts");
   const previousPresent = keychain.present;
+  const previousSecretPresent = secretService.present;
   let provider: any, spawns = 0;
   try {
     process.env.GEMINI_HOME = geminiHome;
     delete process.env.GEMINI_API_KEY;
     keychain.present = async () => false;
+    secretService.present = async () => false;
     await registerOmpAdapter({ on: () => {}, registerTool() {},
       registerProvider: (_name: string, value: any) => { provider = value; },
       registerCommand() {} }, state, () => { spawns++; throw new Error("ACP must not spawn"); });
@@ -55,6 +57,7 @@ test("inference refuses to start ACP when the local Google login is absent", asy
     assert.equal(spawns, 0);
   } finally {
     keychain.present = previousPresent;
+    secretService.present = previousSecretPresent;
     if (previousHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = previousHome;
     if (previousKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previousKey;
     await fs.rm(state, { recursive: true, force: true });

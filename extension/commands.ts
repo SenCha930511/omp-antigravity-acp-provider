@@ -1,5 +1,5 @@
-import { describeCredentialStorage, inspectAntigravityAuth, savePermissionMode } from "./runtime.mjs";
-import { antigravityAccountEmail, authReady, formatLogoutSummary, keychain, ompCredentialSummary, type OmpAuthCoordinator, type OmpCommandContext } from "./auth-sync.ts";
+import { describeCredentialStorage, savePermissionMode } from "./runtime.mjs";
+import { antigravityAccountEmail, formatLogoutSummary, inspectAcpAuth, keychain, ompCredentialSummary, type OmpAuthCoordinator, type OmpCommandContext } from "./auth-sync.ts";
 import { parseNativeToolMode, type NativeToolMode } from "./tool-routing.ts";
 import { saveToolPolicy, type ToolPolicy } from "./tool-policy.ts";
 import { DEFAULT_USAGE_MODE, updateContextSettings, resolveContextOptions, saveContextSettings, type ContextSettings } from "./context-settings.ts";
@@ -350,7 +350,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         lease.release();
       }
       deps.auth.noteLoginSucceeded?.();
-      const auth = inspectAntigravityAuth();
+      const auth = await inspectAcpAuth();
       const email = antigravityAccountEmail();
       ctx.ui.notify(`Antigravity Google login finished${email ? ` as ${email}` : ""} — fresh sign-in; ACP auth: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}.`, "info");
       return;
@@ -358,15 +358,15 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
 
     if (command === "logout") {
       if (value) throw new Error("Usage: /antigravity-acp logout");
-      const { keychainRemoved, ompMarker } = await deps.auth.performCommandLogout(ctx);
+      const { keychainRemoved, keyringRemoved, ompMarker } = await deps.auth.performCommandLogout(ctx);
       // Keep the confirmation terse; /antigravity-acp account shows the details.
-      ctx.ui.notify(formatLogoutSummary({ keychainRemoved, ompMarker }), "info");
+      ctx.ui.notify(formatLogoutSummary({ keychainRemoved, keyringRemoved, ompMarker }), "info");
       return;
     }
 
     if (command === "account") {
       if (value) throw new Error("Usage: /antigravity-acp account");
-      const auth = inspectAntigravityAuth();
+      const auth = await inspectAcpAuth();
       let ompSource: string | undefined;
       try { ompSource = ctx?.modelRegistry?.authStorage?.keys?.describe?.("antigravity-acp", sessionIdOf(ctx)); } catch { /* host version dependent */ }
       // Reading saved state needs no live runtime; show live numbers only
@@ -382,7 +382,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       // fields, with OMP-specific lines in the same style.
       ctx.ui.notify([
         "Antigravity ACP account",
-        `Google account: ${antigravityAccountEmail() ?? ((await keychain.present()) === true ? "signed in (token in macOS keychain; email not read)" : "not signed in")}`,
+        `Google account: ${antigravityAccountEmail() ?? ((await keychain.present()) === true ? "signed in (token in macOS keychain; email not read)" : auth.keyring ? "signed in (token in system keyring; email not read)" : "not signed in")}`,
         `Authentication: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}`,
         `Credential storage (preflight): ${describeCredentialStorage()}`,
         `OMP marker record: ${marker}`,
@@ -457,7 +457,9 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       }
 
       const policy = deps.getToolPolicy();
-      ctx.ui.notify(`Antigravity ACP (OMP adapter)\nAuth storage: ${(await authReady()) ? "configured (ACP-owned token file or macOS keychain)" : inspectAntigravityAuth().status}\nRequested permission mode: ${deps.getPermissionMode()}\nWire permission mode: ${snapshot.permissionMode}\nNative tools: ${policy.nativeTools}\nDebug tool updates: ${policy.debugToolUpdates ? "on" : "off"}\nTool routing: ${JSON.stringify([...deps.connections].map(connection => connection.toolRouting).filter(Boolean))}\nActive sessions: ${snapshot.bindings}\nConfirmed thinking: ${JSON.stringify([...deps.connections].map(connection => connection.confirmedThinking).filter(Boolean))}\nUsage: ${JSON.stringify(snapshot.metrics)}\n${JSON.stringify(snapshot.processes)}`, "info");
+      const auth = await inspectAcpAuth();
+      const authConfigured = auth.status === "api-key-env" || auth.status === "oauth-refreshable" || (await keychain.present()) === true;
+      ctx.ui.notify(`Antigravity ACP (OMP adapter)\nAuth storage: ${authConfigured ? "configured (ACP-owned token file, system keyring or macOS keychain)" : auth.status}\nRequested permission mode: ${deps.getPermissionMode()}\nWire permission mode: ${snapshot.permissionMode}\nNative tools: ${policy.nativeTools}\nDebug tool updates: ${policy.debugToolUpdates ? "on" : "off"}\nTool routing: ${JSON.stringify([...deps.connections].map(connection => connection.toolRouting).filter(Boolean))}\nActive sessions: ${snapshot.bindings}\nConfirmed thinking: ${JSON.stringify([...deps.connections].map(connection => connection.confirmedThinking).filter(Boolean))}\nUsage: ${JSON.stringify(snapshot.metrics)}\n${JSON.stringify(snapshot.processes)}`, "info");
     } finally {
       lease.release();
     }

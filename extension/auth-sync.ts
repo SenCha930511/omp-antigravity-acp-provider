@@ -3,7 +3,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { clearAntigravityCredentials, hasAntigravityAuth, resolveAntigravityAcpDirectory } from "./runtime.mjs";
+import { clearAntigravityCredentials, inspectAntigravityAuth, resolveAntigravityAcpDirectory } from "./runtime.mjs";
+import { createSecretService, runSecretTool } from "./secret-service.ts";
 import type { TierConnection } from "./tier-connection.ts";
 
 export const MARKER = "pi-antigravity-acp:managed-by-antigravity";
@@ -57,6 +58,11 @@ export function createKeychain(run: (args: string[]) => Promise<void>, platform:
 
 export const keychain = createKeychain(runSecurity);
 
+// Linux stores the agy CLI's OAuth token in the Secret Service keyring. The
+// ACP server reads that item before its file store, so it is a valid login
+// even when the adapter never sees an acp_token.json.
+export const secretService = createSecretService(runSecretTool);
+
 function emailFromTokenJson(raw: string): string | undefined {
   try {
     const parsed = JSON.parse(raw) as { id_token?: unknown } | null;
@@ -79,22 +85,62 @@ export function antigravityAccountEmail(): string | undefined {
 
 // Timing knobs for following OMP-side logouts; mutable so offline tests can
 // run the delayed detection without real waits.
-export const logoutFollow = { delayMs: 500, retryMs: 15_000 };
+export const logoutFollow = { delayMs: 500, retryMs: 15_000, removalRetryMs: 400 };
 
 // Shared wording for both logout confirmations (direct command and the
 // follow-up that finishes a logout OMP started).
-export function formatLogoutSummary(options: { keychainRemoved: boolean | undefined; ompMarker?: "removed" | "absent" | "unavailable"; followed?: boolean }): string {
+export function formatLogoutSummary(options: {
+  keychainRemoved: boolean | undefined;
+  keyringRemoved?: boolean | undefined;
+  ompMarker?: "removed" | "absent" | "unavailable";
+  followed?: boolean;
+}): string {
   const cleared = ["Google credentials", "saved ACP sessions"];
   if (options.keychainRemoved === true) cleared.push("the macOS keychain entry");
+  if (options.keyringRemoved === true) cleared.push("the system keyring entry");
   if (options.ompMarker === "removed") cleared.push("the OMP marker record");
   const list = cleared.slice(0, -1).join(", ") + " and " + cleared[cleared.length - 1];
   return `${options.followed ? "Antigravity ACP: finished the logout OMP started — " : "Antigravity ACP: logged out — "}${list} cleared.` +
     (options.ompMarker === "unavailable" ? " The OMP marker record could not be removed; run /logout to drop it." : "") +
-    (options.keychainRemoved === false ? " The macOS keychain entry was not present or not removable." : "");
+    (options.keychainRemoved === false ? " The macOS keychain entry was not present or not removable." : "") +
+    (options.keyringRemoved === false ? " The system keyring entry was not present or not removable." : "");
+}
+
+export type AcpAuthStatus = "api-key-env" | "oauth-refreshable" | "configured-not-authenticated" | "corrupt" | "missing";
+
+export interface AcpAuthHealth {
+  status: AcpAuthStatus;
+  authType?: string;
+  tokenFile: boolean;
+  settingsFile: boolean;
+  /** True when the login was found in the Linux Secret Service keyring. */
+  keyring?: boolean;
+}
+
+// The ACP server reads the agy CLI's Linux Secret Service item (`keyringAuth`)
+// before its file store. A keyring token is therefore a valid local login even
+// though this adapter never sees an acp_token.json on Linux.
+export async function inspectAcpAuth(
+  directory = resolveAntigravityAcpDirectory(),
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<AcpAuthHealth> {
+  const health = inspectAntigravityAuth(directory, env);
+  if (health.status === "api-key-env" || health.status === "oauth-refreshable") return health;
+  if ((await secretService.present()) === true) {
+    return {
+      ...health,
+      status: "oauth-refreshable",
+      authType: health.authType ?? "oauth-personal",
+      keyring: true,
+    };
+  }
+  return health;
 }
 
 export async function authReady(): Promise<boolean> {
-  return hasAntigravityAuth() || (await keychain.present()) === true;
+  const health = await inspectAcpAuth();
+  if (health.status === "api-key-env" || health.status === "oauth-refreshable") return true;
+  return (await keychain.present()) === true;
 }
 
 export interface OmpCommandContext {
@@ -151,6 +197,11 @@ export async function removeOmpCredentialRecord(ctx: OmpCommandContext | undefin
   } catch { return "unavailable"; }
 }
 
+export interface CredentialRemoval {
+  keychainRemoved: boolean | undefined;
+  keyringRemoved: boolean | undefined;
+}
+
 export interface AuthCoordinatorDeps {
   pi: {
     on: (name: string, handler: (event: unknown, ctx: OmpCommandContext) => unknown) => void;
@@ -184,21 +235,33 @@ export class OmpAuthCoordinator {
     } catch { return undefined; }
   }
 
-  // A dying ACP server can flush its in-memory token back to the keychain,
-  // racing a plain deletion and restoring the previous account. Wait for this
-  // adapter's server processes to fully exit first, then verify the removal.
-  async removeKeychainCredentialDurably(): Promise<boolean | undefined> {
+  // A dying ACP server can flush its in-memory token back to the keychain or
+  // keyring, racing a plain deletion and restoring the previous account. Wait
+  // for this adapter's server processes to fully exit first, then verify the
+  // removal. Each store reports true when it is confirmed empty, false when it
+  // is still present, and undefined when it does not apply to this platform.
+  async removeStoredCredentialsDurably(): Promise<CredentialRemoval> {
     const pending = [...this.deps.connections].map(connection => connection.process.exited.catch(() => undefined));
     if (pending.length > 0) {
       await Promise.race([Promise.allSettled(pending), delay(10_000)]);
     }
+    const result: CredentialRemoval = { keychainRemoved: undefined, keyringRemoved: undefined };
     for (let attempt = 0; attempt < 3; attempt++) {
-      if ((await keychain.present()) === false) return true;
-      const removed = await keychain.remove();
-      if (removed !== true) return removed;
-      await delay(400);
+      const keychainPresent = await keychain.present();
+      const keyringPresent = await secretService.present();
+      if (keychainPresent === undefined && keyringPresent === undefined) return result;
+      if (keychainPresent === false) result.keychainRemoved = true;
+      if (keyringPresent === false) result.keyringRemoved = true;
+      if (keychainPresent !== true && keyringPresent !== true) return result;
+      if (keychainPresent === true) result.keychainRemoved = await keychain.remove();
+      if (keyringPresent === true) result.keyringRemoved = await secretService.remove();
+      await delay(logoutFollow.removalRetryMs);
     }
-    return (await keychain.present()) === false;
+    const keychainPresent = await keychain.present();
+    const keyringPresent = await secretService.present();
+    if (keychainPresent !== undefined) result.keychainRemoved = keychainPresent === false;
+    if (keyringPresent !== undefined) result.keyringRemoved = keyringPresent === false;
+    return result;
   }
 
   // /login must mean a fresh Google sign-in: drop stored credentials (and this
@@ -229,14 +292,16 @@ export class OmpAuthCoordinator {
     // mappings. OMP retains its transcript for a fresh backend reconstruction.
     await this.deps.logoutAllRuntimes();
     clearAntigravityCredentials();
-    // The old keychain entry must be gone before a new sign-in can start; an
-    // unconfirmed removal refuses the login instead of silently reusing it.
-    if (await this.removeKeychainCredentialDurably() === false) {
-      throw new Error("Unable to confirm removal of the Antigravity keychain entry");
+    // The old keychain/keyring entry must be gone before a new sign-in can
+    // start; an unconfirmed removal refuses the login instead of silently
+    // reusing it.
+    const removal = await this.removeStoredCredentialsDurably();
+    if (removal.keychainRemoved === false || removal.keyringRemoved === false) {
+      throw new Error("Unable to confirm removal of the Antigravity credential store entry");
     }
   }
 
-  async performCommandLogout(ctx: OmpCommandContext): Promise<{ keychainRemoved: boolean | undefined; ompMarker: "removed" | "absent" | "unavailable" }> {
+  async performCommandLogout(ctx: OmpCommandContext): Promise<{ keychainRemoved: boolean | undefined; keyringRemoved: boolean | undefined; ompMarker: "removed" | "absent" | "unavailable" }> {
     if (this.deps.isPoolBusy()) {
       throw new Error("Wait for active Antigravity requests to finish before logging out.");
     }
@@ -246,7 +311,7 @@ export class OmpAuthCoordinator {
     this.followRetry = undefined;
     await this.deps.logoutAllRuntimes();
     await this.deps.closeAllRuntimes();
-    const keychainRemoved = await this.removeKeychainCredentialDurably();
+    const { keychainRemoved, keyringRemoved } = await this.removeStoredCredentialsDurably();
     // Removing the marker ourselves must not trigger the follow-up logout.
     this.selfLogout = true;
     let ompMarker: "removed" | "absent" | "unavailable";
@@ -265,7 +330,7 @@ export class OmpAuthCoordinator {
       this.apiKeyFallback = false;
       this.deps.onSyncProvider();
     }
-    return { keychainRemoved, ompMarker };
+    return { keychainRemoved, keyringRemoved, ompMarker };
   }
 
   private async finishFollowedLogout(ctx: OmpCommandContext): Promise<void> {
@@ -284,12 +349,13 @@ export class OmpAuthCoordinator {
     await this.deps.logoutAllRuntimes();
     await this.deps.closeAllRuntimes();
     // A quick re-login can restore the marker while the steps above await;
-    // a restored or unknown marker keeps the new keychain entry untouched.
+    // a restored or unknown marker keeps the new keychain/keyring entry
+    // untouched.
     if (this.ompMarkerStored(this.activeContext ?? activeCtx) !== false) return;
-    const keychainRemoved = await this.removeKeychainCredentialDurably();
+    const { keychainRemoved, keyringRemoved } = await this.removeStoredCredentialsDurably();
     // Keep the confirmation terse; /antigravity-acp account shows the details.
     try {
-      (this.activeContext ?? activeCtx)?.ui?.notify?.(formatLogoutSummary({ keychainRemoved, followed: true }), "info");
+      (this.activeContext ?? activeCtx)?.ui?.notify?.(formatLogoutSummary({ keychainRemoved, keyringRemoved, followed: true }), "info");
     } catch { /* the host UI may already be gone */ }
   }
 
