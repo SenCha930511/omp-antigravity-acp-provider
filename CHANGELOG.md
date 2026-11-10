@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.41 — 2026-11-10
+
+- Adapt permission negotiation to the official CLI ACP 1.5.3 vocabulary. `auto_edit` maps to `accept-edits`, while `yolo` selects wire mode `default` and launches through the CLI's official `--dangerously-skip-permissions` flag. Managed ACP 1.4.5 keeps its native `auto_edit` and `yolo` modes, explicit `AGY_ACP_BIN` stays untouched, and a mode change recreates the runtime so auto-approval cannot leak into a later request.
+- Restore OMP tools when CLI ACP 1.5.3 omits `mcpCapabilities` despite supporting HTTP MCP discovery and `tools/list`. Normalization applies only to the verified official 1.5.3+ identity and preserves explicit `http: false` and unknown runtimes.
+- Harden CLI source selection and wrapper validation, preserve the selected routing session ID, report requested and wire permission modes separately, and add offline plus no-inference live compatibility probes.
+
 ## 0.1.40 — 2026-11-10
 
 - Accept the official Antigravity ACP 1.5.3 agent name `Antigravity ACP Server` alongside `antigravity-acp`. Disabled native-tool mode still requires version 1.4.1 or newer and `systemPrompt.append`, sends `enabledTools: []`, and rejects unknown identities. This restores hard native-tool filtering when OMP selects the 1.5.3 CLI server.
