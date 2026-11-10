@@ -33,6 +33,15 @@ test("strict mode filters built-ins but retains MCP configuration and existing m
   assert.equal(original._meta.antigravity.systemPrompt.append, "Existing instructions");
 });
 
+test("official ACP 1.5.3 display name applies disabled routing", () => {
+  const official153 = { agentInfo: { name: "Antigravity ACP Server", version: "1.5.3" },
+    agentCapabilities: { _meta: { antigravity: { systemPrompt: { append: true } } } } };
+  assert.equal(supportsSessionRouting(official153), true);
+  const result = sessionRoutingRequest(request, official153, "disabled");
+  assert.deepEqual(result._meta.antigravity.enabledTools, []);
+  assert.match(result._meta.antigravity.systemPrompt.append, /native tools are disabled/);
+});
+
 test("prefer mode explicitly clears an inherited strict allowlist", () => {
   const result = sessionRoutingRequest({ ...request, _meta: { antigravity: { enabledTools: [] } } }, initialize, "prefer");
   const json = JSON.parse(JSON.stringify(result));
