@@ -48,6 +48,14 @@ interface RecordItem {
   record: HistoryRecord;
 }
 
+interface HistoryMetrics {
+  jsonBytePrefix: number[];
+  imageTextBytePrefix: number[];
+  originalDigitBytePrefix: number[];
+  attachmentCountPrefix: number[];
+  localDigitBytePrefix: number[];
+}
+
 // The official harness applies a 64,000-token per-step conversion limit,
 // independently of the model window. Its overflow path keeps only the first
 // 192,000 UTF-8 bytes. Reserve room for USER_REQUEST/time metadata added by ACP;
@@ -215,6 +223,104 @@ function assembleStep(
   return step;
 }
 
+function prepareHistoryMetrics(items: readonly RecordItem[]): HistoryMetrics {
+  const jsonBytePrefix = [0];
+  const imageTextBytePrefix = [0];
+  const originalDigitBytePrefix = [0];
+  const attachmentCountPrefix = [0];
+  const localDigitBytePrefix = [0];
+  let attachmentCount = 0;
+  for (const item of items) {
+    let originalDigits = 0;
+    if (item.images.length && Array.isArray(item.record.content)) {
+      for (const attachment of item.imageAttachments) {
+        originalDigits += String(attachment).length;
+        localDigitBytePrefix.push(localDigitBytePrefix.at(-1)! + String(attachmentCount).length);
+        attachmentCount++;
+      }
+    }
+    jsonBytePrefix.push(jsonBytePrefix.at(-1)! + Buffer.byteLength(item.json, "utf8"));
+    imageTextBytePrefix.push(imageTextBytePrefix.at(-1)! + promptTextBytes(item.images));
+    originalDigitBytePrefix.push(originalDigitBytePrefix.at(-1)! + originalDigits);
+    attachmentCountPrefix.push(attachmentCount);
+  }
+  return { jsonBytePrefix, imageTextBytePrefix, originalDigitBytePrefix, attachmentCountPrefix, localDigitBytePrefix };
+}
+
+function historyRangeTextBytes(metrics: HistoryMetrics, start: number, end: number): number {
+  if (start === end) return 0;
+  const attachmentStart = metrics.attachmentCountPrefix[start]!;
+  const attachmentEnd = metrics.attachmentCountPrefix[end]!;
+  return HISTORY_ENVELOPE_BYTES
+    + metrics.jsonBytePrefix[end]! - metrics.jsonBytePrefix[start]!
+    + end - start - 1
+    + metrics.imageTextBytePrefix[end]! - metrics.imageTextBytePrefix[start]!
+    + metrics.localDigitBytePrefix[attachmentEnd - attachmentStart]!
+    - (metrics.originalDigitBytePrefix[end]! - metrics.originalDigitBytePrefix[start]!);
+}
+
+function planHistorySteps(
+  instructionsBlock: TransferBlock | undefined,
+  items: readonly RecordItem[],
+  tailBlocks: TransferBlock[],
+): { prompt: TransferBlock[]; seedSteps: TransferBlock[][] } {
+  const metrics = prepareHistoryMetrics(items);
+  const instructionBytes = instructionsBlock ? promptTextBytes([instructionsBlock]) : 0;
+  const seedTail: TransferBlock[] = [{ type: "text", text: SEED_ACK_TEXT }];
+  const seedTailBytes = promptTextBytes(seedTail);
+  const spans: { start: number; end: number }[] = [];
+  let seedInstructions = instructionsBlock;
+  let pendingInstructions = instructionsBlock;
+  let finalInstructions: TransferBlock | undefined;
+  if (instructionBytes + seedTailBytes > ACP_STEP_TEXT_BYTES) {
+    finalInstructions = pendingInstructions;
+    seedInstructions = undefined;
+    pendingInstructions = undefined;
+  }
+  let cursor = 0;
+  while (cursor < items.length || pendingInstructions) {
+    const remainingInstructions = finalInstructions ?? pendingInstructions;
+    const remaining = assembleStep(remainingInstructions, items.slice(cursor), tailBlocks);
+    if (promptTextBytes(remaining) <= ACP_STEP_TEXT_BYTES) break;
+    const start = cursor;
+    const chunkInstructions = pendingInstructions;
+    const chunkInstructionBytes = chunkInstructions ? instructionBytes : 0;
+    while (cursor < items.length) {
+      const predicted = chunkInstructionBytes
+        + historyRangeTextBytes(metrics, start, cursor + 1) + seedTailBytes;
+      if (predicted <= ACP_STEP_TEXT_BYTES) {
+        cursor++;
+        continue;
+      }
+      const rejected = assembleStep(chunkInstructions, items.slice(start, cursor + 1), seedTail);
+      const actual = promptTextBytes(rejected);
+      if (actual !== predicted || actual <= ACP_STEP_TEXT_BYTES) {
+        throw new Error(`History chunk planner predicted ${predicted} bytes for a rejected candidate but rendered ${actual}`);
+      }
+      break;
+    }
+    if (!chunkInstructions && cursor === start) {
+      checkStepTextBytes(promptTextBytes(assembleStep(undefined, [items[start]!], seedTail)));
+      throw new Error("History chunk planner made no progress");
+    }
+    spans.push({ start, end: cursor });
+    pendingInstructions = undefined;
+  }
+  const seedSteps = spans.map((span, index) => {
+    const stepInstructions = index === 0 ? seedInstructions : undefined;
+    const predicted = (stepInstructions ? instructionBytes : 0)
+      + historyRangeTextBytes(metrics, span.start, span.end) + seedTailBytes;
+    const step = assembleStep(stepInstructions, items.slice(span.start, span.end), seedTail);
+    const actual = promptTextBytes(step);
+    if (actual !== predicted) throw new Error(`History chunk planner predicted ${predicted} bytes but rendered ${actual}`);
+    checkStepTextBytes(actual);
+    return step;
+  });
+  const prompt = assembleStep(finalInstructions ?? pendingInstructions, items.slice(cursor), tailBlocks);
+  checkStepTextBytes(promptTextBytes(prompt));
+  return { prompt, seedSteps };
+}
+
 interface RequestSplit {
   seedSteps: TransferBlock[][];
   tailBlocks: TransferBlock[];
@@ -328,9 +434,22 @@ function historyRecordItems(
   images: TransferBlock[],
   imageAttachments: number[],
 ): RecordItem[] {
-  const make = (candidate: HistoryRecord): RecordItem => ({
-    json: serializeRecord(candidate), images, imageAttachments, record: candidate,
-  });
+  const make = (candidate: HistoryRecord, itemImages: TransferBlock[] = images,
+    attachments: number[] = imageAttachments, json?: string): RecordItem => {
+    const referenced = new Set<number>();
+    let referenceCount = 0;
+    if (Array.isArray(candidate.content)) for (const block of candidate.content) {
+      if (block.type === "image" && typeof block.attachment === "number") {
+        referenceCount++;
+        referenced.add(block.attachment);
+      }
+    }
+    if (itemImages.length !== attachments.length * 2 || referenceCount !== attachments.length || referenced.size !== attachments.length ||
+      attachments.some(attachment => !Number.isSafeInteger(attachment) || attachment < 0 || !referenced.has(attachment))) {
+      throw new Error("Historical image attachments do not match their content or data");
+    }
+    return { json: json ?? serializeRecord(candidate), images: itemImages, imageAttachments: attachments, record: candidate };
+  };
   try {
     return [make(record)];
   } catch (error) {
@@ -360,7 +479,7 @@ function historyRecordItems(
             chunk = takeTextChunk(rest, limit);
           }
         }
-        chunks.push({ json, images: [], imageAttachments: [], record: candidate });
+        chunks.push(make(candidate, [], [], json));
         rest = rest.slice(chunk.length);
       }
       return chunks;
@@ -422,12 +541,7 @@ function historyRecordItems(
           partAttachments.push(block.attachment);
         }
         const candidate = { ...record, content: part };
-        chunks.push({
-          json: serializeRecord(candidate),
-          images: partImages,
-          imageAttachments: partAttachments,
-          record: candidate,
-        });
+        chunks.push(make(candidate, partImages, partAttachments));
       }
       return chunks;
     }
@@ -539,41 +653,9 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
   let prompt = assembleStep(instructionsBlock, recordItems, tailBlocks);
   const historySeedSteps: TransferBlock[][] = [];
   if (promptTextBytes(prompt) > ACP_STEP_TEXT_BYTES) {
-    const seedTail: TransferBlock[] = [{ type: "text", text: SEED_ACK_TEXT }];
-    let pendingInstructions = instructionsBlock;
-    let finalInstructions: TransferBlock | undefined;
-    if (pendingInstructions && promptTextBytes(assembleStep(pendingInstructions, [], seedTail)) > ACP_STEP_TEXT_BYTES) {
-      // Instructions that cannot fit beside a seed acknowledgement stay in
-      // the final prompt; history seed steps can still be sent without them.
-      finalInstructions = pendingInstructions;
-      pendingInstructions = undefined;
-    }
-    let cursor = 0;
-    while (cursor < recordItems.length || pendingInstructions) {
-      const remainingInstructions = finalInstructions ?? pendingInstructions;
-      const remaining = assembleStep(remainingInstructions, recordItems.slice(cursor), tailBlocks);
-      if (promptTextBytes(remaining) <= ACP_STEP_TEXT_BYTES) break;
-      const chunkItems: RecordItem[] = [];
-      const chunkInst = pendingInstructions;
-      while (cursor < recordItems.length) {
-        const candidate = assembleStep(chunkInst, [...chunkItems, recordItems[cursor]!], seedTail);
-        if (promptTextBytes(candidate) <= ACP_STEP_TEXT_BYTES) {
-          chunkItems.push(recordItems[cursor]!);
-          cursor++;
-        } else {
-          break;
-        }
-      }
-      if (!chunkInst && chunkItems.length === 0) {
-        checkStepTextBytes(promptTextBytes(assembleStep(undefined, [recordItems[cursor]!], seedTail)));
-      }
-      const seedStep = assembleStep(chunkInst, chunkItems, seedTail);
-      checkStepTextBytes(promptTextBytes(seedStep));
-      historySeedSteps.push(seedStep);
-      pendingInstructions = undefined;
-    }
-    prompt = assembleStep(finalInstructions ?? pendingInstructions, recordItems.slice(cursor), tailBlocks);
-    checkStepTextBytes(promptTextBytes(prompt));
+    const planned = planHistorySteps(instructionsBlock, recordItems, tailBlocks);
+    prompt = planned.prompt;
+    historySeedSteps.push(...planned.seedSteps);
   }
   const seedSteps = historySeedSteps.length || requestSeedSteps.length
     ? [...historySeedSteps, ...requestSeedSteps]

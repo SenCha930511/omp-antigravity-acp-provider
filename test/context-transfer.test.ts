@@ -1,9 +1,61 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ACP_STEP_TEXT_BYTES, buildPromptParts, historyBudget, promptTextBytes, stableSystemInstructions } from "../extension/context-transfer.ts";
+import fs from "node:fs";
+import path from "node:path";
+import { createRequire as createModuleRequire } from "node:module";
+import { buildSync } from "esbuild";
+import { ACP_STEP_TEXT_BYTES, buildPromptParts, historyBudget, promptTextBytes, stableSystemInstructions, type TransferBlock } from "../extension/context-transfer.ts";
 import { TOOL_ROUTING } from "../extension/tool-routing.ts";
 
 const user = (content: any) => ({ role: "user", content, timestamp: 0 });
+interface TestRecordItem {
+  json: string;
+  images: TransferBlock[];
+  imageAttachments: number[];
+  record: { role: string; content: TransferBlock[] };
+}
+interface TestHistoryMetrics {
+  jsonBytePrefix: number[];
+  imageTextBytePrefix: number[];
+  originalDigitBytePrefix: number[];
+  attachmentCountPrefix: number[];
+  localDigitBytePrefix: number[];
+}
+interface MetricsTestHooks {
+  prepareHistoryMetrics(items: readonly TestRecordItem[]): TestHistoryMetrics;
+  historyRecordItems(record: { role: string; content: TransferBlock[] }, images: TransferBlock[], imageAttachments: number[]): TestRecordItem[];
+  historyRangeTextBytes(metrics: TestHistoryMetrics, start: number, end: number): number;
+  assembleStep(instructions: TransferBlock | undefined, items: TestRecordItem[], tail: TransferBlock[]): TransferBlock[];
+}
+
+const metricHooks = (() => {
+  const sourceFile = path.resolve("extension/context-transfer.ts");
+  const compiled = buildSync({
+    stdin: {
+      contents: fs.readFileSync(sourceFile, "utf8") + "\nexport { prepareHistoryMetrics, historyRangeTextBytes, assembleStep, historyRecordItems };",
+      resolveDir: path.dirname(sourceFile), sourcefile: sourceFile, loader: "ts",
+    },
+    bundle: true, write: false, outfile: path.join(path.dirname(sourceFile), "context-transfer-test.cjs"),
+    platform: "node", format: "cjs", target: "node22", logLevel: "silent",
+  });
+  const sandbox: { exports: unknown } = { exports: {} };
+  new Function("require", "module", "exports", compiled.outputFiles[0]!.text)(
+    createModuleRequire(import.meta.url), sandbox, sandbox.exports);
+  return sandbox.exports as MetricsTestHooks;
+})();
+
+function metricItem(label: string, firstAttachment = 0, count = 0): TestRecordItem {
+  const imageAttachments = Array.from({ length: count }, (_, index) => firstAttachment + index);
+  const images = imageAttachments.flatMap(attachment => [
+    { type: "text", text: `Image ${attachment}:中文𠮷` },
+    { type: "image", data: "aGk=", mimeType: "image/png" },
+  ]);
+  const content: TransferBlock[] = [{ type: "text", text: label },
+    ...imageAttachments.map(attachment => ({ type: "image", attachment }))];
+  const record = { role: "user", content };
+  return { json: JSON.stringify(record), images, imageAttachments, record };
+}
+
 // The official ACP parser appends embedded-resource text to its result and
 // merges subsequent text blocks into that string with a single space.
 function parsedText(prompt: any[]) {
@@ -105,9 +157,29 @@ test("instructions too large for a seed acknowledgement stay in the final prompt
   assert.ok(output.seedSteps?.length);
   assert.match(JSON.stringify(output.prompt), /POLICY_MARKER_/);
   assert.doesNotMatch(JSON.stringify(output.seedSteps), /POLICY_MARKER_/);
+  assert.match(JSON.stringify([...output.seedSteps, output.prompt]), /ANSWER/);
+  assert.match(JSON.stringify([...output.seedSteps, output.prompt]), /OLD_/);
   for (const step of [...output.seedSteps, output.prompt]) {
     assert.ok(promptTextBytes(step) <= ACP_STEP_TEXT_BYTES);
   }
+});
+test("instructions that cannot share a seed with history stay in an instruction-only step", () => {
+  const output = buildPromptParts({ systemPrompt: "P".repeat(180_000), messages: [
+    { role: "assistant", content: [{ type: "text", text: "OLD ".repeat(20_000) }] },
+    { role: "assistant", content: [{ type: "text", text: "NEXT ".repeat(16_000) }] },
+    user("CURRENT"),
+  ] }, true, undefined, { contextWindow: 1_000_000 });
+  assert.equal(output.seedSteps?.length, 1);
+  const step = output.seedSteps?.[0]!;
+  assert.ok(step.some(block => block.resource?.uri.endsWith(":instructions")));
+  assert.ok(!step.some(block => block.resource?.uri.endsWith(":history")));
+  assert.match(JSON.stringify(output.prompt), /OLD OLD/);
+  assert.match(JSON.stringify(output.prompt), /NEXT NEXT/);
+  assert.ok(promptTextBytes(step) <= ACP_STEP_TEXT_BYTES);
+});
+test("a history record that fits without its seed acknowledgement still fails explicitly", () => {
+  assert.throws(() => buildPromptParts({ messages: [user("R".repeat(187_550)), user("LATEST")] },
+    true, undefined, { contextWindow: 1_000_000 }), /single-step text needs at least 188173 bytes/);
 });
 test("binary image payloads keep their independent budget instead of counting as rendered text", () => {
   const output = buildPromptParts({ messages: [user([{ type: "image", data: "a".repeat(300_000), mimeType: "image/png" },
@@ -203,6 +275,8 @@ test("multi-message cold history exceeding single-step limit splits into sequent
   assert.ok(allSerialized.includes("CHUNK_B_"));
   assert.ok(allSerialized.includes("CHUNK_C_"));
   assert.ok(allSerialized.includes("CUSTOM_POLICY"));
+  assert.match(JSON.stringify(output.seedSteps[0]), /CUSTOM_POLICY/);
+  for (const step of output.seedSteps.slice(1)) assert.doesNotMatch(JSON.stringify(step), /CUSTOM_POLICY/);
   assert.ok(!allSerialized.includes("Supplied OMP tools"), "sessionRouting deduplicates TOOL_ROUTING from instructions resource");
   assert.ok(!allSerialized.includes('"isError":false'), "isError: false is omitted in compact history serialization");
   assert.equal(output.prompt.at(-1)?.text, "FINAL_QUESTION");
@@ -284,6 +358,114 @@ test("seed steps renumber historical image attachments against each step's image
       `step-local attachment ${attachments.join(",")} must reference one of ${imageCount} image blocks`);
   }
   assert.equal(steps.flatMap(step => step).filter(block => block.type === "image").length, 2);
+});
+
+test("many historical images renumber consecutively in every step without duplication", () => {
+  const images = Array.from({ length: 120 }, (_, index) => ({
+    type: "image",
+    data: Buffer.from(`historical-image-${index}`).toString("base64"),
+    mimeType: "image/png",
+  }));
+  const messages = images.map((image, index) => user([
+    image,
+    { type: "text", text: `IMAGE_${index}_` + "x".repeat(3_000) },
+  ]));
+  messages.push(user("LATEST_IMAGE_QUESTION"));
+  const output = buildPromptParts({ messages }, true, undefined, { contextWindow: 1_000_000 });
+  assert.ok(output.seedSteps && output.seedSteps.length > 1, "expected multiple history seed steps");
+  const steps = [...output.seedSteps, output.prompt];
+  for (const step of steps) {
+    assert.ok(promptTextBytes(step) <= ACP_STEP_TEXT_BYTES);
+    const history = step.find(block => block.type === "resource" && block.resource?.uri.endsWith(":history"));
+    if (!history) continue;
+    assert.ok(history.resource);
+    const imageCount = step.filter(block => block.type === "image").length;
+    const attachments = [...history.resource.text.matchAll(/"attachment":(\d+)/g)].map(match => Number(match[1]));
+    assert.deepEqual(attachments, Array.from({ length: imageCount }, (_, index) => index));
+  }
+  assert.deepEqual(steps.flat().filter(block => block.type === "image").map(block => block.data),
+    images.map(image => image.data));
+});
+
+test("history metrics match the real renderer for every range and attachment digit boundary", () => {
+  const groups = [
+    [metricItem("plain")],
+    [metricItem("中文𠮷", 0, 120)],
+    [metricItem("first", 0, 101), metricItem("plain"), metricItem("last", 101, 20)],
+    [metricItem("prefix", 0, 3), metricItem("later-range", 89, 31)],
+  ];
+  for (const items of groups) {
+    const metrics = metricHooks.prepareHistoryMetrics(items);
+    const attachmentCount = items.reduce((sum, item) => sum + item.imageAttachments.length, 0);
+    for (const key of ["jsonBytePrefix", "imageTextBytePrefix", "originalDigitBytePrefix", "attachmentCountPrefix"] as const) {
+      assert.equal(metrics[key].length, items.length + 1, `${key} uses item-boundary indices`);
+    }
+    assert.equal(metrics.localDigitBytePrefix.length, attachmentCount + 1);
+    for (let start = 0; start <= items.length; start++) {
+      for (let end = start; end <= items.length; end++) {
+        const actual = promptTextBytes(metricHooks.assembleStep(undefined, items.slice(start, end), []));
+        assert.equal(metricHooks.historyRangeTextBytes(metrics, start, end), actual, `range [${start}, ${end})`);
+      }
+    }
+  }
+});
+
+test("record factory rejects attachment references without image data", () => {
+  assert.throws(() => metricHooks.historyRecordItems({
+    role: "user", content: [{ type: "image", attachment: 100 }],
+  }, [], []), /Historical image attachments do not match their content or data/);
+});
+
+test("one oversized record retains many three-digit attachments after text splitting", () => {
+  const images = Array.from({ length: 125 }, (_, index) => ({
+    type: "image", data: Buffer.from(`image-${index}`).toString("base64"), mimeType: "image/png",
+  }));
+  const output = buildPromptParts({ messages: [
+    user([...images.slice(0, 105), { type: "text", text: "PREFIX" }]),
+    user([{ type: "text", text: "S".repeat(240_000) }, ...images.slice(105)]),
+    user("LATEST"),
+  ] }, true, undefined, { contextWindow: 1_000_000 });
+  assert.ok(output.seedSteps?.length, "oversized image-bearing history must use seed steps");
+  const steps = [...output.seedSteps, output.prompt];
+  for (const step of steps) {
+    assert.ok(promptTextBytes(step) <= ACP_STEP_TEXT_BYTES);
+    const history = step.find(block => block.resource?.uri.endsWith(":history"));
+    if (!history) continue;
+    const attachments = [...history.resource!.text.matchAll(/"attachment":(\d+)/g)].map(match => Number(match[1]));
+    assert.deepEqual(attachments, Array.from({ length: step.filter(block => block.type === "image").length }, (_, index) => index));
+  }
+  assert.deepEqual(steps.flat().filter(block => block.type === "image").map(block => block.data),
+    images.map(image => image.data));
+});
+
+test("oversized warm records keep user and continuation boundaries and respect seed limits", () => {
+  const toolResult = { role: "toolResult", toolName: "read", toolCallId: "call",
+    content: [{ type: "text", text: "T".repeat(240_000) }] };
+  const variants = [{
+    messages: [user("OLD"), user("CURRENT"), toolResult, user("FOLLOW_UP")],
+    unseenStart: 2, expected: "FOLLOW_UP",
+  }, {
+    messages: [user("OLD"), user("CURRENT"),
+      { role: "assistant", content: [{ type: "toolCall", id: "call", name: "read", arguments: {} }] }, toolResult],
+    unseenStart: 3, expected: "Continue the active OMP request",
+  }];
+  for (const variant of variants) {
+    const output = buildPromptParts({ messages: variant.messages }, false, variant.unseenStart,
+      { contextWindow: 1_000_000 });
+    assert.ok(output.seedSteps?.length);
+    assert.match(JSON.stringify([...output.seedSteps, output.prompt]), new RegExp(variant.expected));
+    for (const step of [...output.seedSteps, output.prompt]) assert.ok(promptTextBytes(step) <= ACP_STEP_TEXT_BYTES);
+  }
+});
+
+test("empty history can seed instructions before a split current request", () => {
+  const output = buildPromptParts({ systemPrompt: "P".repeat(180_000), messages: [user("Q".repeat(400_000))] },
+    true, undefined, { contextWindow: 1_000_000 });
+  assert.ok(output.seedSteps?.[0]?.some(block => block.resource?.uri.endsWith(":instructions")));
+  const steps = [...output.seedSteps, output.prompt];
+  assert.ok(!steps.some(step => step.some(block => block.resource?.uri.endsWith(":history"))));
+  assert.match(JSON.stringify(output.prompt), /Current OMP user request \(final part\)/);
+  for (const step of steps) assert.ok(promptTextBytes(step) <= ACP_STEP_TEXT_BYTES);
 });
 
 test("stableSystemInstructions ignores volatile reminders and tool lists but preserves routing policy", () => {

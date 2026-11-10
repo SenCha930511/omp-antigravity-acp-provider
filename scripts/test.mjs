@@ -13,8 +13,15 @@ const output = path.join(root, ".test-build");
 // other package loads directly from the project's node_modules.
 const upstream = path.join(root, "extension/vendor/pi-antigravity-acp-provider");
 try {
-  const entries = (await readdir(path.join(root, "test")))
-    .filter(file => file.endsWith(".test.ts"))
+  const filters = process.argv.slice(2);
+  const files = (await readdir(path.join(root, "test"))).filter(file => file.endsWith(".test.ts"));
+  for (const filter of filters) {
+    if (!filter || !files.some(file => file.includes(filter))) {
+      throw new Error(`No test files matched: ${filter || "(empty filter)"}`);
+    }
+  }
+  const entries = files
+    .filter(file => filters.length === 0 || filters.some(filter => file.includes(filter)))
     .map(file => path.join(root, "test", file));
   await build({
     entryPoints: entries,
