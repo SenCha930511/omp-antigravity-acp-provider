@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.42 — 2026-11-10
+
+- Preserve the selected CLI profile when `AGY_ACP_BIN` already points at the adapter's own generated wrapper. A second extension instance now re-detects the CLI version and refreshes the runtime record instead of treating the wrapper as an explicit environment override, so CLI 1.5.3 `yolo` remains mapped to wire `default` plus `--dangerously-skip-permissions` and `auto_edit` remains `accept-edits`. A non-wrapper explicit `AGY_ACP_BIN` still keeps its original behavior.
+
 ## 0.1.41 — 2026-11-10
 
 - Adapt permission negotiation to the official CLI ACP 1.5.3 vocabulary. `auto_edit` maps to `accept-edits`, while `yolo` selects wire mode `default` and launches through the CLI's official `--dangerously-skip-permissions` flag. Managed ACP 1.4.5 keeps its native `auto_edit` and `yolo` modes, explicit `AGY_ACP_BIN` stays untouched, and a mode change recreates the runtime so auto-approval cannot leak into a later request.
