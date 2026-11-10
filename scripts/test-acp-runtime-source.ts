@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { assertSelectedAcpCliLaunch, preferNewestAcpRuntime } from "../extension/acp-runtime-source.ts";
+import { assertSelectedAcpCliLaunch, preferNewestAcpRuntime, resolveAcpPermissionProfile } from "../extension/acp-runtime-source.ts";
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "acp-runtime-source-"));
 const bin = path.join(work, "bin");
@@ -74,6 +74,12 @@ function freshEnv(): NodeJS.ProcessEnv {
   const record = JSON.parse(fs.readFileSync(path.join(stateDir, "acp-runtime-source.json"), "utf8"));
   assert.equal(record.source, "cli");
   assert.equal(record.cliVersion, "9.9.9");
+  const repeated = await preferNewestAcpRuntime(stateDir, env, home);
+  assert.equal(repeated.source, "cli");
+  assert.equal(repeated.cliVersion, "9.9.9");
+  assert.equal(repeated.managedVersion, "1.4.5");
+  assert.equal(resolveAcpPermissionProfile(repeated, "yolo").wireMode, "default");
+  assert.equal(resolveAcpPermissionProfile(repeated, "yolo").autoApproveProcess, true);
 
   for (const marker of ["1", undefined, ""]) {
     const childEnv = freshEnv();

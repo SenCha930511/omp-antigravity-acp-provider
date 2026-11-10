@@ -71,21 +71,59 @@ export async function preferNewestAcpRuntime(
   env: NodeJS.ProcessEnv = process.env,
   home = os.homedir(),
 ): Promise<AcpRuntimePreference> {
-  if (env.AGY_ACP_BIN?.trim()) return { source: "env" };
+  const wrapper = path.join(stateDir, "agy-acp-cli.sh");
+  const configured = env.AGY_ACP_BIN?.trim();
+  // A wrapper written by this adapter is not a user override. A second
+  // extension instance can see the first instance's AGY_ACP_BIN and must
+  // recover the CLI profile instead of treating it as an explicit env runtime.
+  if (configured && path.resolve(configured) === path.resolve(wrapper)) {
+    const cli = await findAgyCli(env);
+    if (cli) {
+      const preference = { source: "cli", cliPath: cli.path, cliVersion: cli.version, managedVersion: readManagedVersion(home) } as const;
+      writeCliWrapper(wrapper, cli.path);
+      writeRuntimeSourceRecord(stateDir, preference);
+      env.AGY_ACP_BIN = wrapper;
+      return preference;
+    }
+    const recorded = readRuntimeSourceRecord(stateDir);
+    if (recorded) return recorded;
+  } else if (configured) {
+    return { source: "env" };
+  }
   // The generated wrapper is a POSIX shell script that upstream launches
   // directly; Windows cannot execute it, so it stays managed-only there.
   if (process.platform === "win32") return { source: "managed" };
   const cli = await findAgyCli(env);
   const managedVersion = readManagedVersion(home);
   if (!cli || (managedVersion && compareVersions(cli.version, managedVersion) <= 0)) {
+    if (configured) delete env.AGY_ACP_BIN;
     return { source: "managed", cliPath: cli?.path, cliVersion: cli?.version, managedVersion };
   }
-  const wrapper = path.join(stateDir, "agy-acp-cli.sh");
   const preference = { source: "cli", cliPath: cli.path, cliVersion: cli.version, managedVersion } as const;
   writeCliWrapper(wrapper, cli.path);
   writeRuntimeSourceRecord(stateDir, preference);
   env.AGY_ACP_BIN = wrapper;
   return preference;
+}
+
+function readRuntimeSourceRecord(stateDir: string): AcpRuntimePreference | undefined {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(stateDir, "acp-runtime-source.json"), "utf8")) as {
+      source?: unknown;
+      cliPath?: unknown;
+      cliVersion?: unknown;
+      managedVersion?: unknown;
+    };
+    if (value.source !== "cli" || typeof value.cliPath !== "string" || typeof value.cliVersion !== "string") return undefined;
+    return {
+      source: "cli",
+      cliPath: value.cliPath,
+      cliVersion: value.cliVersion,
+      ...(typeof value.managedVersion === "string" ? { managedVersion: value.managedVersion } : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 async function findAgyCli(env: NodeJS.ProcessEnv): Promise<{ path: string; version: string } | undefined> {
