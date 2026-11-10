@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.39 — 2026-11-10
+
+- Plan cold-history prompt chunks from prefix byte metrics instead of rendering every candidate. Accepted boundaries and the first rejected candidate still render through the original path, so output and overflow behavior stay exact; a corrupt historical image attachment mapping now fails before transport. Exhaustive range tests cover small and large histories.
+- Add a focused test-file filter to `npm test`; unknown or empty filters fail instead of silently running nothing.
+- Add a reproducible seven-scenario context-transfer benchmark. On Node 26.13.0 the 500-record fixture drops from 16.031 ms to 4.202 ms and the 239-image fixture from 39.008 ms to 4.286 ms; these measure prompt preparation only.
+
 ## 0.1.38 — 2026-11-09
 
 - Pin the CLI wrapper's ACP storage to the managed runtime's tree. The `agy` CLI binary defaults its ACP server to `--app_data_dir=antigravity-cli`, which mixed adapter sessions with personal CLI chats and put them outside session cleanup's tracked tree; the generated `agy-acp-cli.sh` now passes `--app_data_dir=antigravity-acp` (the managed `.par`'s own default), so CLI-launched sessions land in `~/.gemini/antigravity-acp/` where cleanup and ownership tracking operate, while personal `agy` chats in `~/.gemini/antigravity-cli/` are never read or deleted. Existing wrappers rewrite themselves on the next startup.
