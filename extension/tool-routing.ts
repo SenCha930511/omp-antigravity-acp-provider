@@ -14,6 +14,8 @@ export function parseNativeToolMode(value: unknown): NativeToolMode {
   throw new Error("nativeTools must be prefer or disabled");
 }
 
+const OFFICIAL_AGENT_NAMES = new Set(["antigravity-acp", "Antigravity ACP Server"]);
+
 export interface InitializeMetadata {
   agentInfo?: { name?: string; version?: string };
   agentCapabilities?: {
@@ -41,8 +43,9 @@ export interface SessionRpcRequest {
 }
 
 export function supportsSessionRouting(initialize: InitializeMetadata | undefined): boolean {
+  const name = initialize?.agentInfo?.name;
   const version = initialize?.agentInfo?.version?.match(/^(\d+)\.(\d+)\.(\d+)$/);
-  return initialize?.agentInfo?.name === "antigravity-acp" &&
+  return typeof name === "string" && OFFICIAL_AGENT_NAMES.has(name) &&
     initialize.agentCapabilities?._meta?.antigravity?.systemPrompt?.append === true &&
     !!version && Number(version[1]) === 1 &&
     (Number(version[2]) > 4 || (Number(version[2]) === 4 && Number(version[3]) >= 1));

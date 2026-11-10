@@ -52,6 +52,7 @@ test("prefer mode explicitly clears an inherited strict allowlist", () => {
 test("unknown runtimes fall back in prefer mode and fail closed in disabled mode", () => {
   for (const info of [ {}, { ...initialize, agentInfo: { name: "other", version: "1.4.1" } },
     { ...initialize, agentInfo: { name: "antigravity-acp", version: "1.3.9" } },
+    { ...initialize, agentInfo: { name: "Antigravity ACP Server", version: "1.3.9" } },
     { ...initialize, agentCapabilities: {} },
     { ...initialize, agentInfo: { name: "antigravity-acp", version: "2.0.0" } } ]) {
     assert.equal(supportsSessionRouting(info), false);
