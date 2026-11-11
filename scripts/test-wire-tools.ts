@@ -137,3 +137,38 @@ try {
 } finally {
   await permissionRuntime.close();
 }
+
+const guardRuntime = new AntigravityRuntime(options => new TierConnection({
+  ...options,
+  command: process.execPath,
+  args: [path.join(root, "scripts/fake-agy.mjs")],
+}), "yolo");
+
+const messageText = (result: { message: any }) =>
+  (result.message.content ?? [])
+    .filter((block: { type: string }) => block.type === "text")
+    .map((block: { text?: string }) => block.text)
+    .join("");
+
+try {
+  const aliasRequest = user("WIRE_TOOL_ALIAS_TEST");
+  const first = await run([aliasRequest], guardRuntime, [tools.read], "wire-tool-alias");
+  const call = first.events.find(event => event.type === "toolcall_end")?.toolCall;
+  assert.ok(call, "the alias call must pass schema validation after the rename and park as an OMP tool call");
+  assert.equal(call.name, "read");
+  assert.deepEqual(call.arguments, { path: "/wire-alias" });
+  assert.equal(first.message.stopReason, "toolUse");
+
+  const completed = await run([aliasRequest, first.message, toolResult(call, "ALIAS_OK")], guardRuntime, [tools.read], "wire-tool-alias");
+  assert.match(messageText(completed), /TOOL:ALIAS_OK/, "the renamed call must complete through the same ACP turn");
+  assert.equal(completed.message.stopReason, "stop");
+
+  const rejected = await run([user("WIRE_TOOL_MISSING_TEST")], guardRuntime, [tools.read], "wire-tool-missing");
+  assert.equal(rejected.message.stopReason, "stop", "a call missing a required key must not park as an OMP tool call");
+  const rejection = messageText(rejected);
+  assert.match(rejection, /missing required path/);
+  assert.match(rejection, /Expected signature: pi_read\(path: string\)/);
+  console.log("Wire tool-argument guard (alias rename, missing-key signature): PASS");
+} finally {
+  await guardRuntime.close();
+}
