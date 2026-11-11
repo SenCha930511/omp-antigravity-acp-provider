@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.1.43 — 2026-11-11
 
-- Stop reporting cumulative ACP billing counters as context occupancy. When the runtime sends no `usage_update`, the adapter now estimates the full OMP context (system prompt, retained messages and tool schemas) with `estimateTransferTokens`, sets `usage.contextTokens` with `contextTokensSource: "estimate"`, and leaves `input`, `cacheRead` and `output` intact. This prevents OMP's experimental context management from treating a multi-turn `cacheRead` total as a single prompt and triggering a false `experimental-context-rollover-retry`.
+- Add `/antigravity-acp quota` live quota reporting through a separate short-lived ACP session. Concurrent reads share one request, snapshots are cached for 60 seconds, managed ACP is preferred when the CLI lacks `/usage`, and temporary-session usage is excluded from adapter accounting. Quota exhaustion is classified as non-retryable with an optional reset time.
+- Stop reporting cumulative ACP billing counters as context occupancy. When the runtime sends no `usage_update`, the adapter estimates the full OMP context (system prompt, retained messages and tool schemas) with `estimateTransferTokens`, sets `usage.contextTokens` with `contextTokensSource: "estimate"`, and leaves `input`, `cacheRead` and `output` intact. Server-reported occupancy still wins. This prevents OMP's experimental context management from treating a multi-turn `cacheRead` total as a single prompt and triggering a false `experimental-context-rollover-retry`.
+- Harden transcript routing and lifecycle handling across `/fresh`, branch, fork, resume and shutdown. Source identity is now proven by the exact session file and owner generation; failed or late replacements cannot resurrect stale routes, duplicate mappings fail closed, and shutdown closes every routing identity while preserving teardown errors.
+- Make `/antigravity-acp` status, account, usage, quota, context, cleanup, diagnostics and tools output readable sections instead of raw JSON. Tool omissions retain their reasons, context settings show shared defaults and effective model limits separately, and diagnostics report count/median/max only for populated stages.
+- Reduce hot-path allocations and repeated disk work: cache saved-session counts by file stat, group diagnostics samples in one pass, avoid unnecessary message-array copies, and predict history chunk bytes before rendering. Add offline tests for quota, context rollover, managed-context launch and session shutdown cleanup.
 
 ## 0.1.42 — 2026-11-10
 
