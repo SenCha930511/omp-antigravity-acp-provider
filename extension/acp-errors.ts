@@ -1,6 +1,8 @@
 // OMP decides whether to retry from the assistant error text. Keep the
 // transport's distinction between account exhaustion and a transient throttle
 // visible instead of collapsing both into "protocol".
+import { redactSensitiveText } from "./redact.ts";
+
 export type AcpFailureCode =
   | "auth"
   | "quota"
@@ -103,17 +105,19 @@ function isAntigravityAcpError(error: unknown): error is AntigravityAcpErrorLike
 export function classifyAcpFailure(error: unknown): Error {
   if (isAntigravityAcpError(error)) {
     if (error.code === "aborted") return error;
-    if (error.code === "auth") return new AcpFailure("auth", appendHint(error.message, AUTH_RULE), { cause: error });
-    if (error.code === "quota") return new AcpFailure("quota", appendHint(error.message, QUOTA_RULE), { cause: error });
-    if (error.code === "timeout") return new AcpFailure("timeout", appendHint(error.message, TIMEOUT_RULE), { cause: error });
-    if (error.code === "spawn" || error.code === "process_exit") return new AcpFailure("transport", appendHint(error.message, TRANSPORT_RULE), { cause: error });
-    if (error.code === "invalid_input") return new AcpFailure("protocol", appendHint(error.message, PROTOCOL_RULE), { cause: error });
-    if (error.code === "model") return new AcpFailure("model", error.message, { cause: error });
+    if (error.code === "auth") return new AcpFailure("auth", redactSensitiveText(appendHint(error.message, AUTH_RULE)), { cause: error });
+    if (error.code === "quota") return new AcpFailure("quota", redactSensitiveText(appendHint(error.message, QUOTA_RULE)), { cause: error });
+    if (error.code === "timeout") return new AcpFailure("timeout", redactSensitiveText(appendHint(error.message, TIMEOUT_RULE)), { cause: error });
+    if (error.code === "spawn" || error.code === "process_exit") return new AcpFailure("transport", redactSensitiveText(appendHint(error.message, TRANSPORT_RULE)), { cause: error });
+    if (error.code === "invalid_input") return new AcpFailure("protocol", redactSensitiveText(appendHint(error.message, PROTOCOL_RULE)), { cause: error });
+    if (error.code === "model") return new AcpFailure("model", redactSensitiveText(error.message), { cause: error });
   }
   const message = error instanceof Error ? error.message : String(error);
   if (!message.trim()) return error instanceof Error ? error : new Error(message);
   for (const rule of RULES) {
-    if (rule.match.test(message)) return new AcpFailure(rule.code, appendHint(message, rule), { cause: error });
+    if (rule.match.test(message)) return new AcpFailure(rule.code, redactSensitiveText(appendHint(message, rule)), { cause: error });
   }
-  return error instanceof Error ? error : new Error(message);
+  const redacted = redactSensitiveText(message);
+  if (redacted === message) return error instanceof Error ? error : new Error(message);
+  return new Error(redacted);
 }

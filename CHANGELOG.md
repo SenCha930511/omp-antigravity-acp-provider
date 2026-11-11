@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.44 — 2026-11-11
+
+- Harden MCP tool calls and failure text. Habitual alias arguments (`path` for `file_path`) are renamed only when the tool schema makes the mapping unambiguous, missing required keys and the expected tool signature are reported in one actionable error instead of a bare schema failure, loopback addresses are always appended to `NO_PROXY`/`no_proxy` when a proxied environment is detected so the loopback MCP bridge never routes through an external proxy, and OAuth material (authorization URLs, sensitive query values, bearer tokens, `code_challenge`/`access_token` pairs) is redacted from classified failure messages while diagnostics like `exit code=1` survive.
+
 ## 0.1.43 — 2026-11-11
 
 - Add `/antigravity-acp quota` live quota reporting through a separate short-lived ACP session. Concurrent reads share one request, snapshots are cached for 60 seconds, managed ACP is preferred when the CLI lacks `/usage`, and temporary-session usage is excluded from adapter accounting. Quota exhaustion is classified as non-retryable with an optional reset time.

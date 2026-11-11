@@ -27,6 +27,9 @@ This is an independent adaptation, **NOT** an official Google or OMP integration
 - Long-running OMP tools survive the MCP request window through a relay. The model resumes the same result with `pi_omp_await_result`; the control tool is a separate MCP server and never appears in OMP's tool list.
 - Permission requests are tied to the originating session, turn and tool call. Forged, conflicting or previous-turn identities fail closed, while normal requests still use OMP's human review.
 - The MCP `tools/list` reflects the current OMP tool set. The offline wire test covers add, remove and restore on one warm ACP session.
+- Tool-argument hardening on the MCP bridge. Habitual alias mistakes such as `path` for `file_path` are corrected only when the tool schema makes the mapping unambiguous, and rejected calls return the missing required keys plus the tool's expected signature instead of a bare schema failure.
+- Loopback traffic always bypasses proxied environments. When `HTTP(S)_PROXY` or `ALL_PROXY` is set for the ACP child process, the adapter appends `localhost`, `127.0.0.1` and `::1` to `NO_PROXY`/`no_proxy` so the loopback MCP bridge is never routed through an external proxy.
+- OAuth material is redacted from failure text. Authorization URLs, sensitive query values, `Bearer` tokens and OAuth pairs such as `code_challenge` or `access_token` are masked before messages reach OMP, while ordinary diagnostics like `exit code=1` stay intact.
 
 ## Install: for human
 
