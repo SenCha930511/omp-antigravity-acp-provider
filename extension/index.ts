@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { applyApiCostEstimate } from "./pricing.ts";
+import { ensureLoopbackBypass } from "./proxy-env.ts";
 import {
   assertSelectedAcpCliLaunch,
   preferNewestAcpRuntime,
@@ -160,11 +161,11 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
 
   function spawnConnection(options: ConstructorParameters<typeof TierConnection>[0]): TierConnection {
     const profile = currentPermissionProfile();
-    const env = {
+    const env = ensureLoopbackBypass({
       ...process.env,
       ...options.env,
       OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS: profile.autoApproveProcess ? "1" : "",
-    };
+    });
     const launch = options.command || options.entryPath ? undefined
       : assertSelectedAcpCliLaunch(stateDir, selectedRuntimePreference, env, options.ompPurpose === "quota" ? "quota" : "inference");
     return createConnection({ ...options, ...launch, env });
