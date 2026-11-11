@@ -48,11 +48,33 @@ export function resolveAcpPermissionProfile(
   };
 }
 
+export function resolveManagedAcpCommand(
+  home = os.homedir(), platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[] } | undefined {
+  const root = path.join(home, ".local", "opt", "agy-acp", "current");
+  for (const name of ["agy_acp_server.par", "agy_acp_server.exe"]) {
+    const command = path.join(root, name);
+    if (isExecutableFile(command)) return { command, args: platform === "linux" ? ["--uid="] : [] };
+  }
+  return undefined;
+}
+
 export function assertSelectedAcpCliLaunch(
   stateDir: string,
   preference: AcpRuntimePreference | undefined,
   env: NodeJS.ProcessEnv = process.env,
-): void {
+  purpose: "inference" | "quota" = "inference",
+  home = os.homedir(),
+): { command: string; args: string[] } | undefined {
+  const automaticWrapper = path.join(stateDir, "agy-acp-cli.sh");
+  const configured = env.AGY_ACP_BIN?.trim();
+  if (purpose === "quota" && configured && path.resolve(configured) !== path.resolve(automaticWrapper)) return undefined;
+  if (purpose === "quota") {
+    const managed = resolveManagedAcpCommand(home);
+    if (!managed) throw new Error("Managed ACP binary is missing or not executable for quota");
+    env.AGY_ACP_BIN = managed.command;
+    return managed;
+  }
   if (preference?.source !== "cli") return;
   const wrapper = path.join(stateDir, "agy-acp-cli.sh");
   let intact = false;

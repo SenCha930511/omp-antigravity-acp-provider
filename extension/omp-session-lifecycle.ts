@@ -39,12 +39,14 @@ export class OmpSessionLifecycle {
     return scope;
   }
 
-  capture(id: RoutingId, host?: Map<string, OmpProviderSessionState>): Ticket {
-    let scope = this.fallback;
+  capture(id: RoutingId, host?: Map<string, OmpProviderSessionState>,
+    onOwnerReplaced?: (previous: OmpProviderSessionState) => void): Ticket {
+    let scope = this.fallback, replaced: Scope | undefined;
     if (host) {
       const previous = this.scopes.get(host);
       if (previous && !previous.closed && host.get("antigravity-acp") === previous) scope = previous;
       else {
+        replaced = previous;
         let predecessor: Promise<void> | undefined;
         try {
           const existing = host.get("antigravity-acp");
@@ -63,6 +65,7 @@ export class OmpSessionLifecycle {
       entries.add(ticket);
     }
     ticket.users++;
+    if (replaced) onOwnerReplaced?.(replaced);
     return ticket;
   }
 
@@ -106,7 +109,10 @@ export class OmpSessionLifecycle {
       if (ticket.closed || !ticket.users) this.forget(ticket);
     }
     this.bundles.delete(bundle);
-    const pending = Promise.all([this.closing.get(id), dispose()]).then(() => {});
+    const pending = Promise.allSettled([this.closing.get(id), Promise.resolve().then(dispose)]).then(results => {
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failure) throw failure.reason;
+    });
     this.closing.set(id, pending);
     void pending.finally(() => { if (this.closing.get(id) === pending) this.closing.delete(id); }).catch(() => {});
     return pending;
@@ -118,8 +124,11 @@ export class OmpSessionLifecycle {
     const pending = Promise.allSettled([previous, closed, teardown]).then(async results => {
       // Teardown failures must not skip unbinding: a leaked release keeps the
       // one-shot mapping alive and the cleanup registry out of sync.
-      if (released) await this.releaseRuntime(id);
       const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (released) {
+        try { await this.releaseRuntime(id); }
+        catch (error) { if (!failure) throw error; }
+      }
       if (failure) throw failure.reason;
     });
     // Reusing an ID must also wait for removal of its prior one-shot mapping.

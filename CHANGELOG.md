@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Stop reporting cumulative ACP billing counters as context occupancy. When the runtime sends no `usage_update`, the adapter now estimates the full OMP context (system prompt, retained messages and tool schemas) with `estimateTransferTokens`, sets `usage.contextTokens` with `contextTokensSource: "estimate"`, and leaves `input`, `cacheRead` and `output` intact. This prevents OMP's experimental context management from treating a multi-turn `cacheRead` total as a single prompt and triggering a false `experimental-context-rollover-retry`.
+
 ## 0.1.42 — 2026-11-10
 
 - Preserve the selected CLI profile when `AGY_ACP_BIN` already points at the adapter's own generated wrapper. A second extension instance now re-detects the CLI version and refreshes the runtime record instead of treating the wrapper as an explicit environment override, so CLI 1.5.3 `yolo` remains mapped to wire `default` plus `--dangerously-skip-permissions` and `auto_edit` remains `accept-edits`. A non-wrapper explicit `AGY_ACP_BIN` still keeps its original behavior.

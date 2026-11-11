@@ -55,12 +55,155 @@ const result = await build({
       builder.onResolve({ filter: /^\.\/stream\/usage\.js$/ }, ({ importer }) => {
         if (importer === path.join(upstream, "src/runtime.ts")) return { path: path.join(root, "extension/usage.ts") };
       });
+      builder.onResolve({ filter: /^\.\/acp\/usage-quota\.js$/ }, ({ importer }) => {
+        if (importer === path.join(upstream, "src/runtime.ts")) return { path: path.join(root, "extension/usage-accounting.ts") };
+      });
       builder.onResolve({ filter: /^\.\/acp\/session-store\.js$/ }, ({ importer }) => {
         if (importer === path.join(upstream, "src/runtime.ts")) return { path: path.join(root, "extension/session-store.ts") };
       });
       builder.onLoad({ filter: /\/src\/runtime\.ts$/ }, async ({ path: file }) => {
         if (file !== path.join(upstream, "src/runtime.ts")) return;
         const patches = [
+          {
+            name: "quota parser imports",
+            anchor: 'import { abortError, AntigravityAcpError, errorMessage } from "./acp/errors.js";',
+            replacement: 'import { abortError, AntigravityAcpError, errorMessage } from "./acp/errors.js";\nimport { parseUsageQuota, quotaExhaustion, type AntigravityQuotaSnapshot } from "./acp/usage-quota.js";\ntype OmpQuotaRequest = { epoch: number; owner: string; controller: AbortController; subscribers: number; snapshot: Promise<AntigravityQuotaSnapshot> };',
+          },
+          {
+            name: "quota state",
+            anchor: "\tprivate permissionMode: PermissionMode;",
+            replacement: "\tprivate permissionMode: PermissionMode;\n\tprivate quotaCache: AntigravityQuotaSnapshot | undefined;\n\tprivate quotaCacheOwner: string | undefined;\n\tprivate readonly quotaInFlights = new Set<OmpQuotaRequest>();",
+          },
+          {
+            name: "ephemeral quota queries",
+            anchor: "\tasync loginGoogle(",
+            replacement: [
+              "\tasync quota(apiKey: string | undefined, signal?: AbortSignal): Promise<AntigravityQuotaSnapshot> {",
+              "\t\tthis.assertActive();",
+              "\t\tif (signal?.aborted) throw abortError();",
+              "\t\tconst owner = apiKey === undefined ? \"managed\" : `key:${createHash(\"sha256\").update(apiKey).digest(\"hex\")}`;",
+              "\t\tif (this.quotaCacheOwner === owner && this.quotaCache && Date.now() - this.quotaCache.at < 60_000) return this.quotaCache;",
+              "\t\tconst epoch = this.bindingEpoch;",
+              "\t\tlet request = [...this.quotaInFlights].find(candidate => candidate.epoch === epoch && candidate.owner === owner && !candidate.controller.signal.aborted);",
+              "\t\tif (!request) {",
+              "\t\t\tconst controller = new AbortController();",
+              "\t\t\tlet created!: OmpQuotaRequest;",
+              "\t\t\tconst snapshot = this.ompFetchQuota(apiKey, controller.signal).then(value => {",
+              "\t\t\t\tif (this.bindingEpoch === epoch && !this.disposed && !controller.signal.aborted) {",
+              "\t\t\t\t\tthis.quotaCache = value;",
+              "\t\t\t\t\tthis.quotaCacheOwner = owner;",
+              "\t\t\t\t}",
+              "\t\t\t\treturn value;",
+              "\t\t\t}).finally(() => { this.quotaInFlights.delete(created); });",
+              "\t\t\tcreated = { epoch, owner, controller, subscribers: 0, snapshot };",
+              "\t\t\tthis.quotaInFlights.add(created);",
+              "\t\t\trequest = created;",
+              "\t\t}",
+              "\t\tconst active = request;",
+              "\t\tactive.subscribers++;",
+              "\t\tconst { promise, resolve, reject } = Promise.withResolvers<AntigravityQuotaSnapshot>();",
+              "\t\tlet subscribed = true;",
+              "\t\tconst finish = (settle: () => void, cancel: boolean) => {",
+              "\t\t\tif (!subscribed) return;",
+              "\t\t\tsubscribed = false;",
+              "\t\t\tactive.subscribers--;",
+              "\t\t\tsignal?.removeEventListener(\"abort\", onAbort);",
+              "\t\t\tsettle();",
+              "\t\t\tif (cancel && active.subscribers === 0) active.controller.abort();",
+              "\t\t};",
+              "\t\tconst onAbort = () => finish(() => reject(abortError()), true);",
+              "\t\tsignal?.addEventListener(\"abort\", onAbort, { once: true });",
+              "\t\tif (signal?.aborted) onAbort();",
+              "\t\tactive.snapshot.then(value => finish(() => resolve(value), false), error => finish(() => reject(error), false));",
+              "\t\treturn promise;",
+              "\t}",
+              "",
+              "\t// A separate short-lived process never races a user's warm ACP session.",
+              "\tprivate async ompFetchQuota(apiKey: string | undefined, signal: AbortSignal): Promise<AntigravityQuotaSnapshot> {",
+              "\t\tthis.assertActive();",
+              "\t\tconst epoch = this.bindingEpoch;",
+              "\t\tif (this.ensureAgent) await ensureAntigravityAcpReady();",
+              "\t\tif (signal.aborted) throw abortError();",
+              "\t\tthis.assertEpoch(epoch);",
+              "\t\tlet sessionId: string | undefined;",
+              "\t\tlet text = \"\";",
+              "\t\tconst quotaOptions = { cwd: process.cwd(), ompPurpose: \"quota\" as const };",
+              "\t\tconst connection = this.createConnection({",
+              "\t\t\t...quotaOptions,",
+              "\t\t\tpromptIdleTimeoutMs: 30_000,",
+              "\t\t\thandlers: {",
+              "\t\t\t\tonUpdate: ({ sessionId: id, update }) => {",
+              "\t\t\t\t\tif (id === sessionId && update.sessionUpdate === \"agent_message_chunk\" && update.content.type === \"text\") text += update.content.text;",
+              "\t\t\t\t},",
+              "\t\t\t\tonPermission: async () => ({ outcome: { outcome: \"cancelled\" } }),",
+              "\t\t\t},",
+              "\t\t});",
+              "\t\ttry {",
+              "\t\t\tconst initialize = await connection.initialize(signal);",
+              "\t\t\tthis.assertEpoch(epoch);",
+              "\t\t\tawait authenticateForCredential(connection, initialize, apiKey, signal);",
+              "\t\t\tthis.assertEpoch(epoch);",
+              "\t\t\tconst session = await connection.newSession(process.cwd(), signal);",
+              "\t\t\tsessionId = session.sessionId;",
+              "\t\t\tthis.assertEpoch(epoch);",
+              "\t\t\tconst currentModel = sessionModels(session)?.currentModelId;",
+              "\t\t\tif (currentModel) {",
+              "\t\t\t\tawait connection.setModel(sessionId, currentModel, signal);",
+              "\t\t\t\tthis.assertEpoch(epoch);",
+              "\t\t\t}",
+              "\t\t\tconst advertised = \"waitForUsageCommand\" in connection && typeof connection.waitForUsageCommand === \"function\" && await connection.waitForUsageCommand(sessionId, undefined, signal);",
+              "\t\t\tif (signal.aborted) throw abortError();",
+              "\t\t\tif (!advertised) {",
+              "\t\t\t\tthrow new Error(\"Antigravity /usage was not advertised by this ACP runtime. No model prompt was sent.\");",
+              "\t\t\t}",
+              "\t\t\tif (signal.aborted) throw abortError();",
+              "\t\t\tconst request = { sessionId, prompt: [{ type: \"text\" as const, text: \"/usage\" }] };",
+              "\t\t\tconst response = await (\"promptWithoutUsageDeltas\" in connection && typeof connection.promptWithoutUsageDeltas === \"function\" ? connection.promptWithoutUsageDeltas(request, signal) : connection.prompt(request, signal));",
+              "\t\t\tif (response.stopReason !== \"end_turn\") {",
+              "\t\t\t\tthrow new AntigravityAcpError(\"protocol\", `Antigravity /usage stopped with reason ${response.stopReason}; its partial quota response was not parsed`);",
+              "\t\t\t}",
+              "\t\t\tif (signal.aborted) throw abortError();",
+              "\t\t\treturn parseUsageQuota(text);",
+              "\t\t} finally {",
+              "\t\t\ttry { if (sessionId) await connection.discardSession?.(sessionId); } finally { await connection.close(); }",
+              "\t\t}",
+              "\t}",
+              "",
+              "\tasync loginGoogle(",
+            ].join("\n"),
+          },
+          {
+            name: "quota reset exhaustion",
+            anchor: "\t\t\tthis.metrics.record(response, usage);",
+            replacement: [
+              "\t\t\tthis.metrics.record(response, usage);",
+              "\t\t\tconst quota = response.stopReason === \"cancelled\" ? undefined : quotaExhaustion(activeWriter.message.content.map(block => block.type === \"text\" ? block.text : \"\").join(\"\"));",
+              "\t\t\tif (quota) await this.ompThrowQuota(binding, quota);",
+            ].join("\n"),
+          },
+          {
+            name: "quota parked-work cleanup",
+            anchor: "\tprivate async awaitContinuation(binding: Binding, signal?: AbortSignal): Promise<void> {",
+            replacement: [
+              "\tprivate async ompThrowQuota(binding: Binding, quota: { resetAt?: string }): Promise<never> {",
+              "\t\tif (binding.permission || binding.pendingTools.size > 0) await this.invalidateBinding(binding);",
+              "\t\tthrow new AntigravityAcpError(\"quota\", `Antigravity quota exceeded for ${binding.modelId}.${quota.resetAt ? ` Resets at ${quota.resetAt}.` : \"\"}`);",
+              "\t}",
+              "",
+              "\tprivate async awaitContinuation(binding: Binding, signal?: AbortSignal): Promise<void> {",
+            ].join("\n"),
+          },
+
+          {
+            name: "quota cache logout invalidation",
+            anchor: "\t\tawait this.closeBindings();\n\t\tthis.sessionStore?.clear();",
+            replacement: "\t\tthis.disposed = true;\n\t\tthis.quotaCache = undefined;\n\t\tthis.quotaCacheOwner = undefined;\n\t\tawait this.closeBindings();\n\t\tthis.sessionStore?.clear();",
+          },
+          {
+            name: "collect hidden seed text",
+            anchor: "\tprivate consumeUpdate(binding: Binding | undefined, notification: SessionNotification): void {\n\t\tif (!binding || notification.sessionId !== binding.session.sessionId) return;",
+            replacement: "\tprivate consumeUpdate(binding: Binding | undefined, notification: SessionNotification): void {\n\t\tif (!binding || notification.sessionId !== binding.session.sessionId) return;\n\t\tif (binding.ompSeeding && notification.update.sessionUpdate === \"agent_message_chunk\" && notification.update.content.type === \"text\") {\n\t\t\tbinding.ompSeedText = (binding.ompSeedText ?? \"\") + notification.update.content.text;\n\t\t}",
+          },
           {
             name: "validated message fingerprint memo",
             anchor: 'return createHash("sha256").update(canonicalJson(value)).digest("hex");',
@@ -74,7 +217,7 @@ const result = await build({
           {
             name: "import stable instruction fingerprint",
             anchor: 'import { type PromptParts, buildPromptParts, currentSystemInstructions } from "./stream/context.js";',
-            replacement: 'import { type PromptParts, buildPromptParts, currentSystemInstructions, stableSystemInstructions } from "./stream/context.js";',
+            replacement: 'import { type PromptParts, buildPromptParts, currentSystemInstructions, stableSystemInstructions, estimateContextTokens } from "./stream/context.js";',
           },
           {
             name: "context",
@@ -99,7 +242,7 @@ const result = await build({
           {
             name: "refresh OMP context window on model change",
             anchor: "\t\t\tif (binding.modelId !== acpModelId) {\n\t\t\t\tawait binding.connection.setModel(binding.session.sessionId, acpModelId, options.signal);\n\t\t\t\tbinding.modelId = acpModelId;\n\t\t\t}",
-            replacement: "\t\t\tif (binding.modelId !== acpModelId) {\n\t\t\t\tawait binding.connection.setModel(binding.session.sessionId, acpModelId, options.signal);\n\t\t\t\tbinding.modelId = acpModelId;\n\t\t\t\t(binding.connection as any).setOmpContextWindow?.(binding.session.sessionId, model.contextWindow);\n\t\t\t}",
+            replacement: "\t\t\tif (binding.modelId !== acpModelId) {\n\t\t\t\ttry {\n\t\t\t\t\tawait binding.connection.setModel(binding.session.sessionId, acpModelId, options.signal);\n\t\t\t\t} catch (error) {\n\t\t\t\t\tawait this.invalidateBinding(binding);\n\t\t\t\t\tthrow error;\n\t\t\t\t}\n\t\t\t\tbinding.modelId = acpModelId;\n\t\t\t\t(binding.connection as any).setOmpContextWindow?.(binding.session.sessionId, model.contextWindow);\n\t\t\t}",
           },
           {
             name: "workspace and parked model boundaries",
@@ -169,7 +312,10 @@ const result = await build({
               "\t\t\t\t\ttry { this.persistBinding(binding); } catch (checkpointError) { await this.invalidateBinding(binding); throw checkpointError; }",
               "\t\t\t\t\tif (ompWasWarm) binding.connection.confirmReplacement?.(key, binding.session.sessionId);",
               "\t\t\t\t} else await this.invalidateBinding(binding);",
-              "\t\t\t} else if (ompDispatched) await this.invalidateBinding(binding);",
+              "\t\t\t} else if (ompDispatched && !binding.ompInvalidated && error instanceof AntigravityAcpError && error.code === \"quota\") {",
+              "\t\t\t\tbinding.ompInFlight = false;",
+              "\t\t\t\ttry { this.persistBinding(binding); } catch (checkpointError) { await this.invalidateBinding(binding); throw checkpointError; }",
+              "\t\t\t} else if (ompDispatched && !binding.ompInvalidated) await this.invalidateBinding(binding);",
               "\t\t\telse binding.ompInFlight = false;",
             ].join("\n"),
           },
@@ -206,7 +352,7 @@ const result = await build({
           {
             name: "reset cancellation acknowledgement per prompt",
             anchor: "binding.instructionsFingerprint = instructionFingerprint(context);",
-            replacement: "binding.ompTerminalStopReason = undefined;\n\t\t\t" + "binding.instructionsFingerprint = instructionFingerprint(context);",
+            replacement: "binding.ompTerminalStopReason = undefined;\n\t\t\t" + "binding.instructionsFingerprint = instructionFingerprint(context);\n\t\t\tbinding.ompFallbackContextTokens = parts.estimatedContextTokens;",
           },
           {
             name: "record official terminal reason before abort handling",
@@ -225,11 +371,6 @@ const result = await build({
             ].join("\n"),
           },
           {
-            name: "identical resend keeps the warm session for regeneration",
-            anchor: "// A queued caller may hold an obsolete binding after shutdown/mode changes.\n\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);",
-            replacement: "// A queued caller may hold an obsolete binding after shutdown/mode changes.\n\t\t\tbinding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);\n\t\t\t// An identical resend is OMP /retry: the generated answer was dropped from\n\t\t\t// the OMP branch, so regeneration continues on the warm ACP session.\n\t\t\tconst ompRetryResend = binding.messageCount > 0 &&\n\t\t\t\tcontext.messages.length === binding.messageCount &&\n\t\t\t\tmessagesFingerprint(context.messages) === binding.historyFingerprint;",
-          },
-          {
             name: "generated assistant boundary must match retained OMP history",
             anchor: "\t\t\tif (\n\t\t\t\tbinding.needsReconstruction || binding.mode !== this.permissionMode ||",
             replacement: [
@@ -242,6 +383,11 @@ const result = await build({
               "\t\t\t\tmessagesFingerprint(context.messages.slice(0, binding.messageCount).filter(message => message.role !== 'system')) === binding.ompConversationFingerprint) {",
               "\t\t\t\tbinding.historyFingerprint = messagesFingerprint(context.messages.slice(0, binding.messageCount));",
               "\t\t\t}",
+              "\t\t\t// Only after accepting a non-textual system/tool delta can an",
+              "\t\t\t// identical resend be recognized against the updated checkpoint.",
+              "\t\t\tconst ompRetryResend = binding.messageCount > 0 &&",
+              "\t\t\t\tcontext.messages.length === binding.messageCount &&",
+              "\t\t\t\tmessagesFingerprint(context.messages) === binding.historyFingerprint;",
               "\t\t\tif (",
               "\t\t\t\tbinding.needsReconstruction || binding.cwd !== process.cwd() ||",
               "\t\t\t\t(binding.instructionsFingerprint !== undefined && binding.instructionsFingerprint !== instructionFingerprint(context)) ||",
@@ -259,7 +405,7 @@ const result = await build({
           {
             name: "multi-step seed capabilities",
             anchor: "return { ...parts, prompt: output };",
-            replacement: "return { ...parts, prompt: output, ...(parts.seedSteps ? { seedSteps: parts.seedSteps.map(step => adaptPromptToCapabilities({ prompt: step, messageCount: parts.messageCount }, initialize).prompt) } : {}) };",
+            replacement: "return { ...parts, prompt: output, ...(parts.seedSteps ? { seedSteps: parts.seedSteps.map(step => adaptPromptToCapabilities({ prompt: step, messageCount: parts.messageCount, estimatedContextTokens: parts.estimatedContextTokens }, initialize).prompt) } : {}) };",
           },
           {
             name: "persist cancellation checkpoint flags",
@@ -307,14 +453,19 @@ const result = await build({
             replacement: "await authenticateForCredential(connection, initialize, apiKey, signal);\n\t\t\tthis.assertEpoch(epoch);\n\t\t\tconst session = await connection.newSession(process.cwd(), signal);\n\t\t\ttry { this.assertEpoch(epoch); } finally { await connection.discardSession?.(session.sessionId); }",
           },
           {
+            name: "refresh permission fallback context estimate",
+            anchor: "\t\t\t\tbinding.permission = undefined;\n\t\t\t\tclearTimeout(pending.timer);",
+            replacement: "\t\t\t\tbinding.permission = undefined;\n\t\t\t\tclearTimeout(pending.timer);\n\t\t\t\tbinding.ompFallbackContextTokens = estimateContextTokens(context);",
+          },
+          {
             name: "include seed usage",
             anchor: "const usage = usageFromPrompt(response);",
-            replacement: "const usage = usageFromPrompt(response);\n\t\t\tif (ompSeedUsage) {\n\t\t\t\tusage.input += ompSeedUsage.input;\n\t\t\t\tusage.output += ompSeedUsage.output;\n\t\t\t\tusage.cacheRead += ompSeedUsage.cacheRead;\n\t\t\t\tusage.cacheWrite += ompSeedUsage.cacheWrite;\n\t\t\t\tusage.totalTokens += ompSeedUsage.totalTokens;\n\t\t\t\tif (ompSeedUsage.reasoning !== undefined) usage.reasoning = (usage.reasoning ?? 0) + ompSeedUsage.reasoning;\n\t\t\t}",
+            replacement: "const usage = usageFromPrompt(response, binding.ompFallbackContextTokens);\n\t\t\tif (ompSeedUsage) {\n\t\t\t\tusage.input += ompSeedUsage.input;\n\t\t\t\tusage.output += ompSeedUsage.output;\n\t\t\t\tusage.cacheRead += ompSeedUsage.cacheRead;\n\t\t\t\tusage.cacheWrite += ompSeedUsage.cacheWrite;\n\t\t\t\tusage.totalTokens += ompSeedUsage.totalTokens;\n\t\t\t\tif (ompSeedUsage.reasoning !== undefined) usage.reasoning = (usage.reasoning ?? 0) + ompSeedUsage.reasoning;\n\t\t\t}",
           },
           {
             name: "deliver orphaned relay results in a new turn",
             anchor: "\t\t\t} else {\n\t\t\t\tbinding.writer = writer;\n\t\t\t\tthis.noteContinuationInstructions(binding, context);\n\t\t\t\tbinding.pendingContextCount = context.messages.length;\n\t\t\t\tbinding.pendingContextFingerprint = messagesFingerprint(context.messages);\n\t\t\t\tfor (const { pending, message } of results) {",
-            replacement: "\t\t\t} else if (!binding.turnCompletion) {\n\t\t\t\tcancelPiTools(binding, \"The previous ACP turn ended before the relayed tool result arrived; the result will be replayed as history in a new continuation\");\n\t\t\t\tbinding.pendingTools.clear();\n\t\t\t\tbinding.needsReconstruction = true;\n\t\t\t} else {\n\t\t\t\tbinding.writer = writer;\n\t\t\t\tthis.noteContinuationInstructions(binding, context);\n\t\t\t\tbinding.pendingContextCount = context.messages.length;\n\t\t\t\tbinding.pendingContextFingerprint = messagesFingerprint(context.messages);\n\t\t\t\tfor (const { pending, message } of results) {",
+            replacement: "\t\t\t} else if (!binding.turnCompletion) {\n\t\t\t\tcancelPiTools(binding, \"The previous ACP turn ended before the relayed tool result arrived; the result will be replayed as history in a new continuation\");\n\t\t\t\tbinding.pendingTools.clear();\n\t\t\t\tbinding.needsReconstruction = true;\n\t\t\t} else {\n\t\t\t\tbinding.writer = writer;\n\t\t\t\tthis.noteContinuationInstructions(binding, context);\n\t\t\t\tbinding.pendingContextCount = context.messages.length;\n\t\t\t\tbinding.pendingContextFingerprint = messagesFingerprint(context.messages);\n\t\t\t\tbinding.ompFallbackContextTokens = estimateContextTokens(context);\n\t\t\t\tfor (const { pending, message } of results) {",
           },
           {
             name: "begin relay turn",
@@ -324,7 +475,7 @@ const result = await build({
           {
             name: "end relay turn",
             anchor: "\t\t\tcompleteTurn?.();\n\t\t\tbinding.turnCompletion = undefined;",
-            replacement: "\t\t\tcompleteTurn?.();\n\t\t\tbinding.relay.endTurn();\n\t\t\tbinding.turnCompletion = undefined;",
+            replacement: "\t\t\tcompleteTurn?.();\n\t\t\tbinding.relay.endTurn();\n\t\t\tbinding.turnCompletion = undefined;\n\t\t\tbinding.ompFallbackContextTokens = undefined;",
           },
           {
             name: "queued relay fingerprint check",
@@ -379,7 +530,7 @@ const result = await build({
         const asyncPatches = [
           ["private persistBinding(binding: Binding): void", "private async persistBinding(binding: Binding): Promise<void>"],
           ["private noteContinuationInstructions(binding: Binding, context: Context): void", "private async noteContinuationInstructions(binding: Binding, context: Context): Promise<void>"],
-          ["private async closeBindings(): Promise<void> {", "private async closeBindings(): Promise<void> {\n const closingTurns = [...this.resolvedBindings].flatMap(binding => binding.turnCompletion ? [binding.turnCompletion] : []);\n const ephemeralBindings = [...this.resolvedBindings].filter(binding => !binding.piSessionId);\n await Promise.allSettled(ephemeralBindings.map(async binding => binding.connection.discardSession?.(binding.session.sessionId)));"],
+          ["private async closeBindings(): Promise<void> {", "private async closeBindings(): Promise<void> {\n for (const request of this.quotaInFlights) request.controller.abort(); const closingTurns = [...this.resolvedBindings].flatMap(binding => binding.turnCompletion ? [binding.turnCompletion] : []);\n const ephemeralBindings = [...this.resolvedBindings].filter(binding => !binding.piSessionId);\n await Promise.allSettled(ephemeralBindings.map(async binding => binding.connection.discardSession?.(binding.session.sessionId)));"],
           ["\t\tthis.persistBinding(createdBinding);", "\t\tthis.persistBinding(createdBinding);\n\t\tthis.assertEpoch(epoch);"],
           ["if (removeSaved && binding.piSessionId) this.sessionStore?.remove(binding.piSessionId);\n\t\t\tthis.bindings.delete(key);", "this.bindings.delete(key);\n\t\t\tif (removeSaved && binding.piSessionId) this.sessionStore?.remove(binding.piSessionId);"],
         ];
@@ -388,7 +539,7 @@ const result = await build({
           contents = contents.replace(anchor, replacement);
         }
         for (const [anchor, replacement, count] of [
-          ["this.persistBinding(", "await this.persistBinding(", 3],
+          ["this.persistBinding(", "await this.persistBinding(", 4],
           ["this.noteContinuationInstructions(binding, context);", "const continuationTurn = binding.turnCompletion; await this.noteContinuationInstructions(binding, context); if (!continuationTurn || binding.turnCompletion !== continuationTurn || binding.abortRequested || options.signal?.aborted || !binding.connection.process.alive) throw abortError();", 2],
           ["this.sessionStore?.", "await this.sessionStore?.", 8],
         ]) {
@@ -398,7 +549,7 @@ const result = await build({
         // Continuity transactions are adapter-owned. Keep explicit pinned seams
         // so an upstream update cannot silently bypass the write-ahead marker.
         const continuityPatches = [
-          ['interface Binding {', 'interface Binding {\n ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; relayBridge?: PiMcpBridge; relayFingerprint: string;'],
+          ['interface Binding {', 'interface Binding {\n ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedText?: string; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; relayBridge?: PiMcpBridge; relayFingerprint: string;'],
           ['let completeTurn: (() => void) | undefined;', 'let ompDispatched = false;\n\t\tlet completeTurn: (() => void) | undefined;'],
           ['if (existing) return existing;', `if (existing) {
             const value = await existing;
@@ -438,10 +589,14 @@ const result = await build({
               binding.ompSeeding = true;
               try {
                 for (const seedPrompt of parts.seedSteps) {
+                  binding.ompSeedText = '';
                   if (options.signal?.aborted || binding.abortRequested) throw abortError();
                   const seedResponse = await binding.connection.prompt({ sessionId: binding.session.sessionId, prompt: seedPrompt }, options.signal);
                   if (binding.ompInvalidated) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost');
                   if (binding.abortRequested || seedResponse.stopReason === 'cancelled' || options.signal?.aborted) throw abortError();
+                  const seedQuota = quotaExhaustion(binding.ompSeedText ?? '');
+                  binding.ompSeedText = undefined;
+                  if (seedQuota) await this.ompThrowQuota(binding, seedQuota);
                   if (seedResponse.stopReason !== 'end_turn') throw new AntigravityAcpError('protocol', \`ACP seed step stopped early with \${seedResponse.stopReason}\`);
                   const seedUsage = usageFromPrompt(seedResponse);
                   if (ompSeedUsage) {
@@ -736,6 +891,15 @@ const result = await build({
         if (contents.split(anchor).length !== 2) throw new Error("Pinned upstream prompt cancellation seam changed; review compatibility");
         contents = contents.replace(anchor,
           "if (aborting && this.process.alive && ['cancelled', 'end_turn'].includes(value.stopReason)) finish(() => resolve(value));\n\t\t\t\t\telse if (aborting) finish(() => reject(abortError()));");
+        const commandImportAnchor = "\ttype AuthenticateRequest,\n\ttype InitializeResponse,";
+        if (contents.split(commandImportAnchor).length !== 2) throw new Error("Pinned ACP command import seam changed; review compatibility");
+        contents = contents.replace(commandImportAnchor, "\ttype AuthenticateRequest,\n\ttype AvailableCommand,\n\ttype InitializeResponse,");
+        const initialCommandsAnchor = "\t\tconst state = { ...this.sessions.get(sessionId), ...decodeSessionState(response) };\n\t\tthis.sessions.set(sessionId, state);\n\t\treturn state;";
+        if (contents.split(initialCommandsAnchor).length !== 2) throw new Error("Pinned initial available-commands seam changed; review compatibility");
+        contents = contents.replace(initialCommandsAnchor,
+          "\t\tconst commands = (response as { availableCommands?: AvailableCommand[] | null }).availableCommands;\n" +
+          "\t\tconst state = { ...this.sessions.get(sessionId), ...decodeSessionState(response), ...(commands === undefined ? {} : { availableCommands: commands }) };\n" +
+          "\t\tthis.sessions.set(sessionId, state);\n\t\treturn state;");
         const detailAnchor = "const detail = (data as { details?: unknown }).details;";
         if (contents.split(detailAnchor).length !== 2) throw new Error("Pinned upstream structured error detail seam changed; review compatibility");
         contents = contents.replace(detailAnchor,

@@ -1,12 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { Diagnostics } from "../extension/diagnostics.ts";
-import { CatalogStore } from "../extension/catalog-store.ts";
+import { CatalogStore, type ConfiguredCatalogModel } from "../extension/catalog-store.ts";
 import { SessionRuntimePool } from "../extension/runtime-pool.ts";
 import { registerOmpAdapter } from "../extension/index.ts";
+import type { OmpCommandContext } from "../extension/auth-sync.ts";
+import { selectRuntimeModel } from "../extension/model-catalog.ts";
 import { Type } from "../extension/runtime.mjs";
 
 test("actual OMP wrapper refreshes tool audit for same-array additions/removals and schema/name edits", async () => {
@@ -28,7 +31,7 @@ test("actual OMP wrapper refreshes tool audit for same-array additions/removals 
     assert.match(await audit(), /Available: read/);
     tools.push({ name: "bash", parameters: Type.Object({ cmd: Type.String() }) });
     assert.match(await audit(), /Available: bash, read/);
-    tools.splice(0, 1); assert.match(await audit(), /Available: bash\n/);
+    tools.splice(0, 1); assert.match(await audit(), /Available: bash(?:\n|$)/);
     tools[0].name = "renamed"; assert.match(await audit(), /Available: renamed/);
     tools[0].parameters.type = "array"; assert.match(await audit(), /schema omitted/);
   } finally { await hooks.get("session_shutdown")?.({}, {}); await fs.rm(state, { recursive: true, force: true }); }
@@ -60,6 +63,35 @@ test("inference refuses to start ACP when the local Google login is absent", asy
     await fs.rm(state, { recursive: true, force: true });
     await fs.rm(geminiHome, { recursive: true, force: true });
   }
+});
+
+test("the initial offline catalog includes Argon without spawning ACP", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-offline-argon-"));
+  let models: ConfiguredCatalogModel[] | undefined;
+  let spawns = 0;
+  try {
+    await registerOmpAdapter({
+      on() {},
+      registerTool() {},
+      registerCommand() {},
+      registerProvider: (_name, value) => {
+        if (!value || typeof value !== "object" || !("models" in value) || !Array.isArray(value.models)) {
+          throw new Error("provider did not expose its model catalog");
+        }
+        models = value.models as ConfiguredCatalogModel[];
+      },
+    }, state, () => { spawns++; throw new Error("offline catalog must not spawn ACP"); });
+    const argon = models?.find(model => model.id === "gemini-4-argon");
+    assert.ok(argon, "Argon must be selectable before dynamic discovery succeeds");
+    assert.equal(argon.name, "Gemini 4 Argon");
+    assert.equal(argon.contextWindow, 1_000_000);
+    assert.equal(argon.maxTokens, 65_536);
+    assert.equal(argon.reasoning, true);
+    assert.deepEqual(argon.thinking?.efforts, ["low", "medium", "high"]);
+    assert.equal(selectRuntimeModel(argon, "low").thinkingLevelMap?.low, "gemini-4-argon-low");
+    assert.equal(selectRuntimeModel(argon, "high").thinkingLevelMap?.high, "gemini-4-argon-high");
+    assert.equal(spawns, 0);
+  } finally { await fs.rm(state, { recursive: true, force: true }); }
 });
 
 test("catalog discovery refuses to prepare ACP when auth preflight fails", async () => {
@@ -182,6 +214,53 @@ test("catalog cache notices in-place settings changes and reuses missing-file fa
   } finally { await fs.rm(state, { recursive: true, force: true }); }
 });
 
+test("account session counts reuse unchanged files but follow rewrites and stat failures", async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-account-count-"));
+  const file = path.join(state, "sessions.json");
+  const hooks = new Map<string, (event: unknown, ctx: OmpCommandContext) => unknown>();
+  const notices: string[] = [];
+  let command: { handler: (args: string, ctx: OmpCommandContext) => Promise<void> } | undefined;
+  const ctx = { ui: { notify: (message: string) => notices.push(message) } } as OmpCommandContext;
+  const writeRecords = async (count: number) => {
+    await fs.writeFile(file, JSON.stringify(Array.from({ length: count }, (_, index) => ({ piSessionId: `session-${index}` }))));
+  };
+  try {
+    await writeRecords(1);
+    await registerOmpAdapter({
+      on: (name, fn) => hooks.set(name, fn),
+      registerTool() {},
+      registerProvider() {},
+      registerCommand: (_name, value) => { command = value; },
+    }, state);
+    const read = t.mock.method(fsSync, "readFileSync");
+    const sessionReads = () => read.mock.calls.filter(call => call.arguments[0] === file).length;
+    await command!.handler("account", ctx);
+    assert.match(notices.at(-1)!, /Saved ACP sessions: 1/);
+    assert.equal(sessionReads(), 1);
+    await command!.handler("account", ctx);
+    assert.equal(sessionReads(), 1, "an unchanged fingerprint must reuse the parsed count");
+    await writeRecords(2);
+    await command!.handler("account", ctx);
+    assert.match(notices.at(-1)!, /Saved ACP sessions: 2/);
+    assert.equal(sessionReads(), 2, "an external rewrite must invalidate the fingerprint");
+
+    const originalStat = fsSync.statSync;
+    t.mock.method(fsSync, "statSync", (target, options) => {
+      if (target === file) throw Object.assign(new Error("synthetic transient stat failure"), { code: "EMFILE" });
+      return originalStat(target, options);
+    });
+    await writeRecords(3);
+    await command!.handler("account", ctx);
+    assert.match(notices.at(-1)!, /Saved ACP sessions: 3/);
+    assert.equal(sessionReads(), 3, "a stat failure must fall through to a fresh read");
+    await command!.handler("account", ctx);
+    assert.equal(sessionReads(), 4, "a transient stat failure must not become a cached zero or stale count");
+  } finally {
+    await hooks.get("session_shutdown")?.({}, ctx);
+    await fs.rm(state, { recursive: true, force: true });
+  }
+});
+
 test("failed catalog persistence leaves the live catalog intact", async () => {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-catalog-commit-"));
   try {
@@ -221,6 +300,19 @@ test("diagnostics defaults off, bounds samples, persists only enablement and cle
     assert.deepEqual(JSON.parse(await fs.readFile(file, "utf8")), { enabled: true });
     assert.equal(new Diagnostics(file).status().enabled, true);
     d.configure(false); assert.equal(d.status().samples, 0);
+  } finally { await fs.rm(state, { recursive: true, force: true }); }
+});
+
+test("diagnostics groups every stage and preserves its existing upper-median reporting", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-diagnostics-stages-"));
+  try {
+    const d = new Diagnostics(path.join(state, "diagnostics.json"));
+    d.configure(true);
+    for (const [stage, ms] of [["alpha", 3], ["beta", 9], ["alpha", 1], ["beta", 11], ["alpha", 2]] as const) d.record(stage, ms);
+    assert.deepEqual(d.status().stages, {
+      alpha: { count: 3, medianMs: 2, maxMs: 3 },
+      beta: { count: 2, medianMs: 11, maxMs: 11 },
+    });
   } finally { await fs.rm(state, { recursive: true, force: true }); }
 });
 

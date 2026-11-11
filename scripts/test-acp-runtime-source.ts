@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { assertSelectedAcpCliLaunch, preferNewestAcpRuntime, resolveAcpPermissionProfile } from "../extension/acp-runtime-source.ts";
+import { assertSelectedAcpCliLaunch, preferNewestAcpRuntime, resolveAcpPermissionProfile, resolveManagedAcpCommand } from "../extension/acp-runtime-source.ts";
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "acp-runtime-source-"));
 const bin = path.join(work, "bin");
@@ -30,6 +30,9 @@ function setManagedVersion(version: string): void {
   const current = path.join(home, ".local", "opt", "agy-acp", "current");
   fs.mkdirSync(current, { recursive: true });
   fs.writeFileSync(path.join(current, "install-integrity.json"), JSON.stringify({ version }));
+  const binary = path.join(current, "agy_acp_server.par");
+  fs.writeFileSync(binary, "fixture managed binary");
+  fs.chmodSync(binary, 0o755);
 }
 
 function freshStateDir(): string {
@@ -156,6 +159,24 @@ for (const script of ["exit 1", "echo prerelease"]) {
   const preference = await preferNewestAcpRuntime(stateDir, env, home);
   assert.equal(preference.source, "managed");
   assert.equal(env.AGY_ACP_BIN, undefined);
+}
+
+// Automatic CLI selection keeps inference there, while quota uses the managed ACP.
+{
+  stubAgy("echo 3.0.0");
+  setManagedVersion("1.4.5");
+  const env = freshEnv();
+  const stateDir = freshStateDir();
+  const preference = await preferNewestAcpRuntime(stateDir, env, home);
+  assert.equal(preference.source, "cli");
+  const quota = assertSelectedAcpCliLaunch(stateDir, preference, env, "quota", home);
+  const command = path.join(home, ".local", "opt", "agy-acp", "current", "agy_acp_server.par");
+  assert.deepEqual(quota, { command, args: [] });
+  assert.equal(env.AGY_ACP_BIN, command);
+  assert.deepEqual(resolveManagedAcpCommand(home, "linux"), { command, args: ["--uid="] });
+  env.AGY_ACP_BIN = "/opt/custom-quota-bin";
+  assertSelectedAcpCliLaunch(stateDir, preference, env, "quota");
+  assert.equal(env.AGY_ACP_BIN, "/opt/custom-quota-bin");
 }
 
 fs.rmSync(work, { recursive: true, force: true });

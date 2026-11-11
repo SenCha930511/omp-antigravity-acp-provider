@@ -20,6 +20,7 @@ const otherModel = { ...model, id: "fixture-other", name: "Offline other" };
 const user = (content: string) => ({ role: "user", content, timestamp: 1 });
 const payload = (prompt: any) => JSON.stringify(prompt.prompt);
 const current = (prompt: any) => prompt.prompt.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+const quotaResetReply = "Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset on Nov 12, 2026 01:02 UTC.";
 
 async function fixture(maxIdleEntries = 2) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-transitions-"));
@@ -88,7 +89,9 @@ async function fixture(maxIdleEntries = 2) {
           connection.frozen.delete(connection.id);
           connection.prompts.push({ ...structuredClone(request), model: connection.getSessionState().models.currentModelId });
           try {
-            const action = actions.shift();
+            const action = actions[0] === "seed-quota-reset" && payload(request).includes("Historical context chunk (seed step)")
+              ? actions[0]
+              : actions.shift();
             if (action === "tools" || action === "tools-cap" || action === "tools-max") {
               const binding = [...runtime.resolvedBindings].find((b: any) => b.session.sessionId === connection.id);
               const result = await Promise.race([runtime.requestPiTool(binding, { id: "pending-read", name: "read", arguments: {} }), closed.promise]);
@@ -116,6 +119,19 @@ async function fixture(maxIdleEntries = 2) {
                 options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] });
               options.handlers.onUpdate({ sessionId: foreign, update: { sessionUpdate: "agent_message_chunk",
                 content: { type: "text", text: "FOREIGN_SESSION_OUTPUT" } } });
+            }
+            if (action === "tools-quota") {
+              const binding = [...runtime.resolvedBindings].find((b: any) => b.session.sessionId === connection.id);
+              void runtime.requestPiTool(binding, { id: "quota-parked-tool", name: "read", arguments: {} }).then((result: any) => {
+                connection.quotaToolResult = result;
+              });
+            }
+            const directQuota = action && ["quota-reset", "seed-quota-reply", "tools-quota", "preamble-quota"].includes(action);
+            const finalSeedQuota = action === "seed-quota-reset" && !payload(request).includes("Historical context chunk (seed step)");
+            if (directQuota || finalSeedQuota) {
+              const text = action === "preamble-quota" ? `Normal explanation follows\n${quotaResetReply}` : quotaResetReply;
+              connection.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+              return action === "seed-quota-reset" || action === "seed-quota-reply" ? { stopReason: "end_turn" } : okResponse();
             }
             if (action === "presentation") {
               connection.emit({ sessionUpdate: "plan", entries: [{ status: "in_progress", content: "Synthetic plan" }] });
@@ -169,6 +185,75 @@ test("A → new B → resume A keeps ACP identities separate and sends only A's 
     assert.equal(request.sessionId, a);
     assert.match(current(request), /REQ_A_NEXT/);
     assert.doesNotMatch(payload(request), /REQ_A_FIRST|REQ_B_FIRST/);
+  } finally { await f.close(); }
+});
+
+test("quota exhaustion responses fail with their reset time before checkpoint persistence", async () => {
+  const f = await fixture();
+  try {
+    f.actions.push("quota-reset");
+    await assert.rejects(f.turn("quota", [user("REQ_QUOTA_RESET")]), error => {
+      assert.match(String(error), /Antigravity quota exceeded for gemini-3\.8-flash/);
+      assert.match(String(error), /Resets at 2026-11-12T01:02:00\.000Z/);
+      return true;
+    });
+    const initialCheckpoint = await f.store.get("quota");
+    assert.equal(initialCheckpoint?.messageCount, 0, "only the pre-prompt checkpoint may survive a quota failure");
+    assert.equal(initialCheckpoint?.expectedAssistantFingerprint, undefined, "the exhausted text must not become an accepted assistant response");
+    const connection = f.connections[0];
+    assert.equal(connection.prompts.length, 1, "quota exhaustion must not trigger an automatic inference retry");
+    assert.equal(connection.process.alive, true, "a healthy ACP process must remain available after quota exhaustion");
+
+    await f.turn("quota", [user("REQ_QUOTA_RESET")]);
+    assert.equal(f.connections.length, 1, "the next request must reuse the healthy ACP process");
+    assert.equal(f.connections[0], connection);
+    assert.equal(connection.prompts.length, 2, "only the explicit user retry sends another inference");
+    assert.equal((await f.store.get("quota"))!.acpSessionId, connection.id);
+  } finally { await f.close(); }
+});
+
+test("a quoted quota notice after ordinary text remains a normal assistant answer", async () => {
+  const f = await fixture();
+  try {
+    f.actions.push("preamble-quota");
+    const answer = await f.turn("quoted-quota", [user("REQ_QUOTED_NOTICE")]);
+    assert.match(answer.content.map((block: any) => block.type === "text" ? block.text : "").join(""), /Normal explanation follows/);
+    assert.ok((await f.store.get("quoted-quota"))!.expectedAssistantFingerprint);
+    assert.equal(f.connections[0].process.alive, true);
+  } finally { await f.close(); }
+});
+
+test("quota checkpoints clear in-flight state and restore the healthy session after runtime disposal", async () => {
+  const f = await fixture();
+  try {
+    const request = user("REQ_QUOTA_RESTORE");
+    const originalId = f.connections.length;
+    f.actions.push("quota-reset");
+    await assert.rejects(f.turn("quota-restore", [request]), /Antigravity quota exceeded/);
+    const acpSessionId = (await f.store.get("quota-restore"))!.acpSessionId;
+    assert.equal((await f.store.get("quota-restore"))!.ompInFlight, false);
+
+    await f.pool.close("quota-restore");
+    await f.turn("quota-restore", [request]);
+    assert.equal(f.connections.length, originalId + 2, "a new runtime owns the restored connection");
+    const restored = f.connections.at(-1);
+    assert.equal(restored.id, acpSessionId, "quota failure must not force a new ACP session after runtime disposal");
+    assert.deepEqual(restored.restored, [{ method: "resume", id: acpSessionId }]);
+    assert.equal(restored.prompts.length, 1, "restoration sends only the explicit retry");
+  } finally { await f.close(); }
+});
+
+test("quota with a parked tool settles cancellation and never preserves the unsafe binding", async () => {
+  const f = await fixture();
+  try {
+    f.actions.push("tools-quota");
+    await assert.rejects(f.turn("tools-quota", [user("REQ_TOOL_QUOTA")]), /Antigravity quota exceeded/);
+    await tick();
+    const connection = f.connections[0];
+    assert.equal(connection.quotaToolResult?.isError, true, "the parked OMP tool must settle instead of timing out");
+    assert.match(connection.quotaToolResult.content[0].text, /before .*tool result/);
+    assert.equal(connection.process.alive, false, "pending work cannot remain attached to a new prompt boundary");
+    assert.equal(await f.store.get("tools-quota"), undefined);
   } finally { await f.close(); }
 });
 
@@ -266,6 +351,30 @@ test("model changes update ACP in place and repeating the same text as a new tur
     assert.equal(connection.prompts.length, 3);
     assert.equal((payload(connection.prompts.at(-1)).match(/REQ_SAME_TEXT/g) ?? []).length, 1,
       "A distinct later turn with identical text remains a legitimate request");
+  } finally { await f.close(); }
+});
+
+test("a failed warm model change retires its checkpoint and rebuilds on retry", async () => {
+  const f = await fixture();
+  try {
+    const first = user("REQ_MODEL_CHANGE_FIRST");
+    const answer = await f.turn("model", [first]);
+    const originalId = (await f.store.get("model"))!.acpSessionId;
+    const warm = f.connections[0];
+    warm.setModel = async () => { throw new Error("synthetic split model/effort failure"); };
+    await assert.rejects(
+      f.turn("model", [first, answer, user("REQ_MODEL_CHANGE_FAIL")], { model: otherModel }),
+      /synthetic split model\/effort failure/,
+    );
+    assert.equal(warm.process.alive, false, "failed selection must close the possibly mutated session");
+    assert.equal(await f.store.get("model"), undefined, "failed selection must not retain a resumable checkpoint");
+
+    await f.turn("model", [first, answer, user("REQ_MODEL_CHANGE_RETRY")], { model: otherModel });
+    const rebuilt = f.connections.at(-1);
+    assert.notEqual(rebuilt, warm);
+    assert.notEqual(rebuilt.id, originalId);
+    assert.equal(rebuilt.prompts.at(-1).model, otherModel.id);
+    assert.equal((await f.store.get("model"))!.acpSessionId, rebuilt.id);
   } finally { await f.close(); }
 });
 
@@ -562,6 +671,27 @@ test("mid-session tool changes and volatile system-reminder/tool-name updates ke
   } finally { await f.close(); }
 });
 
+test("retry after an isolated toolsAdded/toolsRemoved system delta reuses the fingerprint-gated warm binding", async () => {
+  const f = await fixture();
+  try {
+    const readTool = { name: "read", description: "Read", parameters: { type: "object", properties: {} } };
+    const writeTool = { name: "write", description: "Write", parameters: { type: "object", properties: {} } };
+    const first = user("REQ_RETRY_WITH_TOOL_DELTA");
+    await f.turn("retry-tool-delta", [
+      { role: "system", content: "CORE_POLICY", toolsAdded: [readTool] }, first,
+    ], { tools: [readTool] });
+    const connection = f.connections[0];
+    await f.turn("retry-tool-delta", [
+      { role: "system", content: "CORE_POLICY", toolsAdded: [writeTool], toolsRemoved: ["read"] }, first,
+    ], { tools: [writeTool] });
+    assert.equal(f.connections.length, 1, "the isolated metadata delta must be reconciled before retry detection");
+    assert.equal(connection.prompts.length, 2);
+    assert.equal((await f.store.get("retry-tool-delta"))!.acpSessionId, connection.id);
+    assert.match(current(connection.prompts[1]), /OMP retry request/);
+    assert.match(current(connection.prompts[1]), /REQ_RETRY_WITH_TOOL_DELTA/);
+  } finally { await f.close(); }
+});
+
 test("assistant boundary tolerates stripped thinking blocks and host metadata normalization", async () => {
   const f = await fixture();
   try {
@@ -642,6 +772,61 @@ test("multi-step seed usage is included in the final assistant usage", async () 
     assert.equal(answer.usage.output, 2 * prompts);
     assert.equal(answer.usage.reasoning, prompts);
     assert.equal(answer.usage.totalTokens, 12 * prompts);
+  } finally { await f.close(); }
+});
+
+test("quota during a hidden seed stops replay immediately and leaves a retryable checkpoint", async () => {
+  const f = await fixture();
+  try {
+    f.actions.push("seed-quota-reply");
+    const messages = [
+      user("EARLY_QUOTA_1_" + "a".repeat(75_000)),
+      { role: "assistant", content: [{ type: "text", text: "EARLY_QUOTA_2_" + "b".repeat(75_000) }] },
+      user("EARLY_QUOTA_3_" + "c".repeat(75_000)),
+    ];
+    await assert.rejects(f.turn("early-seed-quota", messages), /2026-11-12T01:02:00\.000Z/);
+    assert.equal(f.connections[0].prompts.length, 1, "no later seed or current request may be sent after quota exhaustion");
+    assert.equal(f.connections[0].process.alive, true);
+    const checkpoint = await f.store.get("early-seed-quota");
+    assert.equal(checkpoint?.ompInFlight, false);
+    assert.equal(checkpoint?.expectedAssistantFingerprint, undefined);
+
+    await f.turn("early-seed-quota", messages);
+    assert.ok(f.connections[0].prompts.length >= 3, "the explicit retry can replay independent seed steps before its final prompt");
+  } finally { await f.close(); }
+});
+
+test("seed-step usage cannot hide a final quota notice that has no response usage", async () => {
+  const f = await fixture();
+  try {
+    f.setPromptUsage({ inputTokens: 10, outputTokens: 2, thoughtTokens: 1 });
+    f.actions.push("seed-quota-reset");
+    const messages = [
+      user("QUOTA_SEED_1_" + "a".repeat(75_000)),
+      { role: "assistant", content: [{ type: "text", text: "QUOTA_SEED_2_" + "b".repeat(75_000) }] },
+      user("QUOTA_SEED_3_" + "c".repeat(75_000)),
+      { role: "assistant", content: [{ type: "text", text: "QUOTA_SEED_4_" + "d".repeat(75_000) }] },
+      user("FINAL_QUOTA_QUESTION"),
+    ];
+    await assert.rejects(f.turn("seed-quota", messages), error => {
+      assert.match(String(error), /Antigravity quota exceeded/);
+      assert.match(String(error), /2026-11-12T01:02:00\.000Z/);
+      return true;
+    });
+    assert.ok(f.connections[0].prompts.length >= 2, "the test must include usage-bearing seed steps");
+    const checkpoint = await f.store.get("seed-quota");
+    assert.equal(checkpoint?.messageCount, 0);
+    assert.equal(checkpoint?.expectedAssistantFingerprint, undefined);
+  } finally { await f.close(); }
+});
+
+test("usage already carried into the final response cannot hide quota exhaustion", async () => {
+  const f = await fixture();
+  try {
+    f.setPromptUsage({ inputTokens: 10, outputTokens: 2, thoughtTokens: 1 });
+    f.actions.push("quota-reset");
+    await assert.rejects(f.turn("continuation-quota", [user("REQ_CONTINUED_QUOTA")]), /2026-11-12T01:02:00\.000Z/);
+    assert.equal(f.connections[0].prompts.length, 1, "quota exhaustion remains non-retryable");
   } finally { await f.close(); }
 });
 

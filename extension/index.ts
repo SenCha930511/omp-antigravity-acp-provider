@@ -17,9 +17,10 @@ import { stableTools } from "./tool-order.ts";
 import { toolDeclarations, normalizeOmpSystemDeltas, type OmpToolDeclaration } from "./omp-context.ts";
 import { OmpSessionLifecycle, type OmpProviderSessionState } from "./omp-session-lifecycle.ts";
 import { DEFAULT_USAGE_MODE, loadContextSettings } from "./context-settings.ts";
-import { selectRuntimeModel, type PublicCatalogModel } from "./model-catalog.ts";
+import { projectCatalog, selectRuntimeModel, type PublicCatalogModel } from "./model-catalog.ts";
 import { TOOL_ROUTING } from "./tool-routing.ts";
-import { TranscriptRouting } from "./transcript-routing.ts";
+import { TranscriptRouting, type RoutingAttempt } from "./transcript-routing.ts";
+import { sourceId } from "./omp-session-source.ts";
 import { loadToolPolicy } from "./tool-policy.ts";
 import {
   MARKER,
@@ -95,14 +96,23 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   const cleanup = new SessionCleanup(stateDir);
   const diagnostics = new Diagnostics(path.join(stateDir, "diagnostics.json"));
   // Count saved records from disk so /antigravity-acp account needs no runtime.
+  let savedSessionCache: { stamp: string; count: number } | undefined;
   const savedSessionCount = (): number => {
+    let stamp: string | undefined;
+    try {
+      const stat = fs.statSync(sessionStorePath);
+      stamp = `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`;
+    } catch { /* Missing or unreadable store: fall through to a fresh read. */ }
+    if (stamp !== undefined && savedSessionCache?.stamp === stamp) return savedSessionCache.count;
+    let count = 0;
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(sessionStorePath, "utf8"));
-      return Array.isArray(parsed)
-        ? parsed.filter(record => Boolean(record) && typeof record === "object" &&
-            typeof (record as { piSessionId?: unknown }).piSessionId === "string").length
-        : 0;
+      if (Array.isArray(parsed)) for (const record of parsed) {
+        if (record && typeof record === "object" && "piSessionId" in record && typeof record.piSessionId === "string") count++;
+      }
     } catch { return 0; }
+    if (stamp !== undefined) savedSessionCache = { stamp, count };
+    return count;
   };
 
   // Loading this global extension must not start ACP or query Google.
@@ -155,8 +165,9 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       ...options.env,
       OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS: profile.autoApproveProcess ? "1" : "",
     };
-    assertSelectedAcpCliLaunch(stateDir, selectedRuntimePreference, env);
-    return createConnection({ ...options, env });
+    const launch = options.command || options.entryPath ? undefined
+      : assertSelectedAcpCliLaunch(stateDir, selectedRuntimePreference, env, options.ompPurpose === "quota" ? "quota" : "inference");
+    return createConnection({ ...options, ...launch, env });
   }
 
   const lifecycle = new OmpSessionLifecycle(id => runtimes.close(id), async id => {
@@ -195,16 +206,25 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   const routing = new TranscriptRouting();
   const sessionIdOf = (ctx: OmpCommandContext | undefined): string | undefined => ctx?.sessionManager?.getSessionId?.();
   pi.on("session_shutdown", async (_event: unknown, ctx: OmpCommandContext) => {
+    const failures: unknown[] = [];
     const sessionId = sessionIdOf(ctx);
-    if (sessionId) routing.forget(sessionId);
     if (sessionId) {
-      await Promise.all([lifecycle.closeSession(sessionId), lifecycle.waitClosing(), runtimes.closeIdle()]);
+      const routingId = routing.forget(sessionId, ctx?.sessionManager?.getSessionFile?.());
+      const closing = [lifecycle.closeSession(sessionId)];
+      if (routingId !== sessionId) closing.push(lifecycle.closeSession(routingId));
+      const results = await Promise.allSettled([...closing, lifecycle.waitClosing(), runtimes.closeIdle()]);
+      for (const result of results) if (result.status === "rejected") failures.push(result.reason);
     } else {
       await closePool();
     }
-    await sessionStore.flush();
-    await cleanup.flushStoreNotes();
-    if (!runtimes.values().length) await cleanup.stop();
+    await sessionStore.flush().catch(error => { failures.push(error); });
+    await Promise.allSettled([
+      cleanup.flushStoreNotes(),
+      runtimes.values().length ? Promise.resolve() : cleanup.stop(),
+    ]).then(results => {
+      for (const result of results) if (result.status === "rejected") failures.push(result.reason);
+    });
+    if (failures.length) throw failures[0];
   });
 
   function syncProviderRegistration() {
@@ -233,7 +253,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   const trackOmpSource = async (_event: unknown, ctx: OmpCommandContext) => {
     const transcriptId = ctx.sessionManager?.getSessionId?.(), file = ctx.sessionManager?.getSessionFile?.();
     if (!transcriptId || !file || transcriptId.includes(":side:")) return;
-    const id = routing.take(transcriptId);
+    const id = routing.take(transcriptId, file);
     try { await cleanup.trackSource(id, file); } catch { /* Unproven or not-yet-persisted sources remain protected. */ }
   };
 
@@ -253,11 +273,26 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     await trackOmpSource(event, ctx);
     notifyAcpCompactions(ctx);
   });
-  pi.on("session_switch", async (event: unknown, ctx: OmpCommandContext) => {
+  const handleSourceTransition = async (event: unknown, ctx: OmpCommandContext) => {
     routing.clearPending();
+    const transcriptId = sessionIdOf(ctx), file = ctx.sessionManager?.getSessionFile?.();
+    const reason: unknown = typeof event === "object" && event !== null ? Reflect.get(event, "reason") : undefined;
+    if ((reason === "new" || reason === "resume" || reason === "fork" || reason === "branch" || reason === "btw")
+      && !transcriptId?.includes(":side:")) {
+      if (!transcriptId || !file) {
+        routing.invalidateUnknownSource();
+      } else {
+        const candidate: unknown = Reflect.get(event, "previousSessionFile");
+        const previousFile = typeof candidate === "string" ? candidate : undefined;
+        const previousTranscriptId = previousFile ? await sourceId(previousFile).catch(() => undefined) : undefined;
+        routing.noteSourceSwitch(reason, transcriptId, file, previousTranscriptId, previousFile);
+      }
+    }
     await trackOmpSource(event, ctx);
     notifyAcpCompactions(ctx);
-  });
+  };
+  pi.on("session_switch", handleSourceTransition);
+  pi.on("session_branch", handleSourceTransition);
 
   pi.registerTool({
     name: PERMISSION_TOOL_NAME,
@@ -281,14 +316,21 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     cachePath,
     cleanup,
     prepareRuntime,
-    () => [...(FALLBACK_MODELS as PublicCatalogModel[])],
+    () => [
+      ...(FALLBACK_MODELS as PublicCatalogModel[]),
+      ...projectCatalog([
+        { modelId: "gemini-4-argon-low", name: "Gemini 4 Argon (low)" },
+        { modelId: "gemini-4-argon-medium", name: "Gemini 4 Argon (medium)" },
+        { modelId: "gemini-4-argon-high", name: "Gemini 4 Argon (high)" },
+      ]),
+    ],
     requireAcpAuth,
     spawnConnection,
   );
   let initialModels = catalogStore.loadInitialOrCached(contextSettings);
 
   pi.registerCommand("antigravity-acp", {
-    description: "Inspect ACP status/account/tools/usage/context/cleanup, manage Antigravity login/logout, configure budgets, toggle debug, refresh models or set tool policies",
+    description: "Inspect ACP status/account/tools/usage/quota/context/cleanup, manage Antigravity login/logout, configure budgets, toggle debug, refresh models or set tool policies",
     handler: createAntigravityCommandHandler({
       configPath,
       contextPath,
@@ -384,9 +426,11 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
           // loading/selecting/listing models performs no ACP process activity.
           const deferred = new PiEventWriter(model);
           const routingId = options?.sessionId;
-          routing.noteStream(routingId);
+          let replacedOwner: OmpProviderSessionState | undefined;
+          const ticket = lifecycle.capture(routingId, options?.providerSessionState,
+            previous => { replacedOwner = previous; });
+          const routingAttempt: RoutingAttempt | undefined = routing.noteStream(routingId, ticket.scope, replacedOwner);
           let routingFailed = false;
-          const ticket = lifecycle.capture(routingId, options?.providerSessionState);
           void (async () => {
             try {
               if (options?.signal?.aborted) throw new Error("ACP request cancelled before startup");
@@ -410,6 +454,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
                   deferred.stream.push(event);
                 }
                 deferred.stream.end();
+                routing.noteSuccess(routingAttempt);
                 if (process.env.OMP_ACP_TRACE === "1") {
                   const snapshot = await runtime.snapshot();
                   console.error("[ACP bridge]", JSON.stringify(snapshot.processes.map((item: { mcpHttp: boolean; omittedTools: unknown[] }) => ({ mcpHttp: item.mcpHttp, omittedTools: item.omittedTools }))));
@@ -419,7 +464,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
               routingFailed = true;
               deferred.fail(classifyAcpFailure(error), options?.signal?.aborted === true);
             } finally {
-              if (routingFailed) routing.noteFailure(routingId);
+              if (routingFailed) routing.noteFailure(routingAttempt);
               lifecycle.finish(ticket);
             }
           })();

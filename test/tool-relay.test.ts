@@ -135,11 +135,14 @@ test("cancelAll resolves waiters through the original promise", async () => {
   const { clock, relay } = relayFor();
   const deferred = Promise.withResolvers<CallToolResult>();
   const call = relay.call({ id: "call-1", name: "read", arguments: {} }, () => deferred.promise);
+  assert.equal(relay.pendingCount, 1);
   clock.advance(100);
   await call;
+  assert.equal(relay.pendingCount, 1);
   const waiting = relay.await("call-1");
   clock.advance(100);
   await waiting;
+  assert.equal(relay.pendingCount, 1);
   deferred.resolve({ content: [{ type: "text", text: "cancelled" }], isError: true });
   relay.cancelAll("turn cancelled");
   assert.equal(relay.pendingCount, 0);

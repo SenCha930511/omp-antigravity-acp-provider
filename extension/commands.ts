@@ -7,17 +7,26 @@ import type { CatalogStore, ConfiguredCatalogModel } from "./catalog-store.ts";
 import type { SessionCleanup, CleanupMode } from "./session-cleanup.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import type { TierConnection } from "./tier-connection.ts";
+import type { AntigravityQuotaSnapshot } from "./usage-accounting.ts";
 
 export interface RuntimeSnapshotProcess {
   mcpHttp: boolean;
-  omittedTools: unknown[];
+  omittedTools: ToolAuditSummary["omitted"];
+  key?: string;
+  modelId?: string;
+  agentVersion?: string;
+  alive?: boolean;
+  ignoredStdoutNoiseLines?: number;
   [key: string]: unknown;
 }
 
 export interface RuntimeSnapshotView {
   bindings: number;
   permissionMode: string;
-  metrics: unknown;
+  metrics: {
+    totals?: Partial<Record<"turns" | "input" | "output" | "reasoning" | "cacheRead" | "cacheWrite", number>>;
+    latestQuota?: { remaining?: number; limit?: number; resetAt?: string; tier?: string; model?: string };
+  };
   processes: RuntimeSnapshotProcess[];
 }
 
@@ -30,6 +39,7 @@ export interface StreamEventLike {
 export interface RuntimeBundleView {
   runtime: {
     snapshot: () => Promise<RuntimeSnapshotView>;
+    quota: (apiKey: string | undefined, signal?: AbortSignal) => Promise<AntigravityQuotaSnapshot>;
     setPermissionMode: (mode: string) => Promise<void>;
     logout: () => Promise<void>;
     close: () => Promise<void>;
@@ -127,6 +137,7 @@ const SUBCOMMANDS: SubcommandSpec[] = [
     usage: "[auto|off]",
     values: [["auto", "Query usage after each reply"], ["off", "Skip supplemental usage queries"]],
   },
+  { name: "quota", description: "Live model quota groups and reset times" },
   {
     name: "context",
     description: "Context window and transfer settings",
@@ -165,7 +176,7 @@ const SUBCOMMANDS: SubcommandSpec[] = [
     name: "native-tools",
     description: "Native ACP tool exposure",
     usage: "prefer|disabled",
-    values: [["prefer", "Let OMP tools shadow ACP natives (default)"], ["disabled", "Expose ACP-native tools only"]],
+    values: [["prefer", "Let OMP tools shadow ACP natives (default)"], ["disabled", "Disable ACP-native tools for strict OMP-tool sessions"]],
   },
   {
     name: "permissions",
@@ -228,6 +239,133 @@ export function createAntigravityArgumentCompletions(deps: AntigravityCompletion
   };
 }
 
+type DisplayField = readonly [label: string, value: string | number | undefined];
+
+function section(title: string, fields: DisplayField[]): string {
+  const visible = fields.filter((field): field is readonly [string, string | number] => field[1] !== undefined);
+  const width = Math.max(0, ...visible.map(([label]) => label.length));
+  return [title, ...visible.map(([label, value]) =>
+    `  ${`${label}:`.padEnd(width + 1)} ${typeof value === "number" ? formatNumber(value) : value}`)].join("\n");
+}
+
+function formatNumber(value: number): string {
+  return value.toLocaleString("en-US", { maximumFractionDigits: 3 });
+}
+
+function formatBytes(value: number): string {
+  if (value === 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB"];
+  const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  return `${formatNumber(value / 1024 ** exponent)} ${units[exponent]}`;
+}
+
+function formatDays(value: number): string {
+  return `${formatNumber(value)} ${value === 1 ? "day" : "days"}`;
+}
+
+function formatContextValue(key: string, value: number | string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "string") return value;
+  return key.endsWith("Bytes") ? formatBytes(value) : `${formatNumber(value)} tokens`;
+}
+
+function formatUsageRecord(metrics: RuntimeSnapshotView["metrics"]): string | undefined {
+  const totals = metrics.totals;
+  if (!totals) return undefined;
+  const parts = (["turns", "input", "output", "reasoning", "cacheRead", "cacheWrite"] as const)
+    .filter(key => (totals[key] ?? 0) > 0)
+    .map(key => `${formatNumber(totals[key]!)} ${key === "cacheRead" ? "cache read" : key === "cacheWrite" ? "cache write" : key}`);
+  return parts.length ? parts.join(" · ") : "no completed turns";
+}
+
+function formatLatestQuota(quota: NonNullable<RuntimeSnapshotView["metrics"]["latestQuota"]>): string | undefined {
+  const parts = [
+    quota.tier,
+    quota.model,
+    quota.remaining !== undefined || quota.limit !== undefined
+      ? `${quota.remaining === undefined ? "unknown" : formatNumber(quota.remaining)}${quota.limit === undefined ? "" : ` / ${formatNumber(quota.limit)}`} remaining`
+      : undefined,
+    quota.resetAt ? `reset ${quota.resetAt}` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+interface DiagnosticsStatusView {
+  enabled: boolean;
+  samples: number;
+  capacity: number;
+  stages: Record<string, { count: number; medianMs: number; maxMs: number }>;
+}
+
+function formatDiagnostics(status: DiagnosticsStatusView | undefined): string {
+  const fields: DisplayField[] = [["Collection", status?.enabled ? "on" : "off"]];
+  if (status?.samples) fields.push(["Samples", `${formatNumber(status.samples)} / ${formatNumber(status.capacity)}`]);
+  for (const [stage, sample] of Object.entries(status?.stages ?? {})) {
+    fields.push([stage, `count ${formatNumber(sample.count)} · median ${formatNumber(sample.medianMs)} ms · max ${formatNumber(sample.maxMs)} ms`]);
+  }
+  return section("ACP diagnostics", fields);
+}
+
+interface CleanupStatusView {
+  mode: CleanupMode;
+  idleDays: number;
+  maxSessions?: number;
+  maxBytes?: number;
+  orphanGraceDays?: number;
+  recoveryDays?: number;
+  owned: number;
+  active: number;
+  mapped: number;
+  unmapped: number;
+  ownedBytes: number;
+  reclaimedBytes: number;
+  retainedForRecovery: number;
+  deferred: number;
+  pendingLifecycleUpdates: number;
+  failures: number;
+  warning?: string;
+  scope: string;
+}
+
+function formatCleanup(status: CleanupStatusView, removed: number): string {
+  const fields: DisplayField[] = [
+    ["Mode", status.mode],
+    ["Idle retention", status.idleDays === undefined ? undefined : formatDays(status.idleDays)],
+    ["Orphan retention", status.orphanGraceDays === undefined ? undefined : formatDays(status.orphanGraceDays)],
+    ["Recovery", status.recoveryDays === undefined ? undefined : formatDays(status.recoveryDays)],
+    ["Session budget", status.maxSessions === undefined ? undefined : status.maxSessions === 0 ? "disabled" : status.maxSessions],
+    ["Byte budget", status.maxBytes === undefined ? undefined : status.maxBytes === 0 ? "disabled" : formatBytes(status.maxBytes)],
+    ["Owned sessions", status.owned || undefined],
+    ["Active sessions", status.active || undefined],
+    ["Mapped sessions", status.mapped || undefined],
+    ["Unmapped sessions", status.unmapped || undefined],
+    ["Stored data", status.ownedBytes ? formatBytes(status.ownedBytes) : undefined],
+    ["Removed this run", removed],
+    ["Reclaimed", status.reclaimedBytes ? formatBytes(status.reclaimedBytes) : undefined],
+    ["Retained for recovery", status.retainedForRecovery || undefined],
+    ["Deferred", status.deferred || undefined],
+    ["Pending updates", status.pendingLifecycleUpdates || undefined],
+    ["Failures", status.failures || undefined],
+    ["Warning", status.warning],
+    ["Scope", status.scope],
+    ["Risk", "Active sessions are protected. Timeout cleanup loses ACP-only state; OMP history is retained."],
+  ];
+  return section("ACP session cleanup", fields);
+}
+
+function formatQuota(snapshot: AntigravityQuotaSnapshot): string {
+  const groups = snapshot.groups.map(group => {
+    const width = Math.max(0, ...group.buckets.map(bucket => bucket.window.length));
+    return [
+      `  ${group.displayName}`,
+      ...(group.buckets.length ? group.buckets.map(bucket =>
+        `    ${bucket.window.padEnd(width)}  ${Math.round(bucket.remainingFraction * 100)}% remaining${bucket.resetTime ? ` · reset ${bucket.resetTime}` : ""}`)
+        : ["    no percentage limits reported"]),
+    ].join("\n");
+  });
+  return ["Antigravity quota", ...groups].join("\n");
+}
+
 export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
   const sessionIdOf = (ctx: OmpCommandContext | undefined): string | undefined => ctx?.sessionManager?.getSessionId?.();
 
@@ -239,7 +377,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       if (parts.length > 2 || (value !== undefined && !["on", "off", "reset"].includes(value))) throw new Error("Usage: /antigravity-acp diagnostics [on|off|reset]");
       if (value === "reset") deps.diagnostics?.reset();
       else if (value) deps.diagnostics?.configure(value === "on");
-      ctx.ui.notify(JSON.stringify(deps.diagnostics?.status() ?? { enabled: false }, null, 2), "info");
+      ctx.ui.notify(formatDiagnostics(deps.diagnostics?.status()), "info");
       return;
     }
 
@@ -253,15 +391,10 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
           throw new Error("Usage: /antigravity-acp cleanup [off|conservative|timeout|balanced [DAYS]]");
         }
         deps.cleanup.configure(value as CleanupMode, parts[2] === undefined ? undefined : Number(parts[2]));
-        deps.cleanup.start();
       }
       deps.cleanup.start();
       const removed = await deps.cleanup.collect();
-      ctx.ui.notify(JSON.stringify({
-        ...deps.cleanup.status(),
-        removed,
-        note: "Active sessions are protected. Timeout cleanup loses ACP-only state; OMP history is retained.",
-      }, null, 2), "info");
+      ctx.ui.notify(formatCleanup(deps.cleanup.status(), removed), "info");
       return;
     }
 
@@ -284,11 +417,27 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       } else if (value) {
         throw new Error("Usage: /antigravity-acp context [set default|MODEL KEY NUMBER]");
       } else {
-        ctx.ui.notify(JSON.stringify({
-          file: deps.contextPath,
-          settings: currentSettings,
-          effective: deps.catalog.currentModels.map(model => ({ id: model.id, ...resolveContextOptions(model, currentSettings) })),
-        }, null, 2), "info");
+        const sections: string[] = [];
+        const shared = Object.entries(currentSettings.defaults).map(([key, value]) =>
+          [key, formatContextValue(key, value)] as DisplayField).filter(field => field[1] !== undefined);
+        sections.push(shared.length ? section("Shared defaults", shared)
+          : "Shared defaults\n  Catalog values; no saved overrides.");
+        for (const model of deps.catalog.currentModels) {
+          const effective = resolveContextOptions(model, currentSettings);
+          const overrides = Object.entries(currentSettings.models[model.id] ?? {}).map(([key, value]) =>
+            `${key}=${formatContextValue(key, value)}`).join(", ");
+          sections.push(section(model.id, [
+            ["Context window", formatContextValue("contextWindow", effective.contextWindow)],
+            ["Output limit", formatContextValue("maxTokens", effective.maxTokens)],
+            ["Reply reserve", formatContextValue("reserveTokens", effective.reserveTokens)],
+            ["Input budget", formatContextValue("inputTokenBudget", effective.inputTokenBudget)],
+            ["Transfer limit", formatContextValue("maxTransferBytes", effective.maxTransferBytes)],
+            ["Image limit", formatContextValue("maxImageBytes", effective.maxImageBytes)],
+            ["Overrides", overrides || undefined],
+          ]));
+        }
+        if (!deps.catalog.currentModels.length) sections.push("Models\n  None cached; run /antigravity-acp refresh.");
+        ctx.ui.notify(["ACP context settings", ...sections].join("\n\n"), "info");
       }
       return;
     }
@@ -375,43 +524,78 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       const snapshot = await bundle?.runtime.snapshot();
       const permissionMode = deps.getPermissionMode();
       const omp = ompCredentialSummary(ctx);
-      const marker = omp.present === undefined ? "unknown (host did not expose the credential store)"
-        : omp.present ? `present, authorized ${omp.authorizedAt ?? "unknown time"}${omp.email ? ` as ${omp.email}` : ""} (${omp.record})`
+      const accountEmail = antigravityAccountEmail();
+      const marker = omp.present === undefined ? "unknown; host did not expose the credential store"
+        : omp.present ? `present · ${omp.record} · authorized ${omp.authorizedAt ?? "unknown time"}${omp.email && omp.email !== accountEmail ? ` · account ${omp.email}` : ""}`
         : "not stored; run /login or /antigravity-acp login";
-      // Mirrors the upstream provider's status/doctor wording for the shared
-      // fields, with OMP-specific lines in the same style.
-      ctx.ui.notify([
-        "Antigravity ACP account",
-        `Google account: ${antigravityAccountEmail() ?? ((await keychain.present()) === true ? "signed in (token in macOS keychain; email not read)" : "not signed in")}`,
-        `Authentication: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}`,
-        `Credential storage (preflight): ${describeCredentialStorage()}`,
-        `OMP marker record: ${marker}`,
-        ompSource ? `OMP auth source: ${ompSource}` : undefined,
-        `Saved ACP sessions: ${deps.getSavedSessionCount()}`,
-        `Requested permission mode: ${permissionMode === "auto_edit" ? "auto-edit" : permissionMode}`,
-        `Active bindings: ${snapshot?.bindings ?? 0}`,
-        "Google OAuth tokens stay in Antigravity-owned storage; OMP stores only a non-secret marker. /antigravity-acp logout clears both sides; OMP /logout also finishes the Antigravity-side cleanup.",
-      ].filter(Boolean).join("\n"), "info");
+      const fields: DisplayField[] = [
+        ["Google account", accountEmail ?? ((await keychain.present()) === true ? "signed in · keychain token; email unavailable" : "not signed in")],
+        ["ACP authentication", `${auth.status}${auth.authType ? ` · ${auth.authType}` : ""}`],
+        ["Credential storage", describeCredentialStorage()],
+        ["OMP login marker", marker],
+        ["OMP auth source", ompSource],
+        ["Saved ACP sessions", deps.getSavedSessionCount()],
+        ["Permission", permissionMode === "auto_edit" ? "auto-edit" : permissionMode],
+        ["Active sessions", snapshot?.bindings ?? 0],
+        ["Token ownership", "Google OAuth tokens stay in Antigravity-owned storage; OMP stores only a non-secret marker."],
+        ["Logout", "/antigravity-acp logout clears both sides; OMP /logout also finishes Antigravity-side cleanup."],
+      ];
+      const ompEmail = "email" in omp ? omp.email : undefined;
+      const ompError = "error" in omp ? omp.error : undefined;
+      if (ompError) fields.push(["OMP warning", ompError]);
+      if (accountEmail && ompEmail && ompEmail !== accountEmail) {
+        fields.push(["Account warning", "The OMP marker and Antigravity token identify different accounts."]);
+      }
+      ctx.ui.notify(section("Antigravity ACP account", fields), "info");
+      return;
+    }
+
+    if (command === "quota") {
+      if (value !== undefined) throw new Error("Usage: /antigravity-acp quota");
+      await deps.prepareRuntime();
+      const lease = deps.acquireRuntimeForSession
+        ? deps.acquireRuntimeForSession(sessionIdOf(ctx))
+        : { value: deps.getRuntimeForSession(sessionIdOf(ctx)), release: () => {} };
+      try {
+        const quota = await lease.value.runtime.quota(undefined).then(formatQuota,
+          (error: unknown) => section("Antigravity quota", [
+            ["Status", "unavailable"],
+            ["Reason", error instanceof Error ? error.message : String(error)],
+          ]));
+        ctx.ui.notify(quota, "info");
+      } finally {
+        lease.release();
+      }
       return;
     }
 
     if (command === "usage") {
       const currentSettings = deps.getContextSettings();
-      ctx.ui.notify(JSON.stringify({
-        configured: currentSettings.defaults.usageMode ?? DEFAULT_USAGE_MODE,
-        effective: process.env.OMP_ACP_USAGE === "off" ? "off" : currentSettings.defaults.usageMode ?? DEFAULT_USAGE_MODE,
-        connections: [...deps.connections].map(connection => ({
-          context: [...connection.contextUsage].map(([sessionId, usage]) => ({
-            sessionId,
-            ...usage,
-            ompContextWindow: connection.getOmpContextWindow?.(sessionId),
-          })),
-          compactions: [...connection.compactions].flatMap(([sessionId, records]) =>
-            [...records.values()].map(record => ({ sessionId, ...record }))),
-          accounting: [...connection.usageStatus.values()],
-          activePrompts: connection.activePrompts,
-        })),
-      }, null, 2), "info");
+      const configured = currentSettings.defaults.usageMode ?? DEFAULT_USAGE_MODE;
+      const overridden = process.env.OMP_ACP_USAGE === "off";
+      const effective = overridden ? "off" : configured;
+      const sections = [section("ACP usage", [["Queries", `${configured} → ${effective}${overridden ? " · OMP_ACP_USAGE=off override" : ""}`]])];
+      let visibleConnections = 0;
+      for (const connection of deps.connections) {
+        const fields: DisplayField[] = [];
+        for (const [sessionId, usage] of connection.contextUsage) {
+          const ompWindow = connection.getOmpContextWindow?.(sessionId);
+          fields.push([`Context ${sessionId}`, `${formatNumber(usage.used)} / ${formatNumber(usage.size)} ACP tokens${ompWindow === undefined ? "" : ` · OMP window ${formatNumber(ompWindow)}`}`]);
+        }
+        for (const records of connection.compactions.values()) {
+          for (const record of records.values()) {
+            fields.push([`Compaction ${record.sessionId}/${record.compactionId}`, record.status]);
+            if (record.error) fields.push([`Compaction error ${record.compactionId}`, record.error]);
+          }
+        }
+        for (const [sessionId, accounting] of connection.usageStatus) {
+          fields.push([`Accounting ${sessionId}`, `${accounting.source} · cache ${accounting.cache}`]);
+          if (accounting.error) fields.push([`Accounting error ${sessionId}`, accounting.error]);
+        }
+        if (connection.activePrompts) fields.push(["Active prompts", connection.activePrompts]);
+        if (fields.length) sections.push(section(`Connection ${++visibleConnections}`, fields));
+      }
+      ctx.ui.notify(sections.join("\n\n"), "info");
       return;
     }
 
@@ -419,7 +603,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       if (value !== undefined) throw new Error("Usage: /antigravity-acp refresh");
       const refreshed = await deps.catalog.refresh(deps.getContextSettings());
       deps.onModelsUpdated(refreshed);
-      ctx.ui.notify(`Refreshed ACP model cache: ${refreshed.map(model => model.id).join(", ")}`, "info");
+      ctx.ui.notify(section("ACP model cache refreshed", [["Models", refreshed.length ? refreshed.map(model => model.id).join(", ") : "none advertised"]]), "info");
       return;
     }
 
@@ -434,15 +618,15 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         await deps.closeAllRuntimes();
       }
     }
-    const usageError = "Usage: /antigravity-acp [status|account|login|logout|tools|usage|context|cleanup|diagnostics|debug|native-tools|permissions|refresh]";
+    const usageError = "Usage: /antigravity-acp [status|account|login|logout|tools|usage|quota|context|cleanup|diagnostics|debug|native-tools|permissions|refresh]";
     if (command && command !== "status" && command !== "tools" && command !== "permissions") {
       throw new Error(usageError);
     }
     if (command === "status" && value !== undefined) throw new Error(usageError);
     if (command === "tools" && value !== undefined) throw new Error("Usage: /antigravity-acp tools");
 
-    // Only the tools inspection and the status display below need a live
-    // runtime; every earlier command runs without one.
+    // Tools and status inspect a runtime snapshot. Quota owns a separate
+    // query lifecycle above; the other earlier commands stay offline.
     const lease = deps.acquireRuntimeForSession
       ? deps.acquireRuntimeForSession(sessionIdOf(ctx))
       : { value: deps.getRuntimeForSession(sessionIdOf(ctx)), release: () => {} };
@@ -450,14 +634,52 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       const snapshot = await lease.value.runtime.snapshot();
       if (command === "tools") {
         const lastToolAudit = deps.getLastToolAudit();
-        ctx.ui.notify(lastToolAudit
-          ? `OMP ACP tool bridge\nAvailable: ${lastToolAudit.available.join(", ")}\nOmitted: ${JSON.stringify(lastToolAudit.omitted)}\nLive ACP checks: ${JSON.stringify(snapshot.processes.map(item => ({ mcpHttp: item.mcpHttp, omittedTools: item.omittedTools })))}`
-          : "No model request yet. Send a message with this ACP model to inspect its offered OMP tools.", "info");
+        if (!lastToolAudit) {
+          ctx.ui.notify("No model request yet. Send a message with this ACP model to inspect its offered OMP tools.", "info");
+          return;
+        }
+        const sections = [section("OMP ACP tool bridge", [
+          ["Offered", lastToolAudit.offered.length],
+          ["Available", lastToolAudit.available.join(", ") || "none"],
+          ["Omitted", lastToolAudit.omitted.length || undefined],
+        ])];
+        if (lastToolAudit.omitted.length) {
+          sections.push(section("Omitted OMP tools", lastToolAudit.omitted.map((tool): DisplayField => [tool.name, tool.reason])));
+        }
+        snapshot.processes.forEach((process, index) => {
+          const name = process.modelId ?? process.key ?? `Runtime ${index + 1}`;
+          sections.push(section(name, [
+            ["MCP over HTTP", process.mcpHttp ? "yes" : "no"],
+            ...process.omittedTools.map(tool => [`Omitted ${tool.name}`, tool.reason] as DisplayField),
+          ]));
+        });
+        ctx.ui.notify(sections.join("\n\n"), "info");
         return;
       }
 
       const policy = deps.getToolPolicy();
-      ctx.ui.notify(`Antigravity ACP (OMP adapter)\nAuth storage: ${(await authReady()) ? "configured (ACP-owned token file or macOS keychain)" : inspectAntigravityAuth().status}\nRequested permission mode: ${deps.getPermissionMode()}\nWire permission mode: ${snapshot.permissionMode}\nNative tools: ${policy.nativeTools}\nDebug tool updates: ${policy.debugToolUpdates ? "on" : "off"}\nTool routing: ${JSON.stringify([...deps.connections].map(connection => connection.toolRouting).filter(Boolean))}\nActive sessions: ${snapshot.bindings}\nConfirmed thinking: ${JSON.stringify([...deps.connections].map(connection => connection.confirmedThinking).filter(Boolean))}\nUsage: ${JSON.stringify(snapshot.metrics)}\n${JSON.stringify(snapshot.processes)}`, "info");
+      const requestedPermission = deps.getPermissionMode();
+      const requestedLabel = requestedPermission === "auto_edit" ? "auto-edit" : requestedPermission;
+      const wireLabel = snapshot.permissionMode === "auto_edit" ? "auto-edit" : snapshot.permissionMode;
+      const versions = [...new Set(snapshot.processes.map(process => process.agentVersion).filter((version): version is string => Boolean(version)))];
+      const channels = [...new Set([...deps.connections].map(connection => connection.toolRouting?.channel).filter((channel): channel is "pending" | "system-append" | "legacy-prompt" => Boolean(channel)))];
+      const thinking = [...deps.connections].map(connection => connection.confirmedThinking).filter((value): value is { model: string; effort: string } => Boolean(value));
+      const stopped = snapshot.processes.filter(process => process.alive === false).length;
+      const ignoredNoise = snapshot.processes.reduce((total, process) => total + (process.ignoredStdoutNoiseLines ?? 0), 0);
+      ctx.ui.notify(section("Antigravity ACP (OMP adapter)", [
+        ["Login", (await authReady()) ? "ready" : `not ready · ${inspectAntigravityAuth().status}`],
+        ["Runtime", versions.join(", ") || undefined],
+        ["Native channel", channels.join(", ") || undefined],
+        ["Permission", requestedLabel === wireLabel ? requestedLabel : `requested ${requestedLabel} → wire ${wireLabel}`],
+        ["Native tools", policy.nativeTools],
+        ["Tool debug", policy.debugToolUpdates ? "on" : undefined],
+        ["Thinking", thinking.map(value => `${value.model}=${value.effort}`).join(", ") || undefined],
+        ["Usage record", formatUsageRecord(snapshot.metrics)],
+        ["Latest quota", snapshot.metrics.latestQuota ? formatLatestQuota(snapshot.metrics.latestQuota) : undefined],
+        ["Active sessions", snapshot.bindings],
+        ["Runtime warning", stopped ? `${stopped} stopped process${stopped === 1 ? "" : "es"}` : undefined],
+        ["API warning", ignoredNoise ? `${formatNumber(ignoredNoise)} ignored stdout noise line${ignoredNoise === 1 ? "" : "s"}` : undefined],
+      ]), "info");
     } finally {
       lease.release();
     }

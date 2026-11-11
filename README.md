@@ -118,23 +118,60 @@ Permission IDs differ between the channels. Managed ACP 1.4.5 supports `default`
 
 CLI ACP 1.5.3 omits `mcpCapabilities` from its initialization response, but it still discovers HTTP MCP servers and calls `tools/list`. The adapter normalizes this capability for that server identity so OMP tools remain available. CLI 1.5.3 reports no audio input, while the adapter's model catalog already limits input to text and images.
 
+### Context occupancy and compaction
+
+ACP may report live occupancy with `usage_update`. When it does, the adapter forwards that server value. When a runtime (for example CLI ACP 1.5.4) reports only cumulative billable usage, the adapter estimates the full OMP context from the system prompt, retained messages and tool schemas with `estimateTransferTokens`, then sets `usage.contextTokens` and marks `contextTokensSource: "estimate"`. The billable `input`, `cacheRead` and `output` counters are left untouched.
+
+The estimate is a heuristic, not a server measurement. Managed ACP remains preferable when exact occupancy matters. In this source checkout, `scripts/with-managed-context.sh` starts OMP with the installed managed binary while preserving an explicit `AGY_ACP_BIN`. Run `/antigravity-acp refresh` afterward to inspect the models that runtime actually advertises.
+
+Keep `compaction.autoContinue` enabled for normal long-running work. The false context rollover was fixed at the occupancy signal, not by disabling automatic continuation.
+
 ## Commands
 
-| Command | Purpose |
+Use the `/antigravity-acp ` prefix once, followed by a row below. For example, `status` means `/antigravity-acp status`.
+
+### Common operations
+
+| Subcommand | Purpose |
 | --- | --- |
-| `/antigravity-acp status` | Runtime, thinking and usage information |
-| `/antigravity-acp account` | Signed-in account and authentication state |
-| `/antigravity-acp login` | Re-run the Google authorization |
-| `/antigravity-acp logout` | Clear Antigravity credentials and saved sessions |
-| `/antigravity-acp refresh` | Discover and cache advertised models |
-| `/antigravity-acp usage [auto\|off]` | Context occupancy and supplemental usage queries |
-| `/antigravity-acp context` | Per-model context budgets |
-| `/antigravity-acp cleanup [mode]` | Session-file cleanup policy |
-| `/antigravity-acp diagnostics [on\|off\|reset]` | Adapter stage timing samples |
-| `/antigravity-acp native-tools prefer\|disabled` | Native built-in tool policy |
-| `/antigravity-acp tools` | Available and omitted OMP tool schemas |
-| `/antigravity-acp debug on\|off` | ACP tool-status lines |
-| `/antigravity-acp permissions default\|auto-edit\|yolo` | Permission mode |
+| *(none)* or `status` | Show login readiness, negotiated runtime/native channel when available, permission policy, native tools, non-empty usage records and active sessions. Requested and wire permissions share one row when they differ. Empty process details are omitted; runtime/API warnings remain visible. |
+| `account` | Show the signed-in account, ACP authentication and non-secret OMP marker. Token ownership, logout behavior and account/store inconsistencies are not hidden. |
+| `login` | Start a fresh Google authorization. |
+| `logout` | Clear Antigravity credentials, saved sessions and the OMP marker. |
+| `quota` | Query live quota and print one model heading with one remaining/reset row per quota window. Query failures are reported explicitly. |
+| `refresh` | Discover and cache advertised models, then list the refreshed IDs. |
+| `usage` | Show configured → effective supplemental-query mode (`OMP_ACP_USAGE=off` forces `off`) and only populated per-connection context, compaction and accounting details. |
+| `usage auto` | Query supplemental usage after each reply. Context occupancy updates remain enabled. |
+| `usage off` | Skip supplemental queries without disabling context occupancy updates. |
+
+Quota results use a separate short-lived ACP session and a 60-second cache. When the adapter selects a CLI automatically, this read-only query uses managed ACP instead, which supports the quota command. An explicit `AGY_ACP_BIN` remains authoritative. If that runtime does not advertise `usage`, the adapter reports the limitation without sending a model prompt. The quota display excludes usage counters for that temporary session.
+
+### Advanced maintenance
+
+| Subcommand and options | Purpose |
+| --- | --- |
+| `tools` | Inspect offered/available OMP tools, every omission reason and live MCP capability checks. |
+| `context` | Show saved shared defaults separately from each cached model's effective limits and model-only overrides. Effective values include the input, output, reserve, transfer and image budgets used by runtime compatibility checks. |
+| `context set default KEY NUMBER` | Change a shared numeric context setting. |
+| `context set MODEL KEY NUMBER` | Change one model override. Reselect the model or restart OMP to refresh its displayed limits. |
+| `context set default usageMode auto\|off` | Equivalent to `usage auto\|off`. |
+| `cleanup` | Collect using the saved policy and show its mode, retention, non-empty session counts, actual removals, warnings and state-loss risk. |
+| `cleanup off` | Keep every saved session. |
+| `cleanup conservative` | Remove only eligible idle, unmapped sessions while preserving mapped history and live leases. |
+| `cleanup timeout [DAYS]` | Apply timeout collection, optionally with a custom idle retention in days. |
+| `cleanup balanced [DAYS]` | Apply timeout and soft-budget cleanup with recovery protection, optionally with custom idle days. |
+| `cleanup budget MAX_SESSIONS MAX_MIB` | Set soft session/byte limits; `0` disables either limit. Active and recently used sessions can remain above a soft budget. Timeout deletion loses ACP-only state but retains OMP history. |
+| `diagnostics` | Show collection state and non-empty samples as count/median/max per stage. |
+| `diagnostics on\|off` | Enable or disable bounded local timing collection. |
+| `diagnostics reset` | Clear collected samples without changing the enabled state. |
+| `debug on\|off` | Toggle raw ACP tool-status lines; normal tool results and thought summaries are preserved. |
+| `native-tools prefer` | Let OMP tools shadow matching ACP-native tools. |
+| `native-tools disabled` | Disable ACP-native built-ins for strict OMP-tool sessions while retaining MCP configuration; connections are recreated on the next request. |
+| `permissions default` | Confirm edits and commands. |
+| `permissions auto-edit` | Auto-accept edits. |
+| `permissions yolo` | Auto-accept everything; changing modes recreates runtimes to avoid reusing an unsafe process. |
+
+Context `KEY` is one of `contextWindow`, `maxTokens`, `inputTokenBudget`, `reserveTokens`, `maxTransferBytes` or `maxImageBytes`.
 
 The OMP input autocompletes this command. Type `/antigravity-acp ` to list the subcommands, and keep typing to filter them. Fixed values such as `permissions` modes and `context set` targets (default plus the cached model IDs) complete the same way.
 

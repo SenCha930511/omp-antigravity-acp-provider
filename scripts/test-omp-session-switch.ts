@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { createInterface } from "node:readline";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
+import { sourceId } from "../extension/omp-session-source.ts";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const omp = process.env.OMP_ACP_TEST_OMP_BIN ?? "omp";
@@ -27,8 +28,8 @@ await fs.writeFile(config, JSON.stringify({ compaction: { enabled: false, keepRe
 const args = ["--no-extensions", "-e", path.join(root, "test/fixtures/session-switch-extension.ts"),
   "--model", "antigravity-acp/gemini-3.8-flash", "--smol", "antigravity-acp/gemini-3.8-flash", "--thinking", "off", "--no-tools", "--no-skills",
   "--no-rules", "--no-context-files", "--no-title", "--no-lsp", "--config", config, "--system-prompt", "OFFLINE_FIXTURE"];
-const env = { ...process.env, PI_CODING_AGENT_DIR: path.join(temporary, "agent"), GEMINI_HOME: path.join(temporary, "gemini"),
-    AGY_ACP_BIN: process.platform === "win32" ? process.execPath : "/usr/bin/false", OMP_ACP_SESSION_TEST_STATE: state,
+const env = { ...process.env, HOME: temporary, GEMINI_API_KEY: "offline-fixture", XDG_STATE_HOME: path.join(temporary, "state"), PI_CODING_AGENT_DIR: path.join(temporary, "agent"), GEMINI_HOME: path.join(temporary, "gemini"),
+    AGY_ACP_BIN: process.execPath, OMP_ACP_SESSION_TEST_STATE: state,
     OMP_ACP_IDLE_TIMEOUT_MS: "0", OMP_ACP_MAX_IDLE_RUNTIMES: "2", OMP_ACP_USAGE: "off" };
 const child = spawn(omp, ["--mode", "rpc", ...args], {
   cwd: temporary, stdio: ["pipe", "pipe", "pipe"], env,
@@ -127,34 +128,38 @@ try {
   assert.match(current(afterTree), /REQ_AFTER_TREE_REWIND/);
   console.log("Actual OMP RPC: /tree rewind rebuilds without discarded branch messages: PASS");
 
-  const beforeFresh = (await command("get_state")).data;
-  const previousAcp = afterTree.id;
-  await prompt("/fresh");
-  const fresh = (await command("get_state")).data;
-  assert.equal(fresh.sessionFile, beforeFresh.sessionFile);
-  assert.notEqual(fresh.sessionId, beforeFresh.sessionId);
-  assert.ok((await trace()).some(entry => entry.kind === "close" && entry.id === previousAcp),
-    "OMP /fresh must close the adapter's previous provider session too");
-  await prompt("REQ_AFTER_FRESH");
-  const postFreshAcp = prompts(await trace()).at(-1).id;
-  assert.notEqual(postFreshAcp, previousAcp);
-  assert.match(current(prompts(await trace()).at(-1)), /REQ_AFTER_FRESH/);
   const cleanupRegistryFile = (await fs.readdir(state)).find(name => name.startsWith("cleanup-sessions-"))!;
-  let postFreshSourceTracked = false;
-  for (let i = 0; i < 200; i++) {
-    const reg = JSON.parse(await fs.readFile(path.join(state, cleanupRegistryFile), "utf8"));
-    const postRecord = reg.sessions.find((s: any) => s.id === postFreshAcp);
-    const prevRecord = reg.sessions.find((s: any) => s.id === previousAcp);
-    if (postRecord?.ompSource?.file === path.resolve(fresh.sessionFile) && prevRecord?.replaced === true) {
-      postFreshSourceTracked = true;
-      break;
+  async function assertFreshSourceTransition(request: string): Promise<void> {
+    const beforeFresh = (await command("get_state")).data;
+    const previousAcp = prompts(await trace()).at(-1).id;
+    await prompt("/fresh");
+    const fresh = (await command("get_state")).data;
+    assert.equal(fresh.sessionFile, beforeFresh.sessionFile);
+    assert.notEqual(fresh.sessionId, beforeFresh.sessionId);
+    assert.ok((await trace()).some(entry => entry.kind === "close" && entry.id === previousAcp),
+      "OMP /fresh must close the adapter's previous provider session too");
+    await prompt(request);
+    const postFreshAcp = prompts(await trace()).at(-1).id;
+    assert.notEqual(postFreshAcp, previousAcp);
+    assert.match(current(prompts(await trace()).at(-1)), new RegExp(request));
+    let postFreshSourceTracked = false;
+    let postRecord: unknown, prevRecord: unknown;
+    for (let i = 0; i < 200; i++) {
+      const reg = JSON.parse(await fs.readFile(path.join(state, cleanupRegistryFile), "utf8"));
+      postRecord = reg.sessions.find((s: any) => s.id === postFreshAcp);
+      prevRecord = reg.sessions.find((s: any) => s.id === previousAcp);
+      if (postRecord?.ompSource?.file === path.resolve(fresh.sessionFile) && prevRecord?.replaced === true) {
+        postFreshSourceTracked = true;
+        break;
+      }
+      await delay(10);
     }
-    await delay(10);
+    assert.ok(postFreshSourceTracked, `Post-/fresh ACP session must track the OMP source and supersede its predecessor after ${request}: ${JSON.stringify({ postFreshAcp, previousAcp, postRecord, prevRecord })}`);
+    const savedAfterFresh = JSON.parse(await fs.readFile(path.join(state, "sessions.json"), "utf8"));
+    assert.ok(!savedAfterFresh.some((record: any) => record.acpSessionId === previousAcp), "Superseded pre-/fresh mapping must be removed from sessions.json");
+    console.log(`Actual OMP RPC: ${request} rotates provider identity and closes old runtime: PASS`);
   }
-  assert.ok(postFreshSourceTracked, "Post-/fresh ACP session must be tracked against the OMP session file and supersede pre-/fresh session");
-  const savedAfterFresh = JSON.parse(await fs.readFile(path.join(state, "sessions.json"), "utf8"));
-  assert.ok(!savedAfterFresh.some((record: any) => record.acpSessionId === previousAcp), "Superseded pre-/fresh mapping must be removed from sessions.json");
-  console.log("Actual OMP RPC: /fresh rotates provider identity and closes old runtime: PASS");
+  await assertFreshSourceTransition("REQ_AFTER_FRESH");
 
   const corrupted = path.join(temporary, "corrupt.jsonl");
   await fs.writeFile(corrupted, "not a session\n");
@@ -175,6 +180,7 @@ try {
   assert.doesNotMatch(JSON.stringify(branched.prompt), /REQ_AFTER_REJECTED_SWITCH|REQ_AFTER_FRESH|REQ_A_FIRST/);
   assert.match(current(branched), /REQ_BRANCH_NEW/);
   console.log("Actual OMP RPC: branching to edit an earlier user request creates isolated context: PASS");
+  await assertFreshSourceTransition("REQ_BRANCH_FRESH");
 
   const held = await command("prompt", { message: "REQ_HOLD_CANCEL" });
   await command("abort");
@@ -285,6 +291,10 @@ try {
       if (entry.kind === "new" || entry.kind === "resume") open.set(entry.id, (open.get(entry.id) ?? 0) + 1);
       if (entry.kind === "close") open.set(entry.id, (open.get(entry.id) ?? 0) - 1);
     }
-    assert.ok([...open.values()].every(count => count === 0), "OMP shutdown must close every routing identity, including /fresh identities");
+    const leftovers = [...open].filter(([, count]) => count !== 0);
+    if (leftovers.length && process.env.OMP_ACP_TEST_SHUTDOWN_TRACE) {
+      await fs.writeFile(process.env.OMP_ACP_TEST_SHUTDOWN_TRACE, JSON.stringify(await trace(), null, 2));
+    }
+    assert.deepEqual(leftovers, [], "OMP shutdown must close every routing identity, including /fresh identities");
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 }

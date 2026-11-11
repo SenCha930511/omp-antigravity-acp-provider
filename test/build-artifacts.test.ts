@@ -22,3 +22,9 @@ test("built MCP bridge disables Node server timeouts", { skip: !built }, () => {
   assert.match(text, /this\.server\.requestTimeout = 0;/);
   assert.match(text, /this\.server\.headersTimeout = 0;/);
 });
+
+test("built runtime passes the full-context estimate to the final usage projection", { skip: !built }, () => {
+  const text = fs.readFileSync(bundle, "utf8");
+  assert.match(text, /usageFromPrompt2\(response, binding\.ompFallbackContextTokens\)/,
+    "the final response must receive the full OMP context estimate");
+});

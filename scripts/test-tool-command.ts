@@ -16,7 +16,7 @@ try {
   const notices: string[] = [];
   const context = { ui: { notify: (text: string) => notices.push(text) }, sessionManager: { getSessionId: () => "fixture" } };
   await command.handler("cleanup", context);
-  assert.equal(JSON.parse(notices.pop()!).mode, "conservative");
+  assert.match(notices.pop()!, /Mode:\s+conservative/);
   for (const mode of ["off", "conservative", "timeout 3"]) {
     await command.handler(`cleanup ${mode}`, context);
     const saved = JSON.parse(await fs.readFile(path.join(temporary, "cleanup.json"), "utf8"));

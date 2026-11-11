@@ -14,6 +14,12 @@ export interface TransferBlock {
   resource?: { uri: string; mimeType: string; text: string };
 }
 
+export interface TransferTool {
+  name: string;
+  description?: string;
+  parameters?: unknown;
+}
+
 export interface TransferMessage {
   role: string;
   toolName?: string;
@@ -25,12 +31,16 @@ export interface TransferMessage {
 export interface TransferContext {
   systemPrompt?: string;
   messages: TransferMessage[];
+  tools?: readonly TransferTool[];
 }
 
 export interface PromptParts {
   prompt: TransferBlock[];
   seedSteps?: TransferBlock[][];
   messageCount: number;
+  // Full OMP context estimate, not just the unseen delta. OMP uses this as a
+  // fallback context occupancy when the ACP server sends no usage_update.
+  estimatedContextTokens: number;
 }
 
 interface HistoryRecord {
@@ -139,6 +149,44 @@ export function currentSystemInstructions(context: TransferContext): string {
   const prompt = getCurrentSystemPrompt(context.messages as never) || context.systemPrompt || "";
   if (Buffer.byteLength(prompt, "utf8") > 134_217_728) throw new Error("OMP system instructions exceed the 128 MiB hard transfer ceiling; reduce them rather than truncating instructions");
   return prompt;
+}
+
+function safeJson(value: unknown): string {
+  try { return JSON.stringify(value) ?? ""; } catch { return ""; }
+}
+
+function estimateMessageTokens(content: string | TransferBlock[]): number {
+  if (typeof content === "string") return estimateTransferTokens(content);
+  let tokens = 0;
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "text") tokens += estimateTransferTokens(block.text ?? "");
+    else if (block.type === "thinking") tokens += estimateTransferTokens((block as { thinking?: string }).thinking ?? "");
+    else if (block.type === "toolCall") tokens += estimateTransferTokens(`${block.name ?? ""}\n${safeJson(block.arguments)}`);
+    else if (block.type === "image") tokens += 1024;
+  }
+  return tokens;
+}
+
+// OMP needs an occupancy signal even when the ACP runtime only reports
+// cumulative billable tokens. Estimate the whole OMP context (instructions,
+// every retained message and the tool schemas) instead of reusing cacheRead,
+// which grows with each turn and is not a context size.
+export function estimateContextTokens(context: TransferContext): number {
+  let tokens = estimateTransferTokens(currentSystemInstructions(context));
+  for (const message of context.messages) {
+    // currentSystemInstructions already counts the collapsed system message.
+    if (message.role === "system") continue;
+    tokens += estimateMessageTokens(message.content) + 4;
+  }
+  if (context.tools?.length) {
+    let schemas = "";
+    for (const tool of context.tools) {
+      schemas += `${tool.name}\n${tool.description ?? ""}\n${safeJson(tool.parameters)}\n`;
+    }
+    tokens += estimateTransferTokens(schemas);
+  }
+  return Math.max(1, Math.ceil(tokens));
 }
 
 const DATE_CWD_REMINDER = /^(?:<system-reminder>\s*)?Today: [^\n]*?Do not repeat this information in your reply\.(?:\s*<\/system-reminder>)?\s*$/gmu;
@@ -266,6 +314,7 @@ function planHistorySteps(
 ): { prompt: TransferBlock[]; seedSteps: TransferBlock[][] } {
   const metrics = prepareHistoryMetrics(items);
   const instructionBytes = instructionsBlock ? promptTextBytes([instructionsBlock]) : 0;
+  const tailBytes = promptTextBytes(tailBlocks);
   const seedTail: TransferBlock[] = [{ type: "text", text: SEED_ACK_TEXT }];
   const seedTailBytes = promptTextBytes(seedTail);
   const spans: { start: number; end: number }[] = [];
@@ -280,8 +329,9 @@ function planHistorySteps(
   let cursor = 0;
   while (cursor < items.length || pendingInstructions) {
     const remainingInstructions = finalInstructions ?? pendingInstructions;
-    const remaining = assembleStep(remainingInstructions, items.slice(cursor), tailBlocks);
-    if (promptTextBytes(remaining) <= ACP_STEP_TEXT_BYTES) break;
+    const predictedRemainingBytes = (remainingInstructions ? instructionBytes : 0)
+      + historyRangeTextBytes(metrics, cursor, items.length) + tailBytes;
+    if (predictedRemainingBytes <= ACP_STEP_TEXT_BYTES) break;
     const start = cursor;
     const chunkInstructions = pendingInstructions;
     const chunkInstructionBytes = chunkInstructions ? instructionBytes : 0;
@@ -316,8 +366,15 @@ function planHistorySteps(
     checkStepTextBytes(actual);
     return step;
   });
-  const prompt = assembleStep(finalInstructions ?? pendingInstructions, items.slice(cursor), tailBlocks);
-  checkStepTextBytes(promptTextBytes(prompt));
+  const effectiveFinalInstructions = finalInstructions ?? pendingInstructions;
+  const prompt = assembleStep(effectiveFinalInstructions, items.slice(cursor), tailBlocks);
+  const actualPromptBytes = promptTextBytes(prompt);
+  const predictedPromptBytes = (effectiveFinalInstructions ? instructionBytes : 0)
+    + historyRangeTextBytes(metrics, cursor, items.length) + tailBytes;
+  if (actualPromptBytes !== predictedPromptBytes) {
+    throw new Error(`History chunk planner predicted ${predictedPromptBytes} bytes for the final prompt but rendered ${actualPromptBytes}`);
+  }
+  checkStepTextBytes(actualPromptBytes);
   return { prompt, seedSteps };
 }
 
@@ -338,11 +395,14 @@ function takeTextChunk(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
   let bytes = 0;
   let end = 0;
-  for (const char of text) {
-    const size = Buffer.byteLength(char, "utf8");
+  for (let index = 0; index < text.length;) {
+    const codePoint = text.codePointAt(index)!;
+    const units = codePoint > 0xffff ? 2 : 1;
+    const size = codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
     if (bytes + size > maxBytes) break;
     bytes += size;
-    end += char.length;
+    end += units;
+    index += units;
   }
   if (end === 0) return [...text][0] ?? "";
   const chunk = text.slice(0, end);
@@ -677,13 +737,14 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
   // copying potentially large base64 data (ASCII with no JSON escaping).
   const allSteps = seedSteps?.length ? [...seedSteps, prompt] : [prompt];
   let bytes = imageWireChars;
+  let estimatedTokens = 0;
   for (const step of allSteps) {
-    const wireText = JSON.stringify(step.map(block => block.type === "image" ? { ...block, data: "" } : block));
+    const wireText = JSON.stringify(step, function(this: unknown, _key, value: unknown) {
+      return this === step && value && typeof value === "object" && "type" in value && value.type === "image"
+        ? { ...value, data: "" }
+        : value;
+    });
     bytes += Buffer.byteLength(wireText, "utf8");
-  }
-  const budget = historyBudget(undefined, process.env, options.maxTransferBytes);
-  if (bytes > budget) throw new Error(`Request payload too large (413): local ACP transfer needs ${bytes} bytes; budget is ${budget}. Use OMP /compact or raise maxTransferBytes. No history was silently truncated.`);
-  const estimatedTokens = allSteps.reduce((sum, step) => {
     let text = "";
     let stepImages = 0;
     for (const block of step) {
@@ -691,8 +752,11 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
       else if (block.type === "resource" && block.resource) text += block.resource.text;
       else if (block.type === "image") stepImages++;
     }
-    return sum + estimateTransferTokens(text, stepImages, Buffer.byteLength(text, "utf8"));
-  }, 0);
+    estimatedTokens += estimateTransferTokens(text, stepImages, Buffer.byteLength(text, "utf8"));
+  }
+  const budget = historyBudget(undefined, process.env, options.maxTransferBytes);
+  if (bytes > budget) throw new Error(`Request payload too large (413): local ACP transfer needs ${bytes} bytes; budget is ${budget}. Use OMP /compact or raise maxTransferBytes. No history was silently truncated.`);
   if (estimatedTokens > options.inputTokenBudget) throw new Error(`Maximum context length exceeded: local ACP estimate is ${estimatedTokens} tokens; input budget is ${options.inputTokenBudget}. Use OMP /compact. This is a heuristic estimate, not a server token count. No history was silently truncated.`);
-  return seedSteps?.length ? { prompt, seedSteps, messageCount: messages.length } : { prompt, messageCount: messages.length };
+  const estimatedContextTokens = estimateContextTokens(context);
+  return seedSteps?.length ? { prompt, seedSteps, messageCount: messages.length, estimatedContextTokens } : { prompt, messageCount: messages.length, estimatedContextTokens };
 }

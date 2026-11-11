@@ -60,12 +60,20 @@ export class AcpSessionStore {
   }
   get(id: string): Promise<SavedSessionRecord | undefined> {
     return this.enqueue(async () => {
-      const records = await this.read(), matches = records.filter(record => record.piSessionId === id);
-      if (matches.length !== 1) return undefined;
-      const record = matches[0]!;
+      const records = await this.read();
+      let record: SavedSessionRecord | undefined;
+      let matches = 0;
+      for (const candidate of records) {
+        if (candidate.piSessionId !== id) continue;
+        if (++matches > 1) return undefined;
+        record = candidate;
+      }
+      if (!record) return undefined;
       // A duplicated/cross-linked mapping proves no exclusive conversation
       // ownership. Reconstruct from OMP instead of picking an arbitrary row.
-      if (records.some(other => other !== record && other.acpSessionId === record.acpSessionId)) return undefined;
+      for (const other of records) {
+        if (other !== record && other.acpSessionId === record.acpSessionId) return undefined;
+      }
       if (Date.now() - record.lastActive <= 30 * 24 * 60 * 60_000) return record;
       const sink = this.sink();
       if (sink) {

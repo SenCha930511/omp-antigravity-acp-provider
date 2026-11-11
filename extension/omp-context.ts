@@ -8,6 +8,9 @@ export function toolDeclarations(tools: readonly OmpToolDeclaration[]): OmpToolD
 }
 
 export function normalizeOmpSystemDeltas(messages: unknown[]): unknown[] {
+  if (!messages.some(message => message && typeof message === "object" && "role" in message && message.role === "system")) {
+    return messages;
+  }
   return messages.map(message => {
     if (!message || typeof message !== "object" || !("role" in message) || message.role !== "system") return message;
     const system = message as { toolsAdded?: OmpToolDeclaration[]; toolsRemoved?: Array<{ name: string }> };

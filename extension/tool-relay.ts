@@ -99,7 +99,11 @@ export class ToolRelay {
   }
 
   get pendingCount(): number {
-    return [...this.records.values()].filter(record => record.state === "pending" || record.state === "relayed").length;
+    let count = 0;
+    for (const record of this.records.values()) {
+      if (record.state === "pending" || record.state === "relayed") count++;
+    }
+    return count;
   }
 
   beginTurn(): number {

@@ -15,9 +15,18 @@ export class Diagnostics {
   sync<T>(stage: string, work: () => T): T { if (!this.enabled) return work(); const t = performance.now(); try { return work(); } finally { this.record(stage, performance.now() - t); } }
   async measure<T>(stage: string, work: () => Promise<T>): Promise<T> { if (!this.enabled) return work(); const t = performance.now(); try { return await work(); } finally { this.record(stage, performance.now() - t); } }
   status() {
+    const groups = new Map<string, number[]>();
+    for (const sample of this.samples) {
+      let values = groups.get(sample.stage);
+      if (!values) {
+        values = [];
+        groups.set(sample.stage, values);
+      }
+      values.push(sample.ms);
+    }
     const stages: { [key: string]: { count: number; medianMs: number; maxMs: number } } = {};
-    for (const name of new Set(this.samples.map(s => s.stage))) {
-      const values = this.samples.filter(s => s.stage === name).map(s => s.ms).sort((a, b) => a - b);
+    for (const [name, values] of groups) {
+      values.sort((a, b) => a - b);
       stages[name] = { count: values.length, medianMs: +values[Math.floor(values.length / 2)].toFixed(3), maxMs: +values.at(-1)!.toFixed(3) };
     }
     return { enabled: this.enabled, samples: this.samples.length, capacity: 128, stages };

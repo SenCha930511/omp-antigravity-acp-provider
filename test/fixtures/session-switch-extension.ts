@@ -16,6 +16,7 @@ export default async function(pi: any) {
   let serial = 0;
   let autoCompactionTriggered = false;
   let cleanupConfigured = false;
+  const quotaText = process.env.OMP_ACP_SESSION_TEST_QUOTA_TEXT;
   const models = ["gemini-3.8-flash", "fixture-other"];
   const modes = ["yolo", "default", "auto_edit"];
   const createConnection = (options: any): any => {
@@ -49,14 +50,20 @@ export default async function(pi: any) {
       async setModel(id: string, model: string) { server[id].models.currentModelId = model; persist(); log({ kind: "model", id, model }); },
       holdPromptWatchdog() { return () => {}; },
       configureUsage() {},
+      waitForUsageCommand() { return quotaText !== undefined; },
       async prompt(request: any, signal?: AbortSignal) {
         c.activePrompts++;
         log({ kind: "prompt", id: c.id, model: server[c.id].models.currentModelId,
           mode: server[c.id].modes.currentModeId, prompt: request.prompt });
-        const text = request.prompt.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+        const currentText = request.prompt.filter((b: any) => b.type === "text").at(-1)?.text?.trim() ?? "";
         const abort = () => { void c.cancel(c.id); };
         try {
-          if (text.includes("REQ_HOLD")) {
+          if (quotaText !== undefined && currentText === "/usage") {
+            await options.handlers.onUpdate({ sessionId: c.id, update: { sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: quotaText } } });
+            return { stopReason: "end_turn" };
+          }
+          if (currentText === "REQ_HOLD_CANCEL") {
             pending = Promise.withResolvers<any>();
             signal?.addEventListener("abort", abort, { once: true });
             if (signal?.aborted) abort();
@@ -64,7 +71,12 @@ export default async function(pi: any) {
           }
           await options.handlers.onUpdate({ sessionId: c.id, update: { sessionUpdate: "agent_message_chunk",
             content: { type: "text", text: "Completed offline fixture request." } } });
-          return { stopReason: "end_turn" };
+          return {
+            stopReason: "end_turn",
+            ...(process.env.OMP_ACP_SESSION_TEST_BILLING_USAGE === "1"
+              ? { usage: { inputTokens: 0, cachedReadTokens: 2_888_743, outputTokens: 14_778 } }
+              : {}),
+          };
         } finally { signal?.removeEventListener("abort", abort); pending = undefined; c.activePrompts--; }
       },
       async cancel(id: string) { log({ kind: "cancel", id }); pending?.resolve({ stopReason: "cancelled" }); },
@@ -78,8 +90,9 @@ export default async function(pi: any) {
     };
     return c;
   };
-  for (const name of ["session_start", "session_switch", "session_branch", "session_tree", "session_compact", "session_shutdown"]) {
+  for (const name of ["session_start", "agent_end", "session_switch", "session_branch", "session_tree", "session_compact", "session_shutdown"]) {
     pi.on(name, (event: any, ctx: any) => log({ kind: "event", event: name, reason: event.reason,
+      ...(name === "session_compact" ? { details: event.compactionEntry?.details } : {}),
       transcriptId: ctx.sessionManager.getSessionId(), file: ctx.sessionManager.getSessionFile() }));
   }
   pi.on("before_agent_start", () => ({ systemPrompt: ["FIXTURE_SYSTEM_ONE", "FIXTURE_SYSTEM_TWO"] }));
@@ -102,6 +115,7 @@ export default async function(pi: any) {
               event.message.usage.contextTokens = 50000;
               log({ kind: "synthetic-auto-compaction-trigger", used: 50000 });
             }
+            if (event.type === "done") log({ kind: "done-usage", usage: event.message.usage });
             yield event;
           }
         })();

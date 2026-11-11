@@ -41,7 +41,10 @@ test("OMP /fresh closes old deferred work; a same-id replacement waits for teard
   f.gates.set("same-routing-id", gate.promise);
   scope.get("antigravity-acp")!.close();
   const rejected = assert.rejects(f.lifecycle.ready(old), /closed before ACP dispatch/);
-  const next = f.lifecycle.capture("same-routing-id", scope);
+  let replacedOwner: OmpProviderSessionState | undefined;
+  const next = f.lifecycle.capture("same-routing-id", scope, previous => { replacedOwner = previous; });
+  assert.equal(replacedOwner, old.scope, "replacement reports the actual closed owner scope");
+  assert.notEqual(next.scope, old.scope, "the candidate belongs to a new owner generation");
   let ready = false;
   const waiting = f.lifecycle.ready(next).then(() => { ready = true; });
   await Promise.resolve(); await Promise.resolve();
@@ -138,6 +141,16 @@ test("waitClosing awaits synchronous scope.close teardowns from previously visit
   assert.equal(drained, true);
 });
 
+test("normalization reuses ordinary message arrays and only allocates for system deltas", () => {
+  const messages = [{ role: "user", content: "question" }, { role: "assistant", content: "answer" }, null, "raw"];
+  assert.equal(normalizeOmpSystemDeltas(messages), messages);
+  const withSystem = [...messages, { role: "system", content: "rules", toolsAdded: [{ name: "read", host: {} }] }];
+  const normalized = normalizeOmpSystemDeltas(withSystem);
+  assert.notEqual(normalized, withSystem);
+  assert.equal(normalized[0], messages[0]);
+  assert.deepEqual(normalized.at(-1), { role: "system", content: "rules", toolsAdded: [{ name: "read", description: undefined, parameters: undefined }] });
+});
+
 test("OMP tool host state and cycles cannot change accepted history, but schema changes still do", async () => {
   const runtime: any = new AntigravityRuntime(() => {}, "yolo");
   const host: any = { requests: 1 }; host.self = host;
@@ -163,4 +176,34 @@ test("a failed runtime teardown still releases the one-shot registration", async
   gate.reject(new Error("synthetic teardown failure"));
   await assert.rejects(closing, /synthetic teardown failure/);
   assert.deepEqual(f.released, ["sid"], "unbinding must not depend on teardown success");
+});
+
+test("a rejected predecessor cannot release the next disposal guard before its own teardown settles", async () => {
+  const f = fixture(), nextTeardown = Promise.withResolvers<void>();
+  f.bind("sid", f.scope());
+  const original = new Error("original close failure");
+  f.gates.set("sid", Promise.reject(original));
+  const previous = f.lifecycle.closeSession("sid");
+  void previous.catch(() => {});
+  const disposed = f.lifecycle.disposeRuntime("sid", {}, () => nextTeardown.promise);
+  let drained = false;
+  const waiting = f.lifecycle.waitClosing().finally(() => { drained = true; });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(drained, false, "cleanup waits for the next disposal despite an older rejection");
+  nextTeardown.resolve();
+  await waiting;
+  const [result] = await Promise.allSettled([disposed]);
+  assert.equal(result.status, "rejected");
+  if (result.status === "rejected") assert.equal(result.reason, original);
+});
+
+test("a release failure does not mask the original close failure", async () => {
+  const f = fixture(), scope = f.scope();
+  f.bind("sid", scope);
+  const original = new Error("original close failure");
+  f.gates.set("sid", Promise.reject(original));
+  f.releaseGates.set("sid", Promise.reject(new Error("release failure")));
+  const closing = f.lifecycle.closeSession("sid", true);
+  await assert.rejects(closing, error => error === original);
+  assert.deepEqual(f.released, ["sid"]);
 });

@@ -12,6 +12,7 @@ import type { SessionCleanup } from "./session-cleanup.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import { deferredAbortSignal, isSteerAbort, steerMode as resolveSteerMode, steerTimings as resolveSteerTimings, type SteerMode, type SteerTimings } from "./turn-cancellation.ts";
 import { PermissionIdentityRegistry } from "./permission-identity.ts";
+import type { AvailableCommand } from "@agentclientprotocol/sdk";
 
 const CONTINUATION_PROMPT = "Continue exactly where your previous output stopped. Do not repeat any earlier text.";
 function continuationLimit(): number {
@@ -41,6 +42,7 @@ export class TierConnection extends AntigravityAcpConnection {
   private readonly usageCaptures = new Map<string, { text: string }>();
   private readonly usageReads = new Map<string, Promise<SessionUsage | undefined>>();
   private readonly usageCommands = new Set<string>();
+  private readonly usageCommandWaiters = new Map<string, Set<(available: boolean) => void>>();
   private cleanup?: SessionCleanup;
   private diagnostics?: Diagnostics;
   private readonly firstOutput = new Map<string, number>();
@@ -59,12 +61,16 @@ export class TierConnection extends AntigravityAcpConnection {
   private readonly noticeHandler: UpdateHandler | undefined;
   private readonly noticeClosed = new Set<string>();
 
-  constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompSteerMode?: SteerMode; ompSteerTimings?: SteerTimings; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics }) {
+  constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompSteerMode?: SteerMode; ompSteerTimings?: SteerTimings; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics; ompPurpose?: "quota" }) {
     super(options);
     this.cleanup = options.ompCleanup;
     this.diagnostics = options.ompDiagnostics;
     this.cleanup?.start();
     void this.process.exited.then(() => this.releaseCleanupLeases()).catch(() => {});
+    const stopUsageWaiters = () => {
+      for (const id of this.usageCommandWaiters.keys()) this.resolveUsageCommandWaiters(id, false);
+    };
+    void this.process.exited.then(stopUsageWaiters, stopUsageWaiters);
     this.debugToolUpdates = options.ompDebugToolUpdates ?? false;
     this.usageMode = options.ompUsageMode ?? DEFAULT_USAGE_MODE;
     this.steerMode = options.ompSteerMode ?? resolveSteerMode();
@@ -80,7 +86,7 @@ export class TierConnection extends AntigravityAcpConnection {
     }, onUpdate: async notification => {
       const update = notification.update as {
         sessionUpdate?: string;
-        availableCommands?: Array<{ name?: string }>;
+        availableCommands?: AvailableCommand[];
         used?: number;
         size?: number;
         content?: { type?: string; text?: string };
@@ -91,9 +97,8 @@ export class TierConnection extends AntigravityAcpConnection {
       };
       this.permissionIdentity?.record(notification.sessionId, this.permissionTurn(notification.sessionId), update);
       if (this.noticeClosed?.has(notification.sessionId) && STEER_FROZEN_UPDATES.has(update.sessionUpdate ?? "")) return;
-      if (update.sessionUpdate === "available_commands_update") {
-        if (update.availableCommands?.some(command => command.name === "usage")) this.usageCommands.add(notification.sessionId);
-        else this.usageCommands.delete(notification.sessionId);
+      if (update.sessionUpdate === "available_commands_update" && update.availableCommands) {
+        this.updateUsageCommands(notification.sessionId, update.availableCommands);
       }
       if (update.sessionUpdate === "usage_update" && typeof update.used === "number" && Number.isSafeInteger(update.used) && typeof update.size === "number" && Number.isSafeInteger(update.size)) {
         this.contextUsage.set(notification.sessionId, { used: update.used, size: update.size });
@@ -150,6 +155,42 @@ export class TierConnection extends AntigravityAcpConnection {
   configureUsage(mode: "auto" | "off") {
     this.usageMode = mode;
     this.usageBaselines.clear();
+  }
+
+  private updateUsageCommands(sessionId: string, commands: readonly AvailableCommand[]): void {
+    const available = commands.some(command => command.name === "usage");
+    if (available) this.usageCommands.add(sessionId);
+    else this.usageCommands.delete(sessionId);
+    this.resolveUsageCommandWaiters(sessionId, available);
+  }
+
+  async waitForUsageCommand(sessionId: string, timeoutMs = 5_000, signal?: AbortSignal): Promise<boolean> {
+    if (this.usageCommands.has(sessionId)) return true;
+    if (timeoutMs <= 0 || signal?.aborted) return false;
+    const { promise, resolve } = Promise.withResolvers<boolean>();
+    let waiters = this.usageCommandWaiters.get(sessionId);
+    if (!waiters) {
+      waiters = new Set();
+      this.usageCommandWaiters.set(sessionId, waiters);
+    }
+    const settle = (available: boolean) => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      waiters.delete(settle);
+      if (!waiters.size && this.usageCommandWaiters.get(sessionId) === waiters) this.usageCommandWaiters.delete(sessionId);
+      resolve(available);
+    };
+    waiters.add(settle);
+    const onAbort = () => settle(false);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => settle(false), timeoutMs);
+    return promise;
+  }
+
+  private resolveUsageCommandWaiters(sessionId: string, available: boolean): void {
+    const waiters = this.usageCommandWaiters?.get(sessionId);
+    this.usageCommandWaiters?.delete(sessionId);
+    if (waiters) for (const settle of waiters) settle(available);
   }
 
   setOmpContextWindow(sessionId: string, contextWindow: number): void {
@@ -224,6 +265,9 @@ export class TierConnection extends AntigravityAcpConnection {
       catch { this.pendingOwned.add(session.sessionId); console.warn("[ACP cleanup] Registration deferred; preserving session files and retrying."); }
     }
     this.usageBaselines.set(session.sessionId, { input: 0, completion: 0, thinking: 0, cached: 0, total: 0 });
+    if ("availableCommands" in session && Array.isArray(session.availableCommands)) {
+      this.updateUsageCommands(session.sessionId, session.availableCommands);
+    }
     return session;
   }
 
@@ -235,11 +279,19 @@ export class TierConnection extends AntigravityAcpConnection {
   }
   override async resumeSession(...args: Parameters<AntigravityAcpConnection["resumeSession"]>) {
     await this.protectSession(args[0]);
-    return super.resumeSession(...args);
+    const session = await super.resumeSession(...args);
+    if ("availableCommands" in session && Array.isArray(session.availableCommands)) {
+      this.updateUsageCommands(args[0], session.availableCommands);
+    }
+    return session;
   }
   override async loadSession(...args: Parameters<AntigravityAcpConnection["loadSession"]>) {
     await this.protectSession(args[0]);
-    return super.loadSession(...args);
+    const session = await super.loadSession(...args);
+    if ("availableCommands" in session && Array.isArray(session.availableCommands)) {
+      this.updateUsageCommands(args[0], session.availableCommands);
+    }
+    return session;
   }
   private dropSessionState(id: string) {
     this.contextUsage?.delete(id);
@@ -297,6 +349,7 @@ export class TierConnection extends AntigravityAcpConnection {
     }
   }
   override async close() {
+    for (const id of this.usageCommandWaiters?.keys() ?? []) this.resolveUsageCommandWaiters(id, false);
     await super.close();
     await this.releaseCleanupLeases();
     this.contextUsage?.clear();
@@ -305,6 +358,7 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageStatus?.clear();
     this.usageBaselines?.clear();
     this.usageCommands?.clear();
+    this.usageCommandWaiters?.clear();
     this.usageCaptures?.clear();
     this.firstOutput?.clear();
     this.noticeFilter?.clear();
@@ -332,6 +386,10 @@ export class TierConnection extends AntigravityAcpConnection {
     if (started === undefined) return;
     this.diagnostics?.record("acp.first-output", performance.now() - started);
     this.firstOutput.delete(sessionId);
+  }
+
+  async promptWithoutUsageDeltas(request: Parameters<AntigravityAcpConnection["prompt"]>[0], signal?: AbortSignal) {
+    return super.prompt(request, signal);
   }
 
   private readUsage(sessionId: string, signal?: AbortSignal): Promise<SessionUsage | undefined> {

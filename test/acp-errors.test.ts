@@ -36,6 +36,10 @@ test("context, timeout, server and transport failures remain distinguishable", (
 test("vendor codes survive when the message is ambiguous", () => {
   assert.equal(classifyAcpFailure(new AntigravityAcpError("aborted", "cancelled")).code, "aborted");
   assert.equal(classifyAcpFailure(new AntigravityAcpError("spawn", "bridge failed to bind")).code, "transport");
+  const quota = classifyAcpFailure(new AntigravityAcpError("quota", "Account depleted. Resets at 2026-11-12T01:02:00.000Z"));
+  assert.equal(quota.code, "quota");
+  assert.match(quota.message, /quota exceeded/);
+  assert.match(quota.message, /Resets at 2026-11-12T01:02:00\.000Z/);
   assert.equal(classifyAcpFailure(new AntigravityAcpError("invalid_input", "bad request")).code, "protocol");
   assert.equal(classifyAcpFailure(new AntigravityAcpError("model", "model unavailable")).code, "model");
 });

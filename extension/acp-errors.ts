@@ -104,6 +104,7 @@ export function classifyAcpFailure(error: unknown): Error {
   if (isAntigravityAcpError(error)) {
     if (error.code === "aborted") return error;
     if (error.code === "auth") return new AcpFailure("auth", appendHint(error.message, AUTH_RULE), { cause: error });
+    if (error.code === "quota") return new AcpFailure("quota", appendHint(error.message, QUOTA_RULE), { cause: error });
     if (error.code === "timeout") return new AcpFailure("timeout", appendHint(error.message, TIMEOUT_RULE), { cause: error });
     if (error.code === "spawn" || error.code === "process_exit") return new AcpFailure("transport", appendHint(error.message, TRANSPORT_RULE), { cause: error });
     if (error.code === "invalid_input") return new AcpFailure("protocol", appendHint(error.message, PROTOCOL_RULE), { cause: error });

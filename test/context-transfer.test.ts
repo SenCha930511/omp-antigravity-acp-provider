@@ -26,13 +26,14 @@ interface MetricsTestHooks {
   historyRecordItems(record: { role: string; content: TransferBlock[] }, images: TransferBlock[], imageAttachments: number[]): TestRecordItem[];
   historyRangeTextBytes(metrics: TestHistoryMetrics, start: number, end: number): number;
   assembleStep(instructions: TransferBlock | undefined, items: TestRecordItem[], tail: TransferBlock[]): TransferBlock[];
+  takeTextChunk(text: string, maxBytes: number): string;
 }
 
 const metricHooks = (() => {
   const sourceFile = path.resolve("extension/context-transfer.ts");
   const compiled = buildSync({
     stdin: {
-      contents: fs.readFileSync(sourceFile, "utf8") + "\nexport { prepareHistoryMetrics, historyRangeTextBytes, assembleStep, historyRecordItems };",
+      contents: fs.readFileSync(sourceFile, "utf8") + "\nexport { prepareHistoryMetrics, historyRangeTextBytes, assembleStep, historyRecordItems, takeTextChunk };",
       resolveDir: path.dirname(sourceFile), sourcefile: sourceFile, loader: "ts",
     },
     bundle: true, write: false, outfile: path.join(path.dirname(sourceFile), "context-transfer-test.cjs"),
@@ -198,6 +199,28 @@ test("cold transfer retains old text beyond the former 32000-character cutoff", 
 test("overflow fails explicitly instead of silently losing history or tool results", () => {
   assert.throws(() => buildPromptParts({ messages: [user("x".repeat(1_500_000)), user("LATEST")] }, true, undefined, { contextWindow: 1_000_000, policy: { inputTokenBudget: 400_000 } }), /Maximum context length exceeded/);
 });
+test("wire sizing masks only direct image blocks and checks bytes before token estimates", () => {
+  const context = { messages: [user([{ type: "toolCall", id: "call", name: "fixture", arguments: {
+    nested: { type: "image", data: "x".repeat(70_000), mimeType: "image/png" },
+  } }])] };
+  const highBudget = { inputTokenBudget: 1_000_000, maxTransferBytes: 134_217_728, maxImageBytes: 8_388_608 };
+  const prompt = buildPromptParts(context, true, undefined, { policy: highBudget }).prompt;
+  const imageWireChars = prompt.reduce((sum, block) => sum + (block.type === "image" ? block.data?.length ?? 0 : 0), 0);
+  const wireBytes = imageWireChars + Buffer.byteLength(JSON.stringify(
+    prompt.map(block => block.type === "image" ? { ...block, data: "" } : block)), "utf8");
+  assert.ok(wireBytes > 65_536);
+  assert.throws(() => buildPromptParts(context, true, undefined, { policy: {
+    ...highBudget, inputTokenBudget: 1, maxTransferBytes: wireBytes - 1,
+  } }), error => {
+    assert.match(String(error), /Request payload too large \(413\)/);
+    assert.doesNotMatch(String(error), /local ACP estimate/);
+    return true;
+  });
+  assert.throws(() => buildPromptParts(context, true, undefined, { policy: {
+    ...highBudget, inputTokenBudget: 1, maxTransferBytes: wireBytes,
+  } }), /Maximum context length exceeded: local ACP estimate/);
+});
+
 test("warm delta sends only external results and retains tool identities", () => {
   const messages = [user("OLD"), user("CURRENT"), { role: "toolResult", toolName: "read", toolCallId: "call-42", content: [{ type: "text", text: "RESULT" }] }];
   const output = buildPromptParts({ messages }, false, 2, { contextWindow: 1_000_000 });
@@ -206,6 +229,22 @@ test("warm delta sends only external results and retains tool identities", () =>
   assert.ok(!text.includes('"OLD"')); assert.ok(!text.includes('"CURRENT"'));
   assert.equal(output.messageCount, 3);
 });
+test("warm prompt parts still estimate the full OMP context, not only the delta", () => {
+  const history = "H".repeat(40_000);
+  const messages = [user(history), { role: "assistant", content: "OLD_ANSWER" }, user("LATEST")];
+  const warm = buildPromptParts({ systemPrompt: "SYSTEM", messages }, false, 2, { contextWindow: 1_000_000 });
+  assert.doesNotMatch(JSON.stringify(warm.prompt), /H{100}/);
+  assert.ok(warm.estimatedContextTokens > 10_000, `expected full-history estimate, got ${warm.estimatedContextTokens}`);
+  const fresh = buildPromptParts({ systemPrompt: "SYSTEM", messages }, true, undefined, { contextWindow: 1_000_000 });
+  assert.ok(fresh.estimatedContextTokens >= warm.estimatedContextTokens);
+  const withTools = buildPromptParts({
+    systemPrompt: "SYSTEM",
+    messages,
+    tools: [{ name: "read", description: "D".repeat(4_000), parameters: { type: "object" } }],
+  }, false, 2, { contextWindow: 1_000_000 });
+  assert.ok(withTools.estimatedContextTokens > warm.estimatedContextTokens + 1_000);
+});
+
 test("historical images remain actual attachments; thinking is not replayed as text", () => {
   const image = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
   const messages = [user([image]), { role: "assistant", content: [{ type: "thinking", thinking: "PRIVATE" }, { type: "text", text: "ANSWER" }] }, user("NEXT")];
@@ -407,6 +446,50 @@ test("history metrics match the real renderer for every range and attachment dig
         assert.equal(metricHooks.historyRangeTextBytes(metrics, start, end), actual, `range [${start}, ${end})`);
       }
     }
+  }
+});
+
+test("text chunk byte counting matches the verbatim reference across UTF-8 boundaries", () => {
+  const reference = (text: string, maxBytes: number): string => {
+    if (maxBytes <= 0) return "";
+    if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+    let bytes = 0;
+    let end = 0;
+    for (const char of text) {
+      const size = Buffer.byteLength(char, "utf8");
+      if (bytes + size > maxBytes) break;
+      bytes += size;
+      end += char.length;
+    }
+    if (end === 0) return [...text][0] ?? "";
+    const chunk = text.slice(0, end);
+    const newline = chunk.lastIndexOf("\n");
+    if (newline > 0 && Buffer.byteLength(chunk.slice(0, newline + 1), "utf8") >= maxBytes * 0.5) {
+      return chunk.slice(0, newline + 1);
+    }
+    return chunk;
+  };
+  const samples = [
+    "", "plain ASCII", "one\ntwo\nthree\n", "a\n" + "x".repeat(80),
+    "中文𠮷 mixed text", "👩‍💻👨‍👩‍👧‍👦 emoji\n中文",
+    "\uD800x\uDFFF\n中文", " \n\t\r\n" + "z".repeat(40),
+  ];
+  const budgets = [...Array.from({ length: 25 }, (_, index) => index), 31, 32, 33, 63, 64, 65, 127, 128, 129, 256];
+  for (const text of samples) for (const maxBytes of budgets) {
+    const expected = reference(text, maxBytes);
+    const actual = metricHooks.takeTextChunk(text, maxBytes);
+    assert.equal(actual, expected, `${JSON.stringify(text)} at ${maxBytes} bytes`);
+    if (!text || maxBytes <= 0) continue;
+    const chunks: string[] = [];
+    let rest = text;
+    while (rest) {
+      const chunk = metricHooks.takeTextChunk(rest, maxBytes);
+      assert.ok(chunk.length > 0, "non-empty input must always make progress");
+      assert.ok(rest.startsWith(chunk));
+      chunks.push(chunk);
+      rest = rest.slice(chunk.length);
+    }
+    assert.equal(chunks.join(""), text, "splitting must not add, remove or reorder text");
   }
 });
 

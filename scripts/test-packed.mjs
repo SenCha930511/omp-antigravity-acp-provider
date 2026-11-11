@@ -47,7 +47,7 @@ try {
   const catalog = await execute("omp", ["models", "antigravity-acp", "--no-extensions", "-e",
     path.join(installed, "extension/index.ts"), "--json"], {
     cwd: temporary,
-    env: { ...process.env, AGY_ACP_BIN: process.platform === "win32" ? "missing-acp-runtime.exe" : "/usr/bin/false",
+    env: { ...process.env, AGY_ACP_BIN: process.execPath, GEMINI_API_KEY: "offline-fixture", HOME: temporary,
       PI_CODING_AGENT_DIR: path.join(temporary, "agent") },
     timeout: 120_000,
     maxBuffer: 1024 * 1024,

@@ -82,14 +82,14 @@ try {
   await command.handler("account", context);
   const account = notices.pop();
   assert.match(account, /Antigravity ACP account/);
-  assert.match(account, /Google account: signed in \(token in macOS keychain; email not read\)/);
-  assert.match(account, /Authentication: missing/);
-  assert.match(account, /Credential storage \(preflight\): server default \(expected: no refreshable token file to reuse\)/);
-  assert.match(account, /OMP marker record: present, authorized 2009-02-13T23:31:30\.123Z as marker@example\.com \(non-secret managed marker\)/);
-  assert.match(account, /OMP auth source: local store \(oauth marker\)/);
-  assert.match(account, /Saved ACP sessions: 1/);
-  assert.match(account, /Requested permission mode: yolo/);
-  assert.match(account, /Active bindings: 0/);
+  assert.match(account, /Google account:\s+signed in · keychain token; email unavailable/);
+  assert.match(account, /ACP authentication:\s+missing/);
+  assert.match(account, /Credential storage:\s+server default \(expected: no refreshable token file to reuse\)/);
+  assert.match(account, /OMP login marker:\s+present · non-secret managed marker · authorized 2009-02-13T23:31:30\.123Z · account marker@example\.com/);
+  assert.match(account, /OMP auth source:\s+local store \(oauth marker\)/);
+  assert.match(account, /Saved ACP sessions:\s+1/);
+  assert.match(account, /Permission:\s+yolo/);
+  assert.match(account, /Active sessions:\s+0/);
   await assert.rejects(command.handler("account extra", context), /Usage:/);
 
   // A stored id_token file provides the account email without keychain access.
@@ -98,7 +98,7 @@ try {
   await fs.writeFile(path.join(geminiHome, "antigravity-acp", "acp_token.json"),
     JSON.stringify({ id_token: `${b64url({ alg: "RS256" })}.${b64url({ email: "acp-file@example.com" })}.sig` }));
   await command.handler("account", context);
-  assert.match(notices.pop(), /Google account: acp-file@example\.com/);
+  assert.match(notices.pop(), /Google account:\s+acp-file@example\.com/);
 
   // login: upstream OAuth flow stubbed at loginGoogle; the command must map
   // OMP dialogs onto the upstream interaction and return the pasted callback.
@@ -153,10 +153,10 @@ try {
   // The next request must build a fresh runtime pool entry, not the closed one.
   await command.handler("account", context);
   const afterLogout = notices.pop();
-  assert.match(afterLogout, /Google account: not signed in/);
-  assert.match(afterLogout, /Authentication: missing/);
-  assert.match(afterLogout, /OMP marker record: not stored; run \/login or \/antigravity-acp login/);
-  assert.match(afterLogout, /Saved ACP sessions: 0/);
+  assert.match(afterLogout, /Google account:\s+not signed in/);
+  assert.match(afterLogout, /ACP authentication:\s+missing/);
+  assert.match(afterLogout, /OMP login marker:\s+not stored; run \/login or \/antigravity-acp login/);
+  assert.match(afterLogout, /Saved ACP sessions:\s+0/);
   await assert.rejects(command.handler("logout extra", context), /Usage:/);
 
   // logout without a model registry reports the manual /logout fallback.
