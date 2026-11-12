@@ -50,9 +50,10 @@ PR validation and releases are separate. Never create a tag or publish a package
    - `marketplace/antigravity-acp/package.json`.
    - `ADAPTER_VERSION` in `marketplace/antigravity-acp/provision.ts`.
    - The plugin entry in `.omp-plugin/marketplace.json`.
-3. Add the release notes to `CHANGELOG.md`. The first `##` version heading after `# Changelog` must be `## X.Y.Z — YYYY-MM-DD` with the actual version and date.
-4. Run `npm run check` and review the package contents. Confirm that no generated runtime, credentials, or session data will be released.
-5. Merge the release preparation through the normal protected pull request flow. Tag the resulting release commit only when publishing is intended.
+3. Add the release notes to `CHANGELOG.md`. The first visible `##` version heading after `# Changelog` must be `## X.Y.Z — YYYY-MM-DD` with the actual version and a valid calendar date. Fenced code and HTML comments are not release headings.
+4. Run `npm run check` and `npm run check:versions`, then review the package contents. Confirm that no generated runtime, credentials, or session data will be released. The version check compares all six declarations without reading the changelog.
+5. Before an intended tag, run `node scripts/check-release-versions.mjs --release --tag vX.Y.Z`. Release mode additionally requires the exact tag and a matching first visible `## X.Y.Z — YYYY-MM-DD` changelog heading; fenced examples, HTML comments, later historical entries, and duplicate target-version headings do not satisfy that boundary.
+6. Merge the release preparation through the normal protected pull request flow. Tag the resulting release commit only when publishing is intended.
 
 ### Protected tag workflow
 

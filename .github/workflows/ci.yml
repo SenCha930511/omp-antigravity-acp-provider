@@ -58,3 +58,8 @@ jobs:
 
       - name: Run offline verification
         run: npm run check
+
+      - name: Check release version consistency
+        run: |
+          npm run check:versions
+          node --test scripts/test-check-release-versions.mjs

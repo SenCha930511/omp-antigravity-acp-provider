@@ -50,6 +50,7 @@
     "test:omp-quota": "node scripts/build.mjs && node scripts/test-omp-quota.ts",
     "test:omp-builtin-usage": "node scripts/build.mjs && node scripts/test-omp-builtin-usage.mjs",
     "test:managed-context": "node scripts/test-with-managed-context.mjs",
+    "check:versions": "node scripts/check-release-versions.mjs",
     "check": "npm run build && npm test && npm run test:cleanup && npm run test:continuity && npm run test:tools && npm run test:wire && npm run test:wire-tools && npm run test:wire-relay && npm run test:wire-tools-list && npm run test:graph && npm run test:commands && npm run test:auth && npm run test:runtime-source && npm run test:omp-sessions && npm run test:omp-rollover && npm run test:omp-quota && npm run test:omp-builtin-usage && npm run test:managed-context && npm run test:packed",
     "prepack": "npm run build",
     "prepublishOnly": "npm run check",
