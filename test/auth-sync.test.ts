@@ -91,14 +91,14 @@ test("keychain classification separates confirmed absence from failures", async 
     null,
   ];
   for (const error of failures) {
-    const kc = createKeychain(async () => { throw error; });
+    const kc = createKeychain(async () => { throw error; }, "darwin");
     await assert.rejects(kc.present(), /Unable to inspect the Antigravity keychain entry/);
     await assert.rejects(kc.remove(), /Unable to remove the Antigravity keychain entry/);
   }
-  const missing = createKeychain(async () => { throw confirmedMissing; });
+  const missing = createKeychain(async () => { throw confirmedMissing; }, "darwin");
   assert.equal(await missing.present(), false);
   assert.equal(await missing.remove(), false);
-  const present = createKeychain(async () => undefined);
+  const present = createKeychain(async () => undefined, "darwin");
   assert.equal(await present.present(), true);
   assert.equal(await present.remove(), true);
 });
@@ -113,7 +113,7 @@ test("non-darwin platforms skip the subprocess entirely", async () => {
 
 test("a gated runner leaves the microtask queue running", async () => {
   const gate = Promise.withResolvers<void>();
-  const kc = createKeychain(() => gate.promise);
+  const kc = createKeychain(() => gate.promise, "darwin");
   const pending = kc.present();
   let ran = false;
   await Promise.resolve().then(() => { ran = true; });
@@ -124,7 +124,7 @@ test("a gated runner leaves the microtask queue running", async () => {
 
 test("runSecurity keeps the event loop responsive in a real subprocess", async () => {
   const script = `setTimeout(() => { process.stderr.write(${JSON.stringify(NOT_FOUND_STDERR)}); process.exit(44); }, 150);`;
-  const kc = createKeychain(() => runSecurity(["-e", script], process.execPath));
+  const kc = createKeychain(() => runSecurity(["-e", script], process.execPath), "darwin");
   let ticks = 0;
   const timer = setInterval(() => { ticks++; }, 20);
   try {
@@ -136,7 +136,7 @@ test("runSecurity keeps the event loop responsive in a real subprocess", async (
 });
 
 test("a hung security subprocess rejects through the timeout path", async () => {
-  const kc = createKeychain(() => runSecurity(["-e", "setTimeout(() => {}, 3500);"], process.execPath));
+  const kc = createKeychain(() => runSecurity(["-e", "setTimeout(() => {}, 3500);"], process.execPath), "darwin");
   await assert.rejects(kc.present(), /Unable to inspect the Antigravity keychain entry/);
 });
 
