@@ -171,7 +171,7 @@ for (const script of ["exit 1", "echo prerelease"]) {
   assert.equal(preference.source, "cli");
   const quota = assertSelectedAcpCliLaunch(stateDir, preference, env, "quota", home);
   const command = path.join(home, ".local", "opt", "agy-acp", "current", "agy_acp_server.par");
-  assert.deepEqual(quota, { command, args: [] });
+  assert.deepEqual(quota, { command, args: process.platform === "linux" ? ["--uid="] : [] });
   assert.equal(env.AGY_ACP_BIN, command);
   assert.deepEqual(resolveManagedAcpCommand(home, "linux"), { command, args: ["--uid="] });
   env.AGY_ACP_BIN = "/opt/custom-quota-bin";
