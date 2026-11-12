@@ -1,4 +1,5 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { MessageChannel } from "node:worker_threads";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -12,6 +13,15 @@ import { selectRuntimeModel } from "../extension/model-catalog.ts";
 // Existing transition tests exercise the explicit interrupt mode; queue mode
 // has its own regression below.
 process.env.OMP_ACP_STEER_MODE = "steer";
+
+// Node 22 cancels a test waiting only on unref timers. Keep an explicit
+// handle for this file so the existing relay and steering timeouts settle.
+const eventLoop = new MessageChannel();
+eventLoop.port1.ref();
+after(() => {
+  eventLoop.port1.close();
+  eventLoop.port2.close();
+});
 
 const model = { id: "gemini-3.8-flash", name: "Offline Flash", api: "antigravity-acp", provider: "antigravity-acp",
   contextWindow: 524288, maxTokens: 32000, reasoning: false, input: ["text"],

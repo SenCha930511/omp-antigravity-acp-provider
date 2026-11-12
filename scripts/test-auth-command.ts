@@ -84,7 +84,10 @@ try {
   assert.match(account, /Antigravity ACP account/);
   assert.match(account, /Google account:\s+signed in · keychain token; email unavailable/);
   assert.match(account, /ACP authentication:\s+missing/);
-  assert.match(account, /Credential storage:\s+server default \(expected: no refreshable token file to reuse\)/);
+  const expectedCredentialStorage = process.platform === "darwin"
+    ? "server default (expected: no refreshable token file to reuse)"
+    : "server default (secure file)";
+  assert.ok(account.split("\n").some(line => line.trim() === `Credential storage: ${expectedCredentialStorage}`), account);
   assert.match(account, /OMP login marker:\s+present · non-secret managed marker · authorized 2009-02-13T23:31:30\.123Z · account marker@example\.com/);
   assert.match(account, /OMP auth source:\s+local store \(oauth marker\)/);
   assert.match(account, /Saved ACP sessions:\s+1/);
