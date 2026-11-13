@@ -1,8 +1,8 @@
-// Compatibility seam for vendored pi-antigravity-acp-provider 0.1.15 / ACP server 1.4.x.
-// OMP effort -> vendored advertised legacy ID -> official model/thought selectors.
-import { AntigravityAcpConnection } from "./vendor/pi-antigravity-acp-provider/src/acp/connection.ts";
+// OMP-facing seam over the owned ACP connection.
+// OMP effort -> advertised legacy ID -> official model/thought selectors.
+import { AntigravityAcpConnection } from "./runtime/acp/connection.ts";
 import { choices, resolveSelection, selector } from "./selectors.ts";
-import { installSessionRouting, normalizeInitializeResponse, type NativeToolMode } from "./tool-routing.ts";
+import { installSessionRouting, normalizeInitializeResponse, type NativeToolMode, type SessionRoutingKind } from "./tool-routing.ts";
 import { showAcpUpdate } from "./activity-presentation.ts";
 import { alignContextTokens, applyCompactionChunk, applyCompactionUpdate, isTerminalCompaction, type AcpCompactionNotice, type AcpCompactionRecord } from "./acp-compaction.ts";
 import { AgentNoticeFilter } from "./agent-notices.ts";
@@ -51,6 +51,8 @@ export class TierConnection extends AntigravityAcpConnection {
   private ownershipRetry?: Promise<void>;
   private cleanupLeases = new Map<string, string>();
   toolRouting: { nativeTools: NativeToolMode; channel: "pending" | "system-append" | "legacy-prompt" } | undefined;
+  private ompSystemInstructions = "";
+  private ompSessionKind: SessionRoutingKind = "main";
   private readonly steerMode: SteerMode;
   private readonly steerTimings: SteerTimings;
   private readonly maxContinuations: number;
@@ -142,10 +144,24 @@ export class TierConnection extends AntigravityAcpConnection {
     } });
     if (options.ompNativeTools) {
       this.toolRouting = { nativeTools: options.ompNativeTools, channel: "pending" };
-      installSessionRouting((this as unknown as { connection: unknown }).connection, this.initialized, options.ompNativeTools, advanced => {
+      installSessionRouting((this as unknown as { connection: unknown }).connection, this.initialized, options.ompNativeTools,
+        () => this.ompSystemInstructions, () => this.ompSessionKind, advanced => {
         this.toolRouting!.channel = advanced ? "system-append" : "legacy-prompt";
       });
     }
+  }
+
+  // The complete OMP system instruction is only known once the turn context is
+  // available, but it must reach session/new, session/load and session/resume.
+  // The runtime sets it after initialize and before those RPCs.
+  setOmpSystemInstructions(text: string): void {
+    this.ompSystemInstructions = text;
+  }
+
+  // A shadow binding routes an ephemeral side turn; every ordinary caller keeps
+  // the main session guidance.
+  setOmpSessionKind(kind: SessionRoutingKind): void {
+    this.ompSessionKind = kind;
   }
 
   async initialize(signal?: AbortSignal) {
@@ -239,9 +255,6 @@ export class TierConnection extends AntigravityAcpConnection {
   }
 
 
-  // drainCancelledTurn calls this while waiting for a turn the server cannot
-  // cancel, so retained partial output stays frozen at the steering boundary
-  // and the checkpointed fingerprint still matches the OMP transcript.
   muteSteerChunks(sessionId: string) {
     this.steerMuted.add(sessionId);
   }
@@ -447,9 +460,6 @@ export class TierConnection extends AntigravityAcpConnection {
     const queueHold = () => this.steerMode === "queue" && signal !== undefined && isSteerAbort(signal);
     const aborted = () => {
       abortedAt = performance.now();
-      // Freeze output after any abort so the cancellation checkpoint matches
-      // what OMP retained. Queue mode still holds the transport; explicit user
-      // cancellation aborts it immediately.
       this.muteSteerChunks(id);
     };
     signal?.addEventListener("abort", aborted, { once: true });
@@ -526,10 +536,7 @@ export class TierConnection extends AntigravityAcpConnection {
     if (!thoughtSelector || !choices(thoughtSelector).some(option => option.value === effort)) {
       throw new Error(`ACP does not advertise thinking level ${effort} for ${base}`);
     }
-    // Upstream 0.1.15 already has a deadline/abort-aware, verified selector
-    // helper. Its TypeScript signature only mentions model/mode; thought_level
-    // uses the exact same stable ACP RPC and server-advertised category.
-    const selected = await (this as unknown as { setSelector: (sessionId: string, selectorId: string, value: string, signal?: AbortSignal) => Promise<boolean> }).setSelector(sessionId, thoughtSelector.id, effort, signal);
+    const selected = await this.setSelector(sessionId, thoughtSelector.id, effort, signal);
     if (!selected) throw new Error("Antigravity did not advertise a thinking-level selector");
     const state = this.getSessionState(sessionId);
     const model = selector(state, "model");

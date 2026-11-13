@@ -4,8 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire as createModuleRequire } from "node:module";
 import { buildSync } from "esbuild";
-import { ACP_STEP_TEXT_BYTES, buildPromptParts, historyBudget, promptTextBytes, stableSystemInstructions, type TransferBlock } from "../extension/context-transfer.ts";
-import { TOOL_ROUTING } from "../extension/tool-routing.ts";
+import { ACP_STEP_TEXT_BYTES, buildPromptParts, historyBudget, promptTextBytes, stableSystemInstructions, type TransferBlock } from "../extension/runtime/prompt.ts";
 
 const user = (content: any) => ({ role: "user", content, timestamp: 0 });
 interface TestRecordItem {
@@ -30,7 +29,7 @@ interface MetricsTestHooks {
 }
 
 const metricHooks = (() => {
-  const sourceFile = path.resolve("extension/context-transfer.ts");
+  const sourceFile = path.resolve("extension/runtime/prompt.ts");
   const compiled = buildSync({
     stdin: {
       contents: fs.readFileSync(sourceFile, "utf8") + "\nexport { prepareHistoryMetrics, historyRangeTextBytes, assembleStep, historyRecordItems, takeTextChunk };",
@@ -75,6 +74,8 @@ test("cold history and newest request remain explicitly separated after official
     { role: "assistant", content: [{ type: "text", text: "OLD_ALREADY_ANSWERED" }] }, user("NEW_REQUEST")] }, true);
   const parsed = parsedText(output.prompt);
   assert.match(parsed, /Do not answer historical user requests/);
+  assert.match(parsed, /do not repeat a tool call merely because it appears in this history/);
+  assert.match(parsed, /New tool calls, including another pi_task, are allowed/);
   assert.match(parsed, /# End of prior OMP conversation[\s\S]*\n\n# Current OMP user request\n\n[\s\S]*NEW_REQUEST$/);
   assert.equal(output.prompt.at(-1).text, "NEW_REQUEST");
 });
@@ -87,6 +88,85 @@ test("cold handoff after a tool result explicitly resumes the active request ins
   assert.match(parsed, /Continue from those results/);
   assert.ok(parsed.includes("call-active") && parsed.includes("ALREADY_READ"));
   assert.equal(output.prompt.at(-1).text, "ACTIVE_REQUEST");
+  assert.match(parsed, /do not replay earlier tool calls automatically/);
+  assert.match(parsed, /including another pi_task/);
+});
+test("warm continuation and retry allow new calls without authorizing history replay", () => {
+  const messages = [user("ACTIVE_REQUEST"),
+    { role: "assistant", content: [{ type: "toolCall", id: "call-active", name: "read", arguments: {} }] },
+    { role: "toolResult", toolName: "read", toolCallId: "call-active", content: [{ type: "text", text: "RESULT" }] }];
+  const continuation = buildPromptParts({ messages }, false, 3, { contextWindow: 1_000_000 });
+  const continuationText = JSON.stringify(continuation.prompt);
+  assert.match(continuationText, /Continue the active OMP request/);
+  assert.match(continuationText, /repeat a tool call merely because it appears in history/);
+  assert.match(continuationText, /including another pi_task/);
+  assert.match(continuationText, /that the active request still requires/);
+  const retry = buildPromptParts({ messages }, false, 3, { contextWindow: 1_000_000 }, true);
+  const retryText = JSON.stringify(retry.prompt);
+  assert.match(retryText, /OMP retry request/);
+  assert.match(retryText, /do not replay earlier tool calls merely because they appear in history/);
+  assert.match(retryText, /including another pi_task/);
+  assert.match(retryText, /Make any new tool calls/);
+});
+test("ephemeral prompt kind forbids every tool call while main keeps delegation", () => {
+  const cold = [user("OLD_REQUEST"),
+    { role: "assistant", content: [{ type: "text", text: "OLD_ANSWER" }] }, user("NEW_REQUEST")];
+  const main = JSON.stringify(buildPromptParts({ messages: cold }, true).prompt);
+  assert.match(main, /New tool calls, including another pi_task, are allowed/);
+  assert.doesNotMatch(main, /No tools may be called in this side turn/);
+
+  const coldText = JSON.stringify(buildPromptParts({ messages: cold }, true, undefined, { promptKind: "ephemeral" }).prompt);
+  assert.match(coldText, /No tools may be called in this side turn/);
+  assert.match(coldText, /tool calls are discarded without execution/);
+  assert.match(coldText, /do not replay a tool call from this history/);
+  assert.doesNotMatch(coldText, /including another pi_task|New tool calls|Make any new tool calls|maps to pi_task/);
+
+  const warm = JSON.stringify(buildPromptParts({ messages: cold }, false, 2, { promptKind: "ephemeral" }).prompt);
+  assert.match(warm, /# Current OMP user request/);
+  assert.match(warm, /No tools may be called in this side turn/);
+  assert.doesNotMatch(warm, /including another pi_task|Make any new tool calls/);
+
+  const inProgress = JSON.stringify(buildPromptParts({ messages: [user("ACTIVE_REQUEST"),
+    { role: "assistant", content: [{ type: "toolCall", id: "call-active", name: "read", arguments: {} }] },
+    { role: "toolResult", toolName: "read", toolCallId: "call-active", content: [{ type: "text", text: "RESULT" }] },
+    user("LATEST"), { role: "assistant", content: [{ type: "text", text: "PARTIAL" }] }] },
+    true, undefined, { promptKind: "ephemeral" }).prompt);
+  assert.match(inProgress, /already in progress/);
+  assert.match(inProgress, /No tools may be called in this side turn/);
+  assert.doesNotMatch(inProgress, /including another pi_task/);
+
+  const active = [user("ACTIVE_REQUEST"),
+    { role: "assistant", content: [{ type: "toolCall", id: "call-active", name: "read", arguments: {} }] },
+    { role: "toolResult", toolName: "read", toolCallId: "call-active", content: [{ type: "text", text: "RESULT" }] }];
+  const continuation = JSON.stringify(buildPromptParts({ messages: active }, false, 3, { promptKind: "ephemeral" }).prompt);
+  assert.match(continuation, /Continue the active OMP request/);
+  assert.match(continuation, /No tools may be called in this side turn/);
+  assert.doesNotMatch(continuation, /including another pi_task|Make any new tool calls/);
+
+  const retry = JSON.stringify(buildPromptParts({ messages: [user("ACTIVE_REQUEST")] }, false, 1,
+    { promptKind: "ephemeral" }, true).prompt);
+  assert.match(retry, /# OMP retry request/);
+  assert.match(retry, /No tools may be called in this side turn/);
+  assert.doesNotMatch(retry, /including another pi_task|Make any new tool calls/);
+
+  const oversized = buildPromptParts({ messages: [user("x".repeat(200_000))] }, true, undefined,
+    { contextWindow: 1_000_000, promptKind: "ephemeral" });
+  assert.ok(oversized.seedSteps?.length, "an oversized side request still splits into seed steps");
+  const oversizedText = JSON.stringify(oversized.prompt);
+  assert.match(oversizedText, /No tools may be called in this side turn/);
+  assert.doesNotMatch(oversizedText, /including another pi_task/);
+});
+test("ephemeral history planning keeps the step budget with its own header", () => {
+  const output = buildPromptParts({ messages: [user("HISTORY_" + "x".repeat(1_200_000)), user("LATEST")] },
+    true, undefined, { contextWindow: 1_000_000, promptKind: "ephemeral" });
+  assert.ok(output.seedSteps?.length);
+  const all = JSON.stringify([...output.seedSteps, output.prompt]);
+  assert.match(all, /No tools may be called in this side turn/);
+  assert.match(all, /do not replay a tool call from this history/);
+  assert.doesNotMatch(all, /including another pi_task|New tool calls|Make any new tool calls/);
+  for (const step of [...output.seedSteps, output.prompt]) {
+    assert.ok(promptTextBytes(step) <= ACP_STEP_TEXT_BYTES);
+  }
 });
 test("tool results without any user record stay an explicit error", () => {
   assert.throws(() => buildPromptParts({ messages: [
@@ -179,8 +259,8 @@ test("instructions that cannot share a seed with history stay in an instruction-
   assert.ok(promptTextBytes(step) <= ACP_STEP_TEXT_BYTES);
 });
 test("a history record that fits without its seed acknowledgement still fails explicitly", () => {
-  assert.throws(() => buildPromptParts({ messages: [user("R".repeat(187_550)), user("LATEST")] },
-    true, undefined, { contextWindow: 1_000_000 }), /single-step text needs at least 188173 bytes/);
+  assert.throws(() => buildPromptParts({ messages: [user("R".repeat(187_446)), user("LATEST")] },
+    true, undefined, { contextWindow: 1_000_000 }), /single-step text needs at least 188210 bytes/);
 });
 test("binary image payloads keep their independent budget instead of counting as rendered text", () => {
   const output = buildPromptParts({ messages: [user([{ type: "image", data: "a".repeat(300_000), mimeType: "image/png" },
@@ -303,8 +383,8 @@ test("multi-message cold history exceeding single-step limit splits into sequent
     { role: "toolResult", toolName: "read", toolCallId: "call-1", isError: false, content: [{ type: "text", text: chunkC }] },
     user("FINAL_QUESTION"),
   ];
-  const output = buildPromptParts({ systemPrompt: `CUSTOM_POLICY\n\n${TOOL_ROUTING}`, messages }, true, undefined,
-    { contextWindow: 1_000_000, sessionRouting: true });
+  const output = buildPromptParts({ systemPrompt: "CUSTOM_POLICY", messages }, true, undefined,
+    { contextWindow: 1_000_000 });
   assert.ok(output.seedSteps && output.seedSteps.length >= 1, "expected multi-step seedSteps");
   for (const step of [...output.seedSteps, output.prompt]) {
     assert.ok(promptTextBytes(step) <= ACP_STEP_TEXT_BYTES);
@@ -316,9 +396,21 @@ test("multi-message cold history exceeding single-step limit splits into sequent
   assert.ok(allSerialized.includes("CUSTOM_POLICY"));
   assert.match(JSON.stringify(output.seedSteps[0]), /CUSTOM_POLICY/);
   for (const step of output.seedSteps.slice(1)) assert.doesNotMatch(JSON.stringify(step), /CUSTOM_POLICY/);
-  assert.ok(!allSerialized.includes("Supplied OMP tools"), "sessionRouting deduplicates TOOL_ROUTING from instructions resource");
   assert.ok(!allSerialized.includes('"isError":false'), "isError: false is omitted in compact history serialization");
   assert.equal(output.prompt.at(-1)?.text, "FINAL_QUESTION");
+});
+
+test("session append omits the duplicated instructions resource", () => {
+  const output = buildPromptParts({ systemPrompt: "CUSTOM_POLICY", messages: [user("LATEST")] }, true, undefined,
+    { contextWindow: 1_000_000, sessionRouting: true });
+  assert.ok(!output.prompt.some(block => block.resource?.uri.endsWith(":instructions")),
+    "the append channel already carried the complete instruction");
+  assert.ok(!JSON.stringify(output.prompt).includes("CUSTOM_POLICY"));
+  assert.equal(output.prompt.at(-1)?.text, "LATEST");
+  const legacy = buildPromptParts({ systemPrompt: "CUSTOM_POLICY", messages: [user("LATEST")] }, true, undefined,
+    { contextWindow: 1_000_000 });
+  assert.ok(legacy.prompt.some(block => block.resource?.uri.endsWith(":instructions")));
+  assert.match(JSON.stringify(legacy.prompt), /CUSTOM_POLICY/);
 });
 
 test("single oversized current request splits into seed steps and a final request part", () => {
@@ -552,13 +644,14 @@ test("empty history can seed instructions before a split current request", () =>
 });
 
 test("stableSystemInstructions ignores volatile reminders and tool lists but preserves routing policy", () => {
+  const routingPolicy = "Supplied OMP tools are exposed by the authenticated pi-bridge MCP server.";
   const base = stableSystemInstructions({ systemPrompt: "CORE_POLICY", messages: [] });
   const decorated = stableSystemInstructions({
-    systemPrompt: `CORE_POLICY\n\n<system-reminder>\nToday: 2026-11-07\n</system-reminder>\n\n${TOOL_ROUTING}\nOMP tool names: pi_read, pi_write`,
+    systemPrompt: `CORE_POLICY\n\n<system-reminder>\nToday: 2026-11-07\n</system-reminder>\n\n${routingPolicy}\nOMP tool names: pi_read, pi_write`,
     messages: [],
   });
   assert.notEqual(decorated, base);
-  const legacy = buildPromptParts({ systemPrompt: `CORE_POLICY\n\n${TOOL_ROUTING}`,
+  const legacy = buildPromptParts({ systemPrompt: `CORE_POLICY\n\n${routingPolicy}`,
     messages: [user("LATEST")] }, true, undefined, { contextWindow: 1_000_000 });
   assert.match(JSON.stringify(legacy.prompt), /Supplied OMP tools/);
   assert.match(decorated, /Supplied OMP tools/);

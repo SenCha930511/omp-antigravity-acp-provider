@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AcpFailure, classifyAcpFailure } from "../extension/acp-errors.ts";
-import { AntigravityAcpError } from "../extension/vendor/pi-antigravity-acp-provider/src/acp/errors.ts";
+import { AntigravityAcpError } from "../extension/runtime/acp/errors.ts";
 
 function classify(message: string): AcpFailure {
   const failure = classifyAcpFailure(new Error(message));

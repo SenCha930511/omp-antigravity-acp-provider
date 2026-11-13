@@ -7,7 +7,7 @@ import {
   resolveRelayConfig,
   type RelayClock,
   projectedMcpName,
-} from "../extension/tool-relay.ts";
+} from "../extension/runtime/tools/relay.ts";
 import { parseRelayCallId, TOOL_RELAY_CONTROL_NAME } from "../extension/tool-relay-protocol.mjs";
 
 class ManualClock implements RelayClock {

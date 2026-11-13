@@ -34,7 +34,9 @@ function createRuntime(mode: string, mapping: string) {
     transport.sendRequest = (method: string, params: any, ...rest: any[]) => {
       if (["session/new", "session/load", "session/resume"].includes(method)) {
         const meta = params._meta?.antigravity;
-        report.sessions.push({ method, mode, systemAppend: meta?.systemPrompt?.append?.includes("Supplied OMP tools") === true,
+        const append = meta?.systemPrompt?.append ?? "";
+        report.sessions.push({ method, mode, systemAppend: append.includes("Diagnostic only."),
+          taskMapping: append.includes("maps to pi_task"),
           eager: meta?.eagerMcpServers, enabledTools: meta?.enabledTools, disabledTools: meta?.disabledTools });
       }
       return send(method, params, ...rest);
@@ -92,6 +94,7 @@ try {
     assert.ok(report.sessions.some((s: any) => ["session/load", "session/resume"].includes(s.method)), "No live restoration RPC observed");
     for (const session of report.sessions) {
       assert.equal(session.systemAppend, true);
+      assert.equal(session.taskMapping, true);
       assert.ok(session.eager.includes("pi-bridge"));
       if (session.mode === "disabled") assert.deepEqual(session.enabledTools, []);
       else { assert.equal(session.enabledTools, undefined); assert.deepEqual(session.disabledTools, []); }

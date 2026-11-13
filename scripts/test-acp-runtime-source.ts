@@ -1,31 +1,46 @@
-// Offline test of ACP runtime selection: a usable agy CLI wins, a broken or
-// missing CLI falls back to managed, explicit env wins, and runtimeSource can
-// pin cli or managed. Everything runs against stub binaries and fixture homes;
-// no network, no real agy, no ACP session.
+// Offline test of the ACP launch plan: a usable agy CLI wins, a broken or
+// missing CLI falls back to managed, an explicit non-wrapper AGY_ACP_BIN wins,
+// and runtimeSource can pin cli or managed. Every plan carries its exact spawn
+// target, so spawning never depends on later AGY_ACP_BIN state. Everything runs
+// against stub binaries and fixture homes; no network, no real agy, no ACP
+// session.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { assertSelectedAcpCliLaunch, selectAcpRuntime, resolveAcpPermissionProfile, resolveManagedAcpCommand, resolveAcpQuotaSource } from "../extension/acp-runtime-source.ts";
+import {
+  inspectRuntimeLaunchPlan,
+  quotaSourceForPlan,
+  resolveAcpPermissionProfile,
+  resolveLaunchSpawn,
+  resolveManagedAcpCommand,
+  resolveRuntimeLaunchPlan,
+  type LaunchOptions,
+  type RuntimeLaunchPlan,
+} from "../extension/runtime/launch.ts";
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "acp-runtime-source-"));
 const bin = path.join(work, "bin");
 const home = path.join(work, "home");
 fs.mkdirSync(bin, { recursive: true });
 
-function stubAgy(script: string): void {
-  const file = path.join(bin, "agy");
+function stubAgy(script: string, directory = bin): string {
+  fs.mkdirSync(directory, { recursive: true });
+  const file = path.join(directory, "agy");
   fs.writeFileSync(file, `#!/bin/sh\n${script}\n`);
   fs.chmodSync(file, 0o755);
+  return file;
 }
 
-function stubAgyExe(script: string, directory = bin): void {
+function stubAgyExe(script: string, directory = bin): string {
   fs.mkdirSync(directory, { recursive: true });
   const file = path.join(directory, "agy.exe");
   fs.writeFileSync(file, `#!/bin/sh\n${script}\n`);
   fs.chmodSync(file, 0o755);
+  return file;
 }
 
 function removeAgy(): void {
@@ -42,6 +57,10 @@ function setManagedVersion(version: string): void {
   fs.chmodSync(binary, 0o755);
 }
 
+function managedBinary(): string {
+  return path.join(home, ".local", "opt", "agy-acp", "current", "agy_acp_server.par");
+}
+
 function freshStateDir(): string {
   const stateDir = path.join(work, `state-${Math.random().toString(36).slice(2)}`);
   fs.mkdirSync(stateDir, { recursive: true });
@@ -56,42 +75,81 @@ function setRuntimeSource(stateDir: string, runtimeSource: string): void {
   fs.writeFileSync(path.join(stateDir, "config.json"), JSON.stringify({ runtimeSource }));
 }
 
+function wrapperPath(stateDir: string, platform: NodeJS.Platform = "darwin"): string {
+  return path.join(stateDir, platform === "win32" ? "agy-acp-cli.cmd" : "agy-acp-cli.sh");
+}
+
+function recordPath(stateDir: string): string {
+  return path.join(stateDir, "acp-runtime-source.json");
+}
+
+function sha256(file: string): string {
+  return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+function planFor(stateDir: string, options: LaunchOptions): Promise<RuntimeLaunchPlan> {
+  return resolveRuntimeLaunchPlan(stateDir, { home, platform: "darwin", ...options });
+}
+
+function inspectFor(stateDir: string, options: LaunchOptions): Promise<RuntimeLaunchPlan> {
+  return inspectRuntimeLaunchPlan(stateDir, { home, platform: "darwin", ...options });
+}
+
+function assertPlanUntouched(stateDir: string, env: NodeJS.ProcessEnv, label: string): void {
+  assert.equal(env.AGY_ACP_BIN, undefined, `${label}: AGY_ACP_BIN must stay unset`);
+  assert.equal(fs.existsSync(wrapperPath(stateDir)), false, `${label}: no wrapper may be written`);
+  assert.equal(fs.existsSync(recordPath(stateDir)), false, `${label}: no record may be written`);
+}
+
 // An explicit AGY_ACP_BIN always wins and nothing is written.
 {
   const env = freshEnv();
   env.AGY_ACP_BIN = "/opt/custom-agy";
   const stateDir = freshStateDir();
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "env");
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "env");
+  assert.equal(plan.installManaged, false);
+  assert.deepEqual(plan.target, { kind: "direct", value: { command: "/opt/custom-agy", args: [] } });
+  assert.deepEqual(plan.quota, { kind: "acp", value: { command: "/opt/custom-agy", args: [] } });
+  assert.deepEqual(quotaSourceForPlan(plan), { kind: "acp", command: "/opt/custom-agy", args: [] });
   assert.equal(env.AGY_ACP_BIN, "/opt/custom-agy");
-  assert.equal(fs.existsSync(path.join(stateDir, "agy-acp-cli.sh")), false);
+  assert.equal(fs.existsSync(wrapperPath(stateDir)), false);
+  assert.equal(fs.existsSync(recordPath(stateDir)), false);
 }
 
-// A newer CLI takes over through a generated executable wrapper and records
-// the decision.
+// A working CLI takes over through a generated executable wrapper, records the
+// decision, and exposes the wrapper as the only CLI spawn target.
 {
   const argvRecord = path.join(work, "agy-argv.txt");
   stubAgy(`if [ "$1" = "acp" ] && [ "$2" = "--version" ]; then\n  echo 9.9.9\n  exit 0\nfi\nprintf '%s\\n' "$@" > '${argvRecord}'`);
   setManagedVersion("1.4.5");
   const env = freshEnv();
   const stateDir = freshStateDir();
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "cli");
-  assert.equal(preference.cliVersion, "9.9.9");
-  assert.equal(preference.managedVersion, "1.4.5");
-  const wrapper = path.join(stateDir, "agy-acp-cli.sh");
-  assert.equal(env.AGY_ACP_BIN, wrapper);
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "cli");
+  assert.equal(plan.cliVersion, "9.9.9");
+  assert.equal(plan.managedVersion, "1.4.5");
+  assert.equal(plan.installManaged, false);
+  const wrapper = wrapperPath(stateDir);
+  assert.deepEqual(plan.target, { kind: "wrapper", path: wrapper, sha256: sha256(wrapper) });
+  assert.deepEqual(plan.quota, { kind: "cli", cliPath: path.join(bin, "agy") });
+  assert.deepEqual(quotaSourceForPlan(plan), { kind: "cli", cliPath: path.join(bin, "agy") });
+  assert.equal(env.AGY_ACP_BIN, undefined);
   const script = fs.readFileSync(wrapper, "utf8");
   assert.ok(script.startsWith("#!/bin/sh\n"));
   assert.ok(script.includes(`exec '${path.join(bin, "agy")}' acp --app_data_dir=antigravity-acp "$@"`));
   fs.accessSync(wrapper, fs.constants.X_OK);
-  const record = JSON.parse(fs.readFileSync(path.join(stateDir, "acp-runtime-source.json"), "utf8"));
+  const record = JSON.parse(fs.readFileSync(recordPath(stateDir), "utf8"));
   assert.equal(record.source, "cli");
   assert.equal(record.cliVersion, "9.9.9");
-  const repeated = await selectAcpRuntime(stateDir, env, home);
+  assert.equal(record.cliPath, path.join(bin, "agy"));
+  assert.equal(typeof record.decidedAt, "string");
+
+  const repeated = await planFor(stateDir, { env });
   assert.equal(repeated.source, "cli");
   assert.equal(repeated.cliVersion, "9.9.9");
   assert.equal(repeated.managedVersion, "1.4.5");
+  assert.deepEqual(repeated.target, plan.target);
   assert.equal(resolveAcpPermissionProfile(repeated, "yolo").wireMode, "default");
   assert.equal(resolveAcpPermissionProfile(repeated, "yolo").autoApproveProcess, true);
 
@@ -99,7 +157,10 @@ function setRuntimeSource(stateDir: string, runtimeSource: string): void {
     const childEnv = freshEnv();
     if (marker !== undefined) childEnv.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS = marker;
     fs.rmSync(argvRecord, { force: true });
-    const result = spawnSync(wrapper, ["--fixture-argument"], { env: childEnv, encoding: "utf8" });
+    const launch = resolveLaunchSpawn(plan);
+    assert.equal(launch.command, wrapper);
+    assert.deepEqual(launch.args, []);
+    const result = spawnSync(launch.command, [...launch.args, "--fixture-argument"], { env: childEnv, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     const argv = fs.readFileSync(argvRecord, "utf8").trimEnd().split("\n");
     assert.equal(argv.filter(value => value === "--dangerously-skip-permissions").length, marker === "1" ? 1 : 0,
@@ -107,12 +168,18 @@ function setRuntimeSource(stateDir: string, runtimeSource: string): void {
     assert.deepEqual(argv.slice(0, 2), ["acp", "--app_data_dir=antigravity-acp"]);
     assert.equal(argv.at(-1), "--fixture-argument");
   }
-  assert.doesNotThrow(() => assertSelectedAcpCliLaunch(stateDir, preference, env));
-  assert.throws(() => assertSelectedAcpCliLaunch(stateDir, preference, { ...env, AGY_ACP_BIN: "/usr/bin/false" }), /not selected by AGY_ACP_BIN/);
+
+  // The wrapper bytes are pinned: any replacement fails before spawning.
   fs.writeFileSync(wrapper, "#!/bin/sh\nexit 0\n");
-  assert.throws(() => assertSelectedAcpCliLaunch(stateDir, preference, env), /changed/);
+  assert.throws(() => resolveLaunchSpawn(plan), /changed after selection/);
   fs.rmSync(wrapper);
-  assert.throws(() => assertSelectedAcpCliLaunch(stateDir, preference, env), /wrapper is missing, changed, not executable/);
+  assert.throws(() => resolveLaunchSpawn(plan), /missing/);
+  const restored = await planFor(stateDir, { env });
+  assert.equal(restored.source, "cli");
+  fs.chmodSync(wrapper, 0o644);
+  assert.throws(() => resolveLaunchSpawn(restored), /not executable/);
+  fs.chmodSync(wrapper, 0o755);
+  assert.equal(resolveLaunchSpawn(restored).command, wrapper);
 }
 
 // A record-write failure falls back to managed without selecting CLI.
@@ -121,15 +188,13 @@ function setRuntimeSource(stateDir: string, runtimeSource: string): void {
   setManagedVersion("1.4.5");
   const env = freshEnv();
   const stateDir = freshStateDir();
-  fs.mkdirSync(path.join(stateDir, "acp-runtime-source.json"));
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "managed");
+  fs.mkdirSync(recordPath(stateDir));
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "managed");
+  assert.equal(plan.installManaged, true);
+  assert.deepEqual(plan.target, { kind: "direct", value: { command: managedBinary(), args: [] } });
+  assert.deepEqual(quotaSourceForPlan(plan), { kind: "acp", command: managedBinary(), args: [] });
   assert.equal(env.AGY_ACP_BIN, undefined);
-  assert.deepEqual(await resolveAcpQuotaSource(stateDir, env, home, "darwin", undefined, preference), {
-    kind: "acp",
-    command: path.join(home, ".local", "opt", "agy-acp", "current", "agy_acp_server.par"),
-    args: [],
-  });
 }
 
 // A working CLI is preferred even when managed is newer or equal.
@@ -138,11 +203,12 @@ for (const version of ["1.4.5", "1.0.0"]) {
   setManagedVersion("1.4.5");
   const env = freshEnv();
   const stateDir = freshStateDir();
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "cli");
-  assert.equal(preference.cliVersion, version);
-  assert.equal(env.AGY_ACP_BIN, path.join(stateDir, "agy-acp-cli.sh"));
-  assert.equal(fs.existsSync(path.join(stateDir, "agy-acp-cli.sh")), true);
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "cli");
+  assert.equal(plan.cliVersion, version);
+  assert.equal(plan.target?.kind, "wrapper");
+  assert.equal(plan.target?.kind === "wrapper" ? plan.target.path : undefined, wrapperPath(stateDir));
+  assert.equal(fs.existsSync(wrapperPath(stateDir)), true);
 }
 
 // A missing managed record still prefers a working CLI.
@@ -151,9 +217,9 @@ for (const version of ["1.4.5", "1.0.0"]) {
   fs.rmSync(path.join(home, ".local"), { recursive: true, force: true });
   const env = freshEnv();
   const stateDir = freshStateDir();
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "cli");
-  assert.equal(preference.managedVersion, undefined);
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "cli");
+  assert.equal(plan.managedVersion, undefined);
 }
 
 // A CLI without a usable `acp --version` is never selected.
@@ -162,8 +228,10 @@ for (const script of ["exit 1", "echo prerelease"]) {
   setManagedVersion("1.4.5");
   const env = freshEnv();
   const stateDir = freshStateDir();
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "managed");
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "managed");
+  assert.equal(plan.installManaged, true);
+  assert.deepEqual(plan.target, { kind: "direct", value: { command: managedBinary(), args: [] } });
   assert.equal(env.AGY_ACP_BIN, undefined);
 }
 
@@ -173,8 +241,10 @@ for (const script of ["exit 1", "echo prerelease"]) {
   setManagedVersion("1.4.5");
   const env = freshEnv();
   const stateDir = freshStateDir();
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "managed");
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "managed");
+  assert.equal(plan.installManaged, true);
+  assert.deepEqual(plan.target, { kind: "direct", value: { command: managedBinary(), args: [] } });
   assert.equal(env.AGY_ACP_BIN, undefined);
 }
 
@@ -185,9 +255,11 @@ for (const script of ["exit 1", "echo prerelease"]) {
   const env = freshEnv();
   const stateDir = freshStateDir();
   setRuntimeSource(stateDir, "cli");
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "cli");
-  assert.equal(env.AGY_ACP_BIN, path.join(stateDir, "agy-acp-cli.sh"));
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "cli");
+  assert.equal(plan.installManaged, false);
+  assert.equal(plan.target?.kind === "wrapper" ? plan.target.path : undefined, wrapperPath(stateDir));
+  assert.equal(env.AGY_ACP_BIN, undefined);
 }
 
 // A pinned CLI source fails instead of downloading managed.
@@ -197,9 +269,9 @@ for (const script of ["exit 1", "echo prerelease"]) {
   const env = freshEnv();
   const stateDir = freshStateDir();
   setRuntimeSource(stateDir, "cli");
-  await assert.rejects(selectAcpRuntime(stateDir, env, home), /runtimeSource is "cli".*no usable agy CLI/);
+  await assert.rejects(planFor(stateDir, { env }), /runtimeSource is "cli".*no usable agy CLI/);
   assert.equal(env.AGY_ACP_BIN, undefined);
-  assert.equal(fs.existsSync(path.join(stateDir, "agy-acp-cli.sh")), false);
+  assert.equal(fs.existsSync(wrapperPath(stateDir)), false);
 }
 
 // A pinned managed source uses the runtime even when the CLI exists.
@@ -209,10 +281,13 @@ for (const script of ["exit 1", "echo prerelease"]) {
   const env = freshEnv();
   const stateDir = freshStateDir();
   setRuntimeSource(stateDir, "managed");
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "managed");
-  assert.equal(preference.managedVersion, "1.4.5");
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "managed");
+  assert.equal(plan.managedVersion, "1.4.5");
+  assert.equal(plan.installManaged, false);
+  assert.deepEqual(plan.target, { kind: "direct", value: { command: managedBinary(), args: [] } });
   assert.equal(env.AGY_ACP_BIN, undefined);
+  assert.equal(fs.existsSync(wrapperPath(stateDir)), false);
 }
 
 // A pinned managed source fails instead of downloading it.
@@ -222,7 +297,7 @@ for (const script of ["exit 1", "echo prerelease"]) {
   const env = freshEnv();
   const stateDir = freshStateDir();
   setRuntimeSource(stateDir, "managed");
-  await assert.rejects(selectAcpRuntime(stateDir, env, home), /runtimeSource is "managed".*managed ACP runtime is missing/);
+  await assert.rejects(planFor(stateDir, { env }), /runtimeSource is "managed".*managed ACP runtime is missing/);
   assert.equal(env.AGY_ACP_BIN, undefined);
 }
 
@@ -234,8 +309,9 @@ for (const script of ["exit 1", "echo prerelease"]) {
   env.AGY_ACP_BIN = "/opt/custom-agy";
   const stateDir = freshStateDir();
   setRuntimeSource(stateDir, "managed");
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "env");
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "env");
+  assert.deepEqual(plan.target, { kind: "direct", value: { command: "/opt/custom-agy", args: [] } });
   assert.equal(env.AGY_ACP_BIN, "/opt/custom-agy");
 }
 
@@ -246,7 +322,7 @@ for (const script of ["exit 1", "echo prerelease"]) {
   const env = freshEnv();
   const stateDir = freshStateDir();
   setRuntimeSource(stateDir, "runtime");
-  await assert.rejects(selectAcpRuntime(stateDir, env, home), /runtimeSource must be "auto", "cli", or "managed"/);
+  await assert.rejects(planFor(stateDir, { env }), /runtimeSource must be "auto", "cli", or "managed"/);
   assert.equal(env.AGY_ACP_BIN, undefined);
 }
 
@@ -256,16 +332,16 @@ for (const script of ["exit 1", "echo prerelease"]) {
   setManagedVersion("1.4.5");
   const env = freshEnv();
   const stateDir = freshStateDir();
-  const preference = await selectAcpRuntime(stateDir, env, home);
-  assert.equal(preference.source, "cli");
-  const wrapper = path.join(stateDir, "agy-acp-cli.sh");
-  assert.equal(assertSelectedAcpCliLaunch(stateDir, preference, env, "darwin"), undefined);
-  assert.equal(env.AGY_ACP_BIN, wrapper);
-  const command = path.join(home, ".local", "opt", "agy-acp", "current", "agy_acp_server.par");
-
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "cli");
+  assert.deepEqual(quotaSourceForPlan(plan), { kind: "cli", cliPath: path.join(bin, "agy") });
+  assert.equal(plan.target?.kind === "wrapper" ? plan.target.path : undefined, wrapperPath(stateDir));
+  const command = managedBinary();
   assert.deepEqual(resolveManagedAcpCommand(home, "linux"), { command, args: ["--uid="] });
   const explicit = { ...env, AGY_ACP_BIN: "/opt/custom-quota-bin" };
-  assert.equal(assertSelectedAcpCliLaunch(stateDir, { source: "env" }, explicit, "darwin"), undefined);
+  const explicitPlan = await planFor(stateDir, { env: explicit });
+  assert.equal(explicitPlan.source, "env");
+  assert.deepEqual(quotaSourceForPlan(explicitPlan), { kind: "acp", command: "/opt/custom-quota-bin", args: [] });
   assert.equal(explicit.AGY_ACP_BIN, "/opt/custom-quota-bin");
 }
 
@@ -276,97 +352,152 @@ if (process.platform !== "win32") {
   setManagedVersion("1.4.5");
   const env = freshEnv();
   const stateDir = freshStateDir();
-  const preference = await selectAcpRuntime(stateDir, env, home, "win32");
-  assert.equal(preference.source, "cli");
-  assert.equal(preference.cliVersion, "9.9.9");
-  const wrapper = path.join(stateDir, "agy-acp-cli.cmd");
-  assert.equal(env.AGY_ACP_BIN, wrapper);
+  const plan = await planFor(stateDir, { env, platform: "win32" });
+  assert.equal(plan.source, "cli");
+  assert.equal(plan.cliVersion, "9.9.9");
+  const wrapper = wrapperPath(stateDir, "win32");
+  assert.deepEqual(plan.target, { kind: "wrapper", path: wrapper, sha256: sha256(wrapper) });
+  assert.equal(env.AGY_ACP_BIN, undefined);
   const script = fs.readFileSync(wrapper, "utf8");
   assert.match(script, /^@echo off\r\n/);
   assert.match(script, /acp --app_data_dir=antigravity-acp/);
   assert.match(script, /if "%OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS%"=="1" set "OMP_ACP_EXTRA=--dangerously-skip-permissions"/);
   assert.doesNotMatch(script, /if defined[^\r\n]*\(/);
-  assert.doesNotThrow(() => assertSelectedAcpCliLaunch(stateDir, preference, env, "win32"));
-  assert.throws(() => assertSelectedAcpCliLaunch(stateDir, preference, env, "linux"), /wrapper is missing, changed/);
-  const repeated = await selectAcpRuntime(stateDir, env, home, "win32");
+  // Windows cannot spawn a .cmd file directly, so the wrapper goes through the
+  // command processor; the plan still names the exact wrapper path.
+  const winSpawn = resolveLaunchSpawn(plan, "win32");
+  assert.equal(winSpawn.command, process.env.ComSpec ?? "cmd.exe");
+  assert.deepEqual(winSpawn.args, ["/d", "/s", "/c", `call "${wrapper}"`]);
+  // Off Windows the same plan still names the exact wrapper and spawns it directly.
+  assert.deepEqual(resolveLaunchSpawn(plan, "linux"), { command: wrapper, args: [] });
+  const repeated = await planFor(stateDir, { env, platform: "win32" });
   assert.equal(repeated.source, "cli");
-  assert.equal(assertSelectedAcpCliLaunch(stateDir, preference, env, "win32"), undefined);
-  assert.equal(env.AGY_ACP_BIN, wrapper);
+  assert.deepEqual(repeated.target, plan.target);
+  assert.equal(env.AGY_ACP_BIN, undefined);
   const parenBin = path.join(work, "Program Files (x86)", "bin");
   stubAgyExe("echo 9.9.9", parenBin);
   setManagedVersion("1.4.5");
   const parenEnv = { PATH: `${parenBin}${path.delimiter}/usr/bin:/bin` };
   const parenStateDir = freshStateDir();
-  const parenPreference = await selectAcpRuntime(parenStateDir, parenEnv, home, "win32");
-  assert.equal(parenPreference.source, "cli");
-  const parenScript = fs.readFileSync(path.join(parenStateDir, "agy-acp-cli.cmd"), "utf8");
+  const parenPlan = await planFor(parenStateDir, { env: parenEnv, platform: "win32" });
+  assert.equal(parenPlan.source, "cli");
+  const parenScript = fs.readFileSync(wrapperPath(parenStateDir, "win32"), "utf8");
   assert.match(parenScript, /Program Files \(x86\)/);
   assert.doesNotMatch(parenScript, /if defined[^\r\n]*\(/);
 }
 
+// A wrapper already named by AGY_ACP_BIN is the adapter's own decision, not a
+// user override, so an in-place upgrade re-detects the CLI profile.
+{
+  stubAgy("echo 1.5.3");
+  setManagedVersion("1.4.5");
+  const stateDir = freshStateDir();
+  const wrapper = wrapperPath(stateDir);
+  fs.writeFileSync(wrapper, "#!/bin/sh\nexit 0\n");
+  const env = freshEnv();
+  env.AGY_ACP_BIN = wrapper;
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "cli");
+  assert.equal(plan.cliVersion, "1.5.3");
+  assert.deepEqual(plan.target, { kind: "wrapper", path: wrapper, sha256: sha256(wrapper) });
+  assert.equal(env.AGY_ACP_BIN, wrapper);
+  assert.equal(resolveAcpPermissionProfile(plan, "yolo").autoApproveProcess, true);
+  assert.equal(resolveAcpPermissionProfile(plan, "auto_edit").wireMode, "accept-edits");
+}
+
+// A stale wrapper in AGY_ACP_BIN with an unusable record falls back to managed
+// without touching the environment.
 {
   removeAgy();
   setManagedVersion("1.4.5");
   const stateDir = freshStateDir();
-  const wrapper = path.join(stateDir, "agy-acp-cli.sh");
+  const wrapper = wrapperPath(stateDir);
   fs.writeFileSync(wrapper, "#!/bin/sh\nexit 0\n");
-  fs.writeFileSync(path.join(stateDir, "acp-runtime-source.json"), JSON.stringify({
+  fs.writeFileSync(recordPath(stateDir), JSON.stringify({
     source: "cli",
     cliPath: path.join(work, "missing-agy"),
     cliVersion: "9.9.9",
   }));
   const env = { PATH: "/usr/bin:/bin", AGY_ACP_BIN: wrapper };
-  const preference = await selectAcpRuntime(stateDir, env, home, "darwin");
-  assert.equal(preference.source, "managed");
-  assert.equal(env.AGY_ACP_BIN, undefined);
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "managed");
+  assert.equal(plan.installManaged, true);
+  assert.deepEqual(plan.target, { kind: "direct", value: { command: managedBinary(), args: [] } });
+  assert.equal(env.AGY_ACP_BIN, wrapper);
 }
 
+// The adapter wrapper prefers a recorded executable CLI and refreshes the wrapper.
 {
   removeAgy();
   const recorded = path.join(work, "recorded-agy");
   fs.writeFileSync(recorded, "#!/bin/sh\necho 9.9.9\n");
   fs.chmodSync(recorded, 0o755);
   const stateDir = freshStateDir();
-  const wrapper = path.join(stateDir, "agy-acp-cli.sh");
-  fs.writeFileSync(path.join(stateDir, "acp-runtime-source.json"), JSON.stringify({
+  const wrapper = wrapperPath(stateDir);
+  fs.writeFileSync(recordPath(stateDir), JSON.stringify({
     source: "cli",
     cliPath: recorded,
     cliVersion: "9.9.9",
   }));
   const env = { PATH: "/usr/bin:/bin", AGY_ACP_BIN: wrapper };
-  const preference = await selectAcpRuntime(stateDir, env, home, "darwin");
-  assert.equal(preference.source, "cli");
-  assert.equal(preference.cliPath, recorded);
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "cli");
+  assert.equal(plan.cliPath, recorded);
+  assert.deepEqual(plan.target, { kind: "wrapper", path: wrapper, sha256: sha256(wrapper) });
   assert.equal(env.AGY_ACP_BIN, wrapper);
   assert.equal(fs.existsSync(wrapper), true);
 }
 
-// Quota source resolution is read-only: auto prefers a usable CLI and never
-// writes the wrapper or the recorded decision.
+// Unparseable or mistyped external records are rejected at the boundary and
+// never trusted as a CLI selection.
+{
+  removeAgy();
+  setManagedVersion("1.4.5");
+  const env = freshEnv();
+  const invalid = [
+    "not json",
+    "[]",
+    "\"cli\"",
+    "null",
+    JSON.stringify({ source: "managed" }),
+    JSON.stringify({ source: "cli", cliPath: 42, cliVersion: "9.9.9" }),
+    JSON.stringify({ source: "cli", cliPath: path.join(work, "recorded-agy") }),
+    JSON.stringify({ source: "cli", cliPath: "", cliVersion: "9.9.9" }),
+  ];
+  for (const payload of invalid) {
+    const stateDir = freshStateDir();
+    const wrapper = wrapperPath(stateDir);
+    fs.writeFileSync(wrapper, "#!/bin/sh\nexit 0\n");
+    fs.writeFileSync(recordPath(stateDir), payload);
+    const plan = await planFor(stateDir, { env: { ...env, AGY_ACP_BIN: wrapper } });
+    assert.equal(plan.source, "managed", `record ${payload} must not select a CLI`);
+    assert.deepEqual(plan.target, { kind: "direct", value: { command: managedBinary(), args: [] } });
+  }
+}
+
+// Quota inspection is read-only: auto prefers a usable CLI and never writes the
+// wrapper or the recorded decision.
 {
   stubAgy("echo 4.0.0");
   setManagedVersion("1.4.5");
   const env = freshEnv();
   const stateDir = freshStateDir();
-  const source = await resolveAcpQuotaSource(stateDir, env, home, "darwin");
-  assert.deepEqual(source, { kind: "cli", cliPath: path.join(bin, "agy") });
-  assert.equal(env.AGY_ACP_BIN, undefined);
-  assert.equal(fs.existsSync(path.join(stateDir, "agy-acp-cli.sh")), false);
-  assert.equal(fs.existsSync(path.join(stateDir, "acp-runtime-source.json")), false);
+  const plan = await inspectFor(stateDir, { env });
+  assert.equal(plan.source, "cli");
+  assert.deepEqual(quotaSourceForPlan(plan), { kind: "cli", cliPath: path.join(bin, "agy") });
+  assertPlanUntouched(stateDir, env, "inspect auto cli");
 }
 
-// Auto without a usable CLI selects the installed managed runtime.
+// Auto without a usable CLI reports the installed managed runtime.
 {
   removeAgy();
   setManagedVersion("1.4.5");
   const env = freshEnv();
   const stateDir = freshStateDir();
-  assert.deepEqual(await resolveAcpQuotaSource(stateDir, env, home, "darwin"), {
-    kind: "acp",
-    command: path.join(home, ".local", "opt", "agy-acp", "current", "agy_acp_server.par"),
-    args: [],
-  });
-  assert.equal(env.AGY_ACP_BIN, undefined);
+  const plan = await inspectFor(stateDir, { env });
+  assert.equal(plan.source, "managed");
+  assert.deepEqual(quotaSourceForPlan(plan), { kind: "acp", command: managedBinary(), args: [] });
+  assertPlanUntouched(stateDir, env, "inspect auto managed");
 }
 
 // A pinned CLI source never falls back to managed or downloads anything.
@@ -376,10 +507,10 @@ if (process.platform !== "win32") {
   const env = freshEnv();
   const stateDir = freshStateDir();
   setRuntimeSource(stateDir, "cli");
-  assert.equal(await resolveAcpQuotaSource(stateDir, env, home, "darwin"), undefined);
+  await assert.rejects(inspectFor(stateDir, { env }), /runtimeSource is "cli"/);
   assert.equal(env.AGY_ACP_BIN, undefined);
-  assert.equal(fs.existsSync(path.join(stateDir, "agy-acp-cli.sh")), false);
-  assert.equal(fs.existsSync(path.join(stateDir, "acp-runtime-source.json")), false);
+  assert.equal(fs.existsSync(wrapperPath(stateDir)), false);
+  assert.equal(fs.existsSync(recordPath(stateDir)), false);
 }
 
 // An explicit non-wrapper AGY_ACP_BIN reports the ACP runtime.
@@ -387,11 +518,9 @@ if (process.platform !== "win32") {
   const env = freshEnv();
   env.AGY_ACP_BIN = "/opt/custom-agy";
   const stateDir = freshStateDir();
-  assert.deepEqual(await resolveAcpQuotaSource(stateDir, env, home, "darwin"), {
-    kind: "acp",
-    command: "/opt/custom-agy",
-    args: [],
-  });
+  const plan = await inspectFor(stateDir, { env });
+  assert.equal(plan.source, "env");
+  assert.deepEqual(quotaSourceForPlan(plan), { kind: "acp", command: "/opt/custom-agy", args: [] });
   assert.equal(env.AGY_ACP_BIN, "/opt/custom-agy");
 }
 
@@ -403,9 +532,9 @@ if (process.platform !== "win32") {
   fs.chmodSync(explicit, 0o755);
   const env = freshEnv();
   env.AGY_ACP_BIN = "~/bin/runtime-native";
-  assert.deepEqual(await resolveAcpQuotaSource(freshStateDir(), env, home, "linux"), {
-    kind: "acp", command: explicit, args: ["--uid="],
-  });
+  const plan = await inspectFor(freshStateDir(), { env, platform: "linux" });
+  assert.deepEqual(plan.target, { kind: "direct", value: { command: explicit, args: ["--uid="] } });
+  assert.deepEqual(quotaSourceForPlan(plan), { kind: "acp", command: explicit, args: ["--uid="] });
 }
 
 // The adapter wrapper prefers a recorded executable CLI without writing it.
@@ -415,14 +544,16 @@ if (process.platform !== "win32") {
   fs.writeFileSync(recorded, "#!/bin/sh\necho 9.9.9\n");
   fs.chmodSync(recorded, 0o755);
   const stateDir = freshStateDir();
-  const wrapper = path.join(stateDir, "agy-acp-cli.sh");
-  fs.writeFileSync(path.join(stateDir, "acp-runtime-source.json"), JSON.stringify({
+  const wrapper = wrapperPath(stateDir);
+  fs.writeFileSync(recordPath(stateDir), JSON.stringify({
     source: "cli",
     cliPath: recorded,
     cliVersion: "9.9.9",
   }));
   const env = { PATH: "/usr/bin:/bin", AGY_ACP_BIN: wrapper };
-  assert.deepEqual(await resolveAcpQuotaSource(stateDir, env, home, "darwin"), { kind: "cli", cliPath: recorded });
+  const plan = await inspectFor(stateDir, { env });
+  assert.equal(plan.source, "cli");
+  assert.deepEqual(quotaSourceForPlan(plan), { kind: "cli", cliPath: recorded });
   assert.equal(env.AGY_ACP_BIN, wrapper);
   assert.equal(fs.existsSync(wrapper), false);
 }
@@ -434,9 +565,116 @@ if (process.platform !== "win32") {
   const env = freshEnv();
   const stateDir = freshStateDir();
   setRuntimeSource(stateDir, "managed");
-  assert.equal(await resolveAcpQuotaSource(stateDir, env, home, "darwin"), undefined);
+  await assert.rejects(inspectFor(stateDir, { env }), /runtimeSource is "managed"/);
   assert.equal(env.AGY_ACP_BIN, undefined);
 }
 
+// An auto plan with no installed runtime has no spawn target and no quota; it
+// reports that installation is still required.
+{
+  removeAgy();
+  fs.rmSync(path.join(home, ".local"), { recursive: true, force: true });
+  const env = freshEnv();
+  const stateDir = freshStateDir();
+  const plan = await planFor(stateDir, { env });
+  assert.equal(plan.source, "managed");
+  assert.equal(plan.installManaged, true);
+  assert.equal(plan.target, undefined);
+  assert.deepEqual(plan.quota, { kind: "none" });
+  assert.equal(quotaSourceForPlan(plan), undefined);
+  assert.throws(() => resolveLaunchSpawn(plan), /No ACP runtime is installed/);
+  assert.equal(env.AGY_ACP_BIN, undefined);
+}
+
+// The environment is only ever read: a frozen env object must resolve every
+// channel without a write, and the caller's env must be identical after.
+{
+  stubAgy("echo 5.0.0");
+  setManagedVersion("1.4.5");
+  const cliEnv = freshEnv();
+  const cliState = freshStateDir();
+  const cliBefore = { ...cliEnv };
+  Object.freeze(cliEnv);
+  const cliPlan = await planFor(cliState, { env: cliEnv });
+  assert.equal(cliPlan.source, "cli");
+  assert.deepEqual(cliEnv, cliBefore, "cli: env must not be mutated");
+
+  const envEnv = freshEnv();
+  envEnv.AGY_ACP_BIN = "/opt/custom-agy";
+  const envState = freshStateDir();
+  const envBefore = { ...envEnv };
+  Object.freeze(envEnv);
+  const explicitPlan = await planFor(envState, { env: envEnv });
+  assert.equal(explicitPlan.source, "env");
+  assert.deepEqual(envEnv, envBefore, "env: env must not be mutated");
+
+  removeAgy();
+  const managedEnv = freshEnv();
+  const managedState = freshStateDir();
+  const managedBefore = { ...managedEnv };
+  Object.freeze(managedEnv);
+  const managedPlan = await planFor(managedState, { env: managedEnv });
+  assert.equal(managedPlan.source, "managed");
+  assert.deepEqual(managedEnv, managedBefore, "managed: env must not be mutated");
+}
+
+// Two plans resolved in one process stay independent, and spawning keeps
+// working after AGY_ACP_BIN is absent or points somewhere else.
+{
+  const binA = path.join(work, "bin-a");
+  const binB = path.join(work, "bin-b");
+  const recordA = path.join(work, "agy-a-argv.txt");
+  const recordB = path.join(work, "agy-b-argv.txt");
+  stubAgy(`if [ "$1" = "acp" ] && [ "$2" = "--version" ]; then echo 1.5.3; exit 0; fi\nprintf '%s\\n' "$@" > '${recordA}'`, binA);
+  stubAgy(`if [ "$1" = "acp" ] && [ "$2" = "--version" ]; then echo 1.6.0; exit 0; fi\nprintf '%s\\n' "$@" > '${recordB}'`, binB);
+  const stateA = freshStateDir();
+  const stateB = freshStateDir();
+  const envA = { PATH: `${binA}${path.delimiter}/usr/bin:/bin` };
+  const envB = { PATH: `${binB}${path.delimiter}/usr/bin:/bin` };
+  const planA = await planFor(stateA, { env: envA });
+  const planB = await planFor(stateB, { env: envB });
+  assert.equal(planA.source, "cli");
+  assert.equal(planB.source, "cli");
+  assert.equal(planA.cliPath, path.join(binA, "agy"));
+  assert.equal(planB.cliPath, path.join(binB, "agy"));
+  assert.notEqual(planA.target?.kind === "wrapper" ? planA.target.sha256 : undefined,
+    planB.target?.kind === "wrapper" ? planB.target.sha256 : undefined);
+  const previousBin = process.env.AGY_ACP_BIN;
+  try {
+    process.env.AGY_ACP_BIN = "/usr/bin/false";
+    fs.rmSync(recordA, { force: true });
+    const launchA = resolveLaunchSpawn(planA);
+    assert.equal(spawnSync(launchA.command, [...launchA.args, "--plan-a"], { env: envA, encoding: "utf8" }).status, 0);
+    assert.deepEqual(fs.readFileSync(recordA, "utf8").trimEnd().split("\n").slice(0, 2), ["acp", "--app_data_dir=antigravity-acp"]);
+    assert.equal(fs.readFileSync(recordA, "utf8").trimEnd().split("\n").at(-1), "--plan-a");
+    delete process.env.AGY_ACP_BIN;
+    fs.rmSync(recordB, { force: true });
+    const launchB = resolveLaunchSpawn(planB);
+    assert.equal(spawnSync(launchB.command, [...launchB.args, "--plan-b"], { env: envB, encoding: "utf8" }).status, 0);
+    assert.equal(fs.readFileSync(recordB, "utf8").trimEnd().split("\n").at(-1), "--plan-b");
+  } finally {
+    if (previousBin === undefined) delete process.env.AGY_ACP_BIN;
+    else process.env.AGY_ACP_BIN = previousBin;
+  }
+}
+
+// A direct env plan spawns its exact command and arguments.
+{
+  const direct = path.join(work, "direct-runtime");
+  const argvRecord = path.join(work, "direct-argv.txt");
+  fs.writeFileSync(direct, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvRecord}'\n`);
+  fs.chmodSync(direct, 0o755);
+  const env = freshEnv();
+  env.AGY_ACP_BIN = direct;
+  const plan = await planFor(freshStateDir(), { env });
+  assert.equal(plan.source, "env");
+  const launch = resolveLaunchSpawn(plan);
+  assert.equal(launch.command, direct);
+  assert.deepEqual(launch.args, []);
+  assert.equal(spawnSync(launch.command, [...launch.args, "--direct"], { env, encoding: "utf8" }).status, 0);
+  assert.equal(fs.readFileSync(argvRecord, "utf8").trimEnd(), "--direct");
+  assert.equal(env.AGY_ACP_BIN, direct);
+}
+
 fs.rmSync(work, { recursive: true, force: true });
-console.log("acp-runtime-source: all selection cases passed");
+console.log("acp-runtime-source: all launch plan cases passed");

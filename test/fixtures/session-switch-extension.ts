@@ -98,8 +98,12 @@ export default async function(pi: any) {
   pi.on("before_agent_start", () => ({ systemPrompt: ["FIXTURE_SYSTEM_ONE", "FIXTURE_SYSTEM_TWO"] }));
   pi.registerCommand("fixture-one-shot", { description: "Offline one-shot lifecycle probe",
     handler: async (_args: string, ctx: any) => {
-      const result = await ctx.runEphemeralTurn({ promptText: "REQ_ONE_SHOT_RELEASE", tools: false });
-      log({ kind: "one-shot-complete", text: result.replyText });
+      // Two one-shot side turns prove the second question reuses the first
+      // turn's parent-owned shadow instead of rebuilding from history.
+      const first = await ctx.runEphemeralTurn({ promptText: "REQ_ONE_SHOT_RELEASE", tools: false });
+      log({ kind: "one-shot-complete", text: first.replyText });
+      const second = await ctx.runEphemeralTurn({ promptText: "REQ_ONE_SHOT_SECOND", tools: false });
+      log({ kind: "one-shot-complete", text: second.replyText });
     } });
   await registerOmpAdapter(new Proxy(pi, { get(target, name) {
     if (name === "registerProvider") return (id: string, provider: any) => {

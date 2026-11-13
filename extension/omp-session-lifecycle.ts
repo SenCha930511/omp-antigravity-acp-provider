@@ -8,6 +8,8 @@ interface Scope extends OmpProviderSessionState {
 // OMP can rotate provider routing identity without changing its transcript ID
 // (/fresh, reset), and side requests have their own routing IDs. Honor the
 // host's lifecycle contract instead of inferring ownership from UI events.
+type OwnerOf = (id: RoutingId) => RoutingId;
+
 export class OmpSessionLifecycle {
   private readonly scopes = new WeakMap<Map<string, OmpProviderSessionState>, Scope>();
   private readonly tickets = new Map<RoutingId, Set<Ticket>>();
@@ -16,7 +18,10 @@ export class OmpSessionLifecycle {
   private readonly fallback = this.newScope();
 
   constructor(private readonly closeRuntime: (id: RoutingId) => Promise<void>,
-    private readonly releaseRuntime: (id: RoutingId) => Promise<void> = async () => {}) {}
+    private readonly releaseRuntime: (id: RoutingId) => Promise<void> = async () => {},
+    // A side routing id shares its parent's runtime. Only a full owner close
+    // may tear that runtime down; a one-shot release must leave it warm.
+    private readonly ownerOf: OwnerOf = id => id) {}
 
   private newScope(predecessor?: Promise<void>): Scope {
     // Observe failures immediately; ready() still surfaces them before dispatch.
@@ -120,7 +125,13 @@ export class OmpSessionLifecycle {
 
   closeSession(id: RoutingId, released = false): Promise<void> {
     for (const ticket of [...this.tickets.get(id) ?? []]) { ticket.closed = true; ticket.scope.retainedIds.delete(id); this.forget(ticket); }
-    const previous = this.closing.get(id), closed = this.closeRuntime(id), teardown = this.closing.get(id);
+    // A released one-shot side id shares its parent's runtime: releasing it
+    // retires the id and its cleanup mapping but must leave the parent (and the
+    // warm shadow inside it) alive. A full close always tears the owner down.
+    const owner = this.ownerOf(id);
+    const previous = this.closing.get(id);
+    const closed = released && owner !== id ? Promise.resolve() : this.closeRuntime(owner);
+    const teardown = this.closing.get(id);
     const pending = Promise.allSettled([previous, closed, teardown]).then(async results => {
       // Teardown failures must not skip unbinding: a leaked release keeps the
       // one-shot mapping alive and the cleanup registry out of sync.

@@ -4,7 +4,7 @@ import { resolveContextOptions, type ContextSettings, type ResolvedContextOption
 import { EFFORTS, projectCatalog, readModels, type AdvertisedModel, type PublicCatalogModel } from "./model-catalog.ts";
 import { officialApiCost } from "./pricing.ts";
 import { advertisedRecord, choices, selector } from "./selectors.ts";
-import { TierConnection } from "./runtime.mjs";
+import { TierConnection, authenticateForCredential } from "./runtime.mjs";
 import type { SessionCleanup } from "./session-cleanup.ts";
 
 export interface ConfiguredCatalogModel extends PublicCatalogModel {
@@ -25,7 +25,7 @@ export class CatalogStore {
     private readonly cleanup: SessionCleanup,
     private readonly prepareRuntime: () => Promise<void>,
     private readonly fallbackModels: () => PublicCatalogModel[],
-    private readonly requireAuth: () => Promise<void> = async () => {},
+    private readonly requireAuth: (apiKey?: string) => Promise<void> = async () => {},
     private readonly createConnection: (options: ConstructorParameters<typeof TierConnection>[0]) => TierConnection =
       options => new TierConnection(options),
   ) {}
@@ -103,20 +103,23 @@ export class CatalogStore {
     return this.projectWithSettings(this.sourceModels, settings);
   }
 
-  async discoverModels(): Promise<AdvertisedModel[]> {
+  async discoverModels(apiKey?: string): Promise<AdvertisedModel[]> {
     if (this.discovery) return this.discovery;
-    const pending = this.discoverOnce();
+    const pending = this.discoverOnce(apiKey);
     this.discovery = pending;
     try { return await pending; }
     finally { if (this.discovery === pending) this.discovery = undefined; }
   }
-  private async discoverOnce(): Promise<AdvertisedModel[]> {
-    await this.requireAuth();
+  private async discoverOnce(apiKey?: string): Promise<AdvertisedModel[]> {
+    await this.requireAuth(apiKey);
     await this.prepareRuntime();
     const connection = this.createConnection({ cwd: process.cwd(), ompCleanup: this.cleanup });
     let discoveredSession: string | undefined;
     try {
-      await connection.initialize();
+      const initialize = await connection.initialize();
+      // An OMP-stored key is validated by the server's own API-key method; the
+      // managed marker and absent keys keep the local-login fallback.
+      await authenticateForCredential(connection, initialize, apiKey);
       const session = await connection.newSession(process.cwd());
       discoveredSession = session.sessionId;
       const modern = choices(selector(session, "model"));
@@ -145,14 +148,14 @@ export class CatalogStore {
     }
   }
 
-  async refresh(settings: ContextSettings): Promise<ConfiguredCatalogModel[]> {
+  async refresh(settings: ContextSettings, apiKey?: string): Promise<ConfiguredCatalogModel[]> {
     this.latestSettings = settings;
     if (this.refreshing) return this.refreshing;
-    const pending = this.refreshOnce(); this.refreshing = pending;
+    const pending = this.refreshOnce(apiKey); this.refreshing = pending;
     try { return await pending; } finally { if (this.refreshing === pending) this.refreshing = undefined; }
   }
-  private async refreshOnce(): Promise<ConfiguredCatalogModel[]> {
-    const models = await this.discoverModels();
+  private async refreshOnce(apiKey?: string): Promise<ConfiguredCatalogModel[]> {
+    const models = await this.discoverModels(apiKey);
     const sources = projectCatalog(models);
     const settings = this.latestSettings ?? { defaults: {}, models: {} };
     const registered = this.project(sources, settings);

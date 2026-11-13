@@ -7,7 +7,7 @@ import test from "node:test";
 import { loadAdapterConfig, loadRuntimeSourcePreference, saveAdapterPermissionMode, updateAdapterConfig } from "../extension/adapter-config.ts";
 import { registerOmpAdapter } from "../extension/index.ts";
 import { keychain, type OmpCommandContext } from "../extension/auth-sync.ts";
-import { resolveDefaultPiConfigPath, resolveLegacyGeminiConfigPath } from "../extension/vendor/pi-antigravity-acp-provider/src/config.ts";
+import { resolveDefaultPiConfigPath, resolveLegacyGeminiConfigPath } from "../extension/runtime/config.ts";
 
 test("runtimeSource defaults to auto and survives permission updates", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "omp-config-"));

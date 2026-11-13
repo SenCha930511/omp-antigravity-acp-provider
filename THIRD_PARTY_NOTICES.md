@@ -1,6 +1,6 @@
 # Third-party notices
 
-omp-antigravity-acp-provider is an OMP-focused derivative fork/adaptation of [pi-antigravity-acp-provider](https://github.com/zacbemis/pi-antigravity-acp-provider), originally created by [zacbemis](https://github.com/zacbemis) and contributors and distributed under MIT. It vendors upstream version 0.1.15 source under `extension/vendor/pi-antigravity-acp-provider` (see `extension/vendor/pi-antigravity-acp-provider/LICENSE`) and keeps attribution.
+omp-antigravity-acp-provider is an OMP-focused derivative fork/adaptation of [pi-antigravity-acp-provider](https://github.com/zacbemis/pi-antigravity-acp-provider), originally created by [zacbemis](https://github.com/zacbemis) and contributors and distributed under MIT. Upstream 0.1.15 code is incorporated directly into the owned runtime sources under `extension/runtime/` and is kept with attribution; there is no separate vendored copy or upstream package dependency.
 
 The upstream authors retain credit for the original ACP transport, authentication, runtime installation, session restoration and MCP bridge implementation.
 

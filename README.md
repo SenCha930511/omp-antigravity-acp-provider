@@ -245,4 +245,4 @@ Detailed behavior, advanced settings and limitations: [docs/](docs/) and [CHANGE
 
 ## License
 
-MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Upstream source is vendored under `extension/vendor/pi-antigravity-acp-provider` (MIT) and kept with attribution. Official Google executables and their licenses are separate.
+MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Upstream 0.1.15 code is incorporated into the owned runtime sources under `extension/runtime/` (MIT) and kept with attribution. Official Google executables and their licenses are separate.

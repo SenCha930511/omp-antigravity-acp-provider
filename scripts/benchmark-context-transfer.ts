@@ -8,7 +8,7 @@ import {
   type PromptParts,
   type TransferContext,
   type TransferMessage,
-} from "../extension/context-transfer.ts";
+} from "../extension/runtime/prompt.ts";
 
 const SAMPLE_COUNT = 7;
 const BASELINE_DIGESTS: Readonly<Record<string, string>> = Object.freeze({

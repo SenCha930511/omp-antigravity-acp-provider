@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
-import { createHistoryFingerprintMemo } from "../extension/history-fingerprint.ts";
+import { createHistoryFingerprintMemo } from "../extension/runtime/binding.ts";
 import { AntigravityRuntime, Type } from "../extension/runtime.mjs";
 
 // Execute the fingerprint functions from the actual generated runtime, including

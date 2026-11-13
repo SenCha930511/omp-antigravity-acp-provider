@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AssistantMessage, Message, StreamEvent, ToolCall } from "@earendil-works/pi-ai";
 
-import { resolveAcpPermissionProfile } from "../extension/acp-runtime-source.ts";
+import { resolveAcpPermissionProfile } from "../extension/runtime/launch.ts";
 import { AntigravityRuntime, TierConnection, Type } from "../extension/runtime.mjs";
 
 type RequestedMode = "default" | "auto_edit" | "yolo";

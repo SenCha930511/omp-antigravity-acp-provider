@@ -71,7 +71,7 @@ function measure(work: () => void, iterations: number) {
 
 if (worker) {
   const baseline = process.argv[3] === "baseline";
-  const { buildPromptParts } = await load("extension/context-transfer.ts", baseline);
+  const { buildPromptParts } = await load("extension/runtime/prompt.ts", baseline);
   const normal = validCases().at(-2)!;
   const oversized = { messages: [user("x".repeat(32 * 1024 * 1024)), user("LATEST")] };
   // Flatten the fixture before measuring, independently of serializer work.
@@ -100,8 +100,8 @@ if (worker) {
   for (let i = 0; i < 100; i++) store.getDynamicModels(settings);
   console.log(JSON.stringify({ normalTransfer, oversizedTransfer, runtimeCreations, fallbackProjections }));
 } else {
-  const before = await load("extension/context-transfer.ts", true);
-  const after = await load("extension/context-transfer.ts", false);
+  const before = await load("extension/runtime/prompt.ts", true);
+  const after = await load("extension/runtime/prompt.ts", false);
   const cases = validCases();
   for (const input of cases) assert.deepEqual(after.buildPromptParts(...input, limits), before.buildPromptParts(...input, limits));
   const results: Record<string, unknown> = {};

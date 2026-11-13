@@ -3,7 +3,6 @@ import { mkdtemp, rm, access, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -33,8 +32,10 @@ try {
   const runtime = path.join(installed, "extension/runtime.mjs");
   const exports = await import(pathToFileURL(runtime).href);
   assert.equal(typeof exports.AntigravityRuntime, "function");
-  const require = createRequire(runtime);
-  assert.throws(() => require.resolve("pi-antigravity-acp-provider/package.json"), { code: "MODULE_NOT_FOUND" });
+  // Every shipped path must be an owned adapter path: no runtime sources are
+  // copied in beside the bundle, and no stray tree rides along.
+  const unexpected = files.filter(file => !/^(?:extension\/|licenses\/|package\.json$|README\.md$|AGENT_INSTALL\.md$|LICENSE$|THIRD_PARTY_NOTICES\.md$|THIRD_PARTY_LICENSES\.txt$)/.test(file));
+  assert.deepEqual(unexpected, [], `unexpected packed paths: ${JSON.stringify(unexpected)}`);
   await access(path.join(installed, "extension/assets/src/acp/supervisor.mjs"));
   await access(path.join(installed, "extension/assets/runtime-manifest.json"));
   assert.deepEqual((await readdir(path.join(install, "node_modules"))).filter(name => !name.startsWith(".")), ["omp-antigravity-acp-provider"]);

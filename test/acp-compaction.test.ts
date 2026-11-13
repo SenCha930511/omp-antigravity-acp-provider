@@ -5,7 +5,7 @@ import {
   applyCompactionUpdate,
   formatCompactionNotice,
 } from "../extension/acp-compaction.ts";
-import { AntigravityAcpConnection } from "../extension/vendor/pi-antigravity-acp-provider/src/acp/connection.ts";
+import { AntigravityAcpConnection } from "../extension/runtime/acp/connection.ts";
 import { TierConnection } from "../extension/tier-connection.ts";
 
 function bareConnection() {

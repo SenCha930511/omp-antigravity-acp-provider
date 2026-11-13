@@ -1,13 +1,33 @@
 export type NativeToolMode = "prefer" | "disabled";
 
-export const TOOL_ROUTING =
-  "Supplied OMP tools are exposed by the authenticated pi-bridge MCP server with pi_ prefixes. Call them directly for user tasks. If no OMP tool fits, report the missing capability and obtain explicit approval before using an Antigravity-native tool.";
+// A main session may delegate through the pi-bridge; an ephemeral side turn
+// only carries the catalog so the prompt cache stays warm.
+export type SessionRoutingKind = "main" | "ephemeral";
 
-export function systemRouting(mode: NativeToolMode): string {
-  return TOOL_ROUTING + (mode === "disabled"
-    ? "\nAntigravity-native tools are disabled for this session. Report a missing capability instead of substituting one."
-    : "");
-}
+// Native OMP guidance talks about `task`; ACP exposes that declaration through
+// the pi-bridge MCP server. Keep the mapping short and schema-driven instead of
+// naming an agent roster the runtime cannot verify.
+const PI_BRIDGE_GUIDANCE =
+  "OMP tools exposed by the authenticated pi-bridge MCP server use pi_ names. " +
+  "Native OMP guidance about task maps to pi_task: submit delegated work by calling pi_task, " +
+  "and follow the supplied tool schema for agent selection and for delegated or parallel work. " +
+  "Use the supplied wait mechanism for completion notifications. " +
+  "Antigravity-native tools run in a separate runtime with their own permission negotiation; " +
+  "their results are not OMP tool results.";
+
+const NO_PI_BRIDGE_GUIDANCE =
+  "The pi-bridge MCP server is not available on this runtime, so no OMP tools are exposed. " +
+  "Do not claim an OMP tool is available; report the missing capability.";
+
+const NATIVE_TOOLS_DISABLED =
+  "Antigravity-native tools are disabled for this session. Report a missing capability instead of substituting one.";
+
+// Mirrors OMP's real ephemeral side-turn instruction: the catalog is supplied
+// only to keep the prompt cache warm, and no tool call in that turn executes.
+const EPHEMERAL_TOOL_GUIDANCE =
+  "This is an ephemeral side turn. The tool catalog is attached only to keep the prompt cache warm; " +
+  "no tools may be called in this side turn, and tool calls are discarded without execution. " +
+  "Reply with plain text only.";
 
 export function parseNativeToolMode(value: unknown): NativeToolMode {
   if (value === "prefer" || value === "disabled") return value;
@@ -60,6 +80,38 @@ export function supportsSessionRouting(initialize: InitializeMetadata | undefine
     initialize?.agentCapabilities?._meta?.antigravity?.systemPrompt?.append === true;
 }
 
+// The runtime only starts the pi-bridge when the agent advertises HTTP MCP.
+// Normalize the official 1.5.3+ omission before deciding what the session may
+// advertise; otherwise the append channel would claim tools the bridge never
+// exposes.
+export function mcpHttpAvailable(initialize: InitializeMetadata | undefined): boolean {
+  return initialize !== undefined &&
+    normalizeInitializeResponse(initialize).agentCapabilities?.mcpCapabilities?.http === true;
+}
+
+// Shared by the system-append channel and the legacy instructions resource so
+// both paths describe the same bridge availability and delegation mapping.
+export function ompToolGuidance(
+  initialize: InitializeMetadata | undefined,
+  mode: NativeToolMode,
+  bridgeConfigured: boolean,
+  sessionKind: SessionRoutingKind = "main",
+): string {
+  if (sessionKind === "ephemeral") return EPHEMERAL_TOOL_GUIDANCE;
+  const guidance = bridgeConfigured && mcpHttpAvailable(initialize) ? PI_BRIDGE_GUIDANCE : NO_PI_BRIDGE_GUIDANCE;
+  return [guidance, ...(mode === "disabled" ? [NATIVE_TOOLS_DISABLED] : [])].join("\n\n");
+}
+
+export function sessionSystemAppend(
+  initialize: InitializeMetadata | undefined,
+  mode: NativeToolMode,
+  instructions: string,
+  bridgeConfigured: boolean,
+  sessionKind: SessionRoutingKind = "main",
+): string {
+  return [instructions.trim(), ompToolGuidance(initialize, mode, bridgeConfigured, sessionKind)].filter(Boolean).join("\n\n");
+}
+
 export function normalizeInitializeResponse<T extends InitializeMetadata>(initialize: T): T {
   if (!isOfficialAgentAtLeast(initialize, 5, 3) || initialize.agentCapabilities?.mcpCapabilities?.http !== undefined) {
     return initialize;
@@ -73,7 +125,13 @@ export function normalizeInitializeResponse<T extends InitializeMetadata>(initia
   };
 }
 
-export function sessionRoutingRequest<T extends SessionRpcRequest>(request: T, initialize: InitializeMetadata | undefined, mode: NativeToolMode): T {
+export function sessionRoutingRequest<T extends SessionRpcRequest>(
+  request: T,
+  initialize: InitializeMetadata | undefined,
+  mode: NativeToolMode,
+  instructions: string,
+  sessionKind: SessionRoutingKind = "main",
+): T {
   if (!supportsSessionRouting(initialize)) {
     if (mode === "disabled") {
       throw new Error("Native tool filtering requires official Antigravity ACP 1.4.1+ (1.x) with system-append support; refusing to weaken disabled mode");
@@ -83,10 +141,11 @@ export function sessionRoutingRequest<T extends SessionRpcRequest>(request: T, i
   const previous = request._meta?.antigravity ?? {};
   const inherited = typeof previous.systemPrompt?.append === "string" ? previous.systemPrompt.append : "";
   const eager = new Set(Array.isArray(previous.eagerMcpServers) ? previous.eagerMcpServers : []);
-  if (request.mcpServers?.some(server => server.name === "pi-bridge")) eager.add("pi-bridge");
+  const bridgeConfigured = request.mcpServers?.some(server => server.name === "pi-bridge") === true;
+  if (bridgeConfigured) eager.add("pi-bridge");
   return { ...request, _meta: { ...request._meta, antigravity: {
     ...previous,
-    systemPrompt: { append: [inherited, systemRouting(mode)].filter(Boolean).join("\n\n") },
+    systemPrompt: { append: [inherited, sessionSystemAppend(initialize, mode, instructions, bridgeConfigured, sessionKind)].filter(Boolean).join("\n\n") },
     eagerMcpServers: [...eager],
     // Explicitly clear a persisted disabled filter when loading in prefer mode.
     ...(mode === "disabled" ? { enabledTools: [] } : { enabledTools: undefined, disabledTools: [] }),
@@ -99,13 +158,16 @@ export function installSessionRouting(
   rpc: Record<string, (request: SessionRpcRequest) => Promise<unknown>>,
   initialized: Promise<InitializeMetadata>,
   mode: NativeToolMode,
+  instructions: () => string,
+  sessionKind: SessionRoutingKind | (() => SessionRoutingKind) = "main",
   onApplied: (advanced: boolean) => void = () => {},
 ) {
   for (const name of ["newSession", "loadSession", "resumeSession"]) {
     const original = rpc[name]!.bind(rpc);
     rpc[name] = async (request: SessionRpcRequest) => {
       const initialize = await initialized;
-      const routed = sessionRoutingRequest(request, initialize, mode);
+      const kind = typeof sessionKind === "function" ? sessionKind() : sessionKind;
+      const routed = sessionRoutingRequest(request, initialize, mode, instructions(), kind);
       const response = await original(routed);
       onApplied(routed !== request);
       return response;

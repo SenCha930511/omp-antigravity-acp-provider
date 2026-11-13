@@ -32,7 +32,7 @@ test("actual OMP wrapper refreshes tool audit for same-array additions/removals 
     }
     assert.match(await audit(), /Available: read/);
     tools.push({ name: "bash", parameters: Type.Object({ cmd: Type.String() }) });
-    assert.match(await audit(), /Available: bash, read/);
+    assert.match(await audit(), /Available: read, bash/);
     tools.splice(0, 1); assert.match(await audit(), /Available: bash(?:\n|$)/);
     tools[0].name = "renamed"; assert.match(await audit(), /Available: renamed/);
     tools[0].parameters.type = "array"; assert.match(await audit(), /schema omitted/);

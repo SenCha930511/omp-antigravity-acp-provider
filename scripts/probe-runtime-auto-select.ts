@@ -1,28 +1,35 @@
 // Explicit, isolated live verification of automatic runtime-source selection:
-// AGY_ACP_BIN is cleared and PATH carries the real agy CLI, so the adapter
+// AGY_ACP_BIN is ignored and PATH carries the real agy CLI, so the adapter
 // must select it on its own and the ACP session must advertise the CLI-only
 // models. Creates one session, sends no prompt, changes no configuration.
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { loadRuntimeSourcePreference } from "../extension/adapter-config.ts";
+import { resolveLaunchSpawn, resolveRuntimeLaunchPlan, type RuntimeLaunchPlan } from "../extension/runtime/launch.ts";
 if (!process.argv.includes("--live")) throw new Error("Pass --live explicitly; this probe creates an ACP session and may consume quota.");
 
-delete process.env.AGY_ACP_BIN;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stateDir = path.join(os.homedir(), ".omp", "agent", "antigravity-acp-provider");
+// Selection reads AGY_ACP_BIN; strip it from the copy this probe passes so the
+// CLI is chosen on its own without touching shared process state.
+const launchEnv = { ...process.env };
+delete launchEnv.AGY_ACP_BIN;
 
-const { selectAcpRuntime } = await import(pathToFileURL(path.join(root, "extension/acp-runtime-source.ts")).href);
-const preference = await selectAcpRuntime(stateDir);
 const { TierConnection, ensureAntigravityAcpReady } = await import(pathToFileURL(path.join(root, "extension/runtime.mjs")).href);
-if (loadRuntimeSourcePreference(stateDir) === "auto") await ensureAntigravityAcpReady();
+let plan: RuntimeLaunchPlan = await resolveRuntimeLaunchPlan(stateDir, { env: launchEnv });
+if (plan.installManaged) {
+  await ensureAntigravityAcpReady();
+  plan = await resolveRuntimeLaunchPlan(stateDir, { env: launchEnv });
+}
+const launch = resolveLaunchSpawn(plan);
 
-const report: { preference: unknown; wrapper: string | null; advertisedModels: unknown[] } = {
-  preference,
+const report: { plan: RuntimeLaunchPlan; launch: unknown; wrapper: string | null; advertisedModels: unknown[] } = {
+  plan,
+  launch,
   wrapper: path.join(stateDir, "agy-acp-cli.sh"),
   advertisedModels: [],
 };
-const connection = new TierConnection({ cwd: process.cwd(), handlers: {
+const connection = new TierConnection({ cwd: process.cwd(), command: launch.command, args: [...launch.args], handlers: {
   onUpdate: async () => {},
   onPermission: async () => ({ outcome: { outcome: "cancelled" } }),
 } });

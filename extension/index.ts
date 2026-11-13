@@ -1,5 +1,6 @@
-// OMP 18.x adapter for vendored pi-antigravity-acp-provider 0.1.15 (Pi 1.1 API).
-// Upstream source is vendored under ./vendor/pi-antigravity-acp-provider; keep it intact and translate only the provider registration contract.
+// OMP 18.x adapter for the Antigravity ACP runtime (Pi 1.1 API). The runtime
+// itself is owned source under ./runtime; the adapter only translates the
+// provider registration contract and OMP-specific behaviour.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,22 +9,23 @@ import { fetchCliQuota, type AntigravityQuotaSnapshot } from "./usage-accounting
 import { createQuotaUsageProvider } from "./quota-usage.ts";
 import { ensureLoopbackBypass } from "./proxy-env.ts";
 import {
-  assertSelectedAcpCliLaunch,
-  resolveAcpQuotaSource,
-  selectAcpRuntime,
+  inspectRuntimeLaunchPlan,
+  quotaSourceForPlan,
   resolveAcpPermissionProfile,
-  type AcpRuntimePreference,
-} from "./acp-runtime-source.ts";
+  resolveLaunchTarget,
+  resolveRuntimeLaunchPlan,
+  type RuntimeLaunchPlan,
+} from "./runtime/launch.ts";
 import { loadAdapterConfig } from "./adapter-config.ts";
 import { SessionRuntimePool } from "./runtime-pool.ts";
-import { createStructuredFingerprintMemo } from "./structured-fingerprint.ts";
+import { ownerRoutingId, sessionOwnerId } from "./runtime/routing.ts";
+import { createStructuredFingerprintMemo } from "./runtime/binding.ts";
 import { Diagnostics, instrumentRuntime } from "./diagnostics.ts";
 import { stableTools } from "./tool-order.ts";
 import { toolDeclarations, normalizeOmpSystemDeltas, type OmpToolDeclaration } from "./omp-context.ts";
 import { OmpSessionLifecycle, type OmpProviderSessionState } from "./omp-session-lifecycle.ts";
 import { DEFAULT_USAGE_MODE, loadContextSettings } from "./context-settings.ts";
 import { projectCatalog, selectRuntimeModel, type PublicCatalogModel } from "./model-catalog.ts";
-import { TOOL_ROUTING } from "./tool-routing.ts";
 import { TranscriptRouting, type RoutingAttempt } from "./transcript-routing.ts";
 import { sourceId } from "./omp-session-source.ts";
 import { loadToolPolicy } from "./tool-policy.ts";
@@ -52,9 +54,10 @@ import {
   TierConnection,
   Type,
   createAntigravityProvider,
-  ensureAntigravityAcpReady,
   loadConfig,
   planToolProjection,
+  prepareManagedRuntime,
+  usableApiKey,
 } from "./runtime.mjs";
 
 export { keychain, logoutFollow };
@@ -139,20 +142,21 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
 
   // Loading this global extension must not start ACP or query Google.
   let readiness: Promise<void> | undefined;
-  let runtimePreference: Promise<AcpRuntimePreference | undefined> | undefined;
-  let selectedRuntimePreference: AcpRuntimePreference | undefined;
-  const currentPermissionProfile = () => resolveAcpPermissionProfile(selectedRuntimePreference, permissionMode);
+  let launchPlan: Promise<RuntimeLaunchPlan | undefined> | undefined;
+  let selectedLaunchPlan: RuntimeLaunchPlan | undefined;
+  const currentPermissionProfile = () => resolveAcpPermissionProfile(selectedLaunchPlan, permissionMode);
   function prepareRuntime() {
-    runtimePreference ??= selectAcpRuntime(stateDir).then(preference => {
-      selectedRuntimePreference = preference;
-      return preference;
+    launchPlan ??= resolveRuntimeLaunchPlan(stateDir).then(plan => {
+      selectedLaunchPlan = plan;
+      return plan;
     });
-    readiness ??= runtimePreference.then(preference => {
-      if (preference?.source !== "managed" || loadAdapterConfig(configPath).runtimeSource !== "auto") return;
-      return ensureAntigravityAcpReady();
+    readiness ??= launchPlan.then(async plan => {
+      if (!plan) throw new Error("ACP runtime launch plan is not ready.");
+      selectedLaunchPlan = await prepareManagedRuntime(plan);
     }).catch((error: unknown) => {
       readiness = undefined;
-      runtimePreference = undefined;
+      launchPlan = undefined;
+      selectedLaunchPlan = undefined;
       throw error;
     });
     return readiness;
@@ -160,8 +164,12 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
 
   // Inference and model discovery must not let the ACP server open an
   // interactive Google consent flow at session/new. A missing local login is a
-  // user action, not a reason to leave the submitted message pending.
-  async function requireAcpAuth(): Promise<void> {
+  // user action, not a reason to leave the submitted message pending. An
+  // OMP-stored API key is not guessed at here: the ACP server's advertised
+  // api-key method validates the actual secret during session setup. The
+  // managed marker is an OMP placeholder, never a substitute credential.
+  async function requireAcpAuth(apiKey?: string): Promise<void> {
+    if (usableApiKey(apiKey)) return;
     if (await authReady()) return;
     throw new Error("Antigravity ACP is not signed in. Run /login (or /antigravity-acp login) before sending a message.");
   }
@@ -180,7 +188,6 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   let cachedToolProjection: {
     revision: string;
     tools: OmpToolDeclaration[];
-    availableNames: string;
     audit: ToolAuditSummary;
   } | undefined;
 
@@ -192,14 +199,28 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     });
     if (profile.autoApproveProcess) env.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS = "1";
     else delete env.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS;
-    const launch = options.command || options.entryPath ? undefined
-      : assertSelectedAcpCliLaunch(stateDir, selectedRuntimePreference, env);
-    return createConnection({ ...options, ...launch, env });
+    // `command`/`entryPath` stay fixture-only direct spawns. An explicit
+    // `launch` record comes from an inspected plan (quota) and is already the
+    // verified target; inference never supplies it and still resolves and
+    // verifies the selected plan below.
+    if (options.command !== undefined || options.entryPath !== undefined || options.launch !== undefined) {
+      return createConnection({ ...options, env });
+    }
+    // The plan owns the spawn target, so the runtime never has to resolve a
+    // runtime from shared environment state.
+    const plan = selectedLaunchPlan;
+    if (!plan) throw new Error("ACP runtime launch plan is not ready; prepare the runtime before spawning ACP.");
+    // The verified plan target is spawned through the owned supervisor, so the
+    // process tree, Windows batch wrappers and node resolution stay owned.
+    const launch = resolveLaunchTarget(plan);
+    return createConnection({ ...options, launch, env });
   }
 
-  const lifecycle = new OmpSessionLifecycle(id => runtimes.close(id), async id => {
+  // A side routing id shares its parent's runtime entry, so a new one-shot id
+  // never spawns a fresh process. Only a full owner close tears it down.
+  const lifecycle = new OmpSessionLifecycle(id => runtimes.close(ownerRoutingId(id)), async id => {
     if (id) await cleanup.releaseSession(id);
-  });
+  }, ownerRoutingId);
   const runtimes = new SessionRuntimePool<RuntimeBundleView>(() => {
     const ownedConnections = new Set<TierConnection>();
     const runtime = new AntigravityRuntime((options: ConstructorParameters<typeof TierConnection>[0]) => {
@@ -220,7 +241,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       return connection;
     }, currentPermissionProfile().wireMode, sessionStore);
     (runtime as { ompQuotaCliPath?: string }).ompQuotaCliPath =
-      selectedRuntimePreference?.source === "cli" ? selectedRuntimePreference.cliPath : undefined;
+      selectedLaunchPlan?.quota.kind === "cli" ? selectedLaunchPlan.quota.cliPath : undefined;
     instrumentRuntime(runtime, diagnostics);
     return {
       runtime,
@@ -361,12 +382,20 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   let initialModels = catalogStore.loadInitialOrCached(contextSettings);
 
   async function loadQuotaSnapshot(signal?: AbortSignal): Promise<AntigravityQuotaSnapshot | undefined> {
-    const source = await resolveAcpQuotaSource(stateDir, process.env, os.homedir(), process.platform, signal, selectedRuntimePreference);
-    if (!source) return undefined;
+    // Derive quota from the plan that inference will spawn. Before the plan
+    // exists, inspect the same order without writing a wrapper or a record.
+    const plan = selectedLaunchPlan ?? await inspectRuntimeLaunchPlan(stateDir, { signal }).catch(() => undefined);
+    const source = plan ? quotaSourceForPlan(plan) : undefined;
+    if (!plan || !source) return undefined;
     if (source.kind === "cli") return fetchCliQuota(source.cliPath, signal);
+    // Quota keeps the local-login credential route: OMP's usage provider has no
+    // credential parameter, so an OMP-stored API key is not forwarded here.
     if (!(await authReady())) return undefined;
+    // The short-lived ACP session uses the exact verified launch record from the
+    // same plan as inference, never a direct fixture-style command.
+    const launch = resolveLaunchTarget(plan);
     const runtime = new AntigravityRuntime(
-      options => spawnConnection({ ...options, command: source.command, args: source.args, ompCleanup: cleanup }),
+      options => spawnConnection({ ...options, launch, ompCleanup: cleanup }),
       currentPermissionProfile().wireMode,
     );
     try {
@@ -437,17 +466,15 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
         streamSimple(
           model: { id: string },
           context: { tools?: OmpToolDeclaration[]; systemPrompt?: string | string[]; messages: unknown[] },
-          options?: { sessionId?: string; reasoning?: string; signal?: AbortSignal; providerSessionState?: Map<string, OmpProviderSessionState> },
+          options?: { apiKey?: string; sessionId?: string; parentSessionId?: string; promptCacheKey?: string; reasoning?: string; signal?: AbortSignal; providerSessionState?: Map<string, OmpProviderSessionState> },
         ) {
           const inputTools = toolDeclarations(context.tools ?? []);
           let tools: OmpToolDeclaration[];
-          let availableNames: string;
           const cached = cachedToolProjection;
           const revision = toolProjectionMemo(inputTools, () => String(++toolRevision));
           // Validate live definitions, including mutation of the same array.
           if (cached && cached.revision === revision) {
             tools = cached.tools;
-            availableNames = cached.availableNames;
             lastToolAudit = cached.audit;
           } else {
             tools = stableTools(inputTools);
@@ -455,21 +482,21 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
             const omitted: Array<{ name: string; reason: string }> = planToolProjection(tools);
             const omittedNames = new Set(omitted.map(tool => tool.name));
             const available = bridged.filter(tool => !omittedNames.has(tool.name));
-            availableNames = available.length
-              ? available.map(tool => `pi_${tool.name}`).join(", ")
-              : "none currently available; report missing capabilities before proposing native operations";
             lastToolAudit = {
               offered: bridged.map(tool => tool.name),
               available: available.map(tool => tool.name),
               omitted,
             };
-            cachedToolProjection = { revision, tools, availableNames, audit: lastToolAudit };
+            cachedToolProjection = { revision, tools, audit: lastToolAudit };
           }
           const routedContext = {
             ...context,
             tools,
             messages: normalizeOmpSystemDeltas(context.messages),
-            systemPrompt: `${Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n\n") : context.systemPrompt ?? ""}\n\n${TOOL_ROUTING}\nOMP tool names: ${availableNames}`,
+            // Preserve OMP's complete instruction. Projection guidance and the
+            // task-to-pi_task mapping travel through the ACP system-append
+            // channel once per session; no duplicate paragraph belongs here.
+            systemPrompt: Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n\n") : context.systemPrompt,
           };
           if (process.env.OMP_ACP_TRACE === "1") {
             console.error("[ACP tools]", JSON.stringify(lastToolAudit));
@@ -478,6 +505,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
           // loading/selecting/listing models performs no ACP process activity.
           const deferred = new PiEventWriter(model);
           const routingId = options?.sessionId;
+          const ownerId = sessionOwnerId(routingId, options?.parentSessionId);
           let replacedOwner: OmpProviderSessionState | undefined;
           const ticket = lifecycle.capture(routingId, options?.providerSessionState,
             previous => { replacedOwner = previous; });
@@ -487,14 +515,16 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
             try {
               if (options?.signal?.aborted) throw new Error("ACP request cancelled before startup");
               await lifecycle.ready(ticket);
-              await requireAcpAuth();
+              await requireAcpAuth(options?.apiKey);
               await diagnostics.measure("runtime.prepare", prepareRuntime);
               if (options?.signal?.aborted) throw new Error("ACP request cancelled during startup");
-              if (!catalogStore.upstreamModels.has(model.id)) await catalogStore.refresh(contextSettings);
+              // Discovery uses the same request credential inference will send;
+              // the server validates it through its advertised api-key method.
+              if (!catalogStore.upstreamModels.has(model.id)) await catalogStore.refresh(contextSettings, options?.apiKey);
               const original = catalogStore.upstreamModels.get(model.id);
               if (!original) throw new Error(`Antigravity model was not discovered: ${model.id}. Run /antigravity-acp refresh.`);
               await lifecycle.ready(ticket);
-              const lease = runtimes.acquire(routingId);
+              const lease = runtimes.acquire(ownerId);
               const { runtime, provider } = lease.value;
               try {
                 lifecycle.attach(ticket, lease.value);
@@ -554,7 +584,12 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
               lease.release();
             }
           },
-          refreshToken: (credentials: unknown) => runtimes.get().provider.auth.oauth.refresh(credentials),
+          refreshToken: async (credentials: unknown) => {
+            // A refresh can be the first thing that needs a connection, and
+            // every spawn uses the resolved launch plan.
+            await prepareRuntime();
+            return runtimes.get().provider.auth.oauth.refresh(credentials);
+          },
           getApiKey: () => MARKER,
         },
       });

@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { AntigravityRuntime } from "../extension/runtime.mjs";
+import { quotaFromPrompt } from "../extension/runtime/status.ts";
+import type { PromptResponse } from "@agentclientprotocol/sdk";
 
 test("CLI quota uses the selected CLI without creating an ACP connection", { skip: process.platform === "win32" }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "omp-cli-quota-"));
@@ -27,4 +29,29 @@ test("CLI quota uses the selected CLI without creating an ACP connection", { ski
     await runtime.close();
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+const quotaPrompt = (quota: Record<string, unknown>): PromptResponse =>
+  ({ stopReason: "end_turn", _meta: { quota } }) as unknown as PromptResponse;
+
+test("numeric quota resets keep valid values and omit malformed ones without throwing", () => {
+  const seconds = quotaFromPrompt(quotaPrompt({ remainingRequests: 12, requestLimit: 100, resetTimestamp: 1_700_000_000 }));
+  assert.equal(seconds?.remaining, 12);
+  assert.equal(seconds?.limit, 100);
+  assert.equal(seconds?.resetAt, new Date(1_700_000_000_000).toISOString());
+
+  const milliseconds = quotaFromPrompt(quotaPrompt({ resetAt: 1_700_000_000_000 }));
+  assert.equal(milliseconds?.resetAt, new Date(1_700_000_000_000).toISOString());
+
+  const unsafe = quotaFromPrompt(quotaPrompt({ remainingRequests: 3, requestLimit: 10, resetTimestamp: 1e20 }));
+  assert.deepEqual(unsafe, { remaining: 3, limit: 10 }, "an unsafe reset must not discard remaining/limit metadata");
+
+  const outOfRange = quotaFromPrompt(quotaPrompt({ remaining: 1, resetAt: 8.64e15 + 1 }));
+  assert.deepEqual(outOfRange, { remaining: 1 });
+
+  const notFinite = quotaFromPrompt(quotaPrompt({ remaining: 2, resetAt: Number.POSITIVE_INFINITY }));
+  assert.deepEqual(notFinite, { remaining: 2 });
+
+  assert.equal(quotaFromPrompt(quotaPrompt({ resetAt: "2026-11-14T13:50:00.000Z" }))?.resetAt,
+    "2026-11-14T13:50:00.000Z", "string timestamps remain valid");
 });

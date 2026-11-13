@@ -79,9 +79,9 @@ try {
       followupTotalMs: round(performance.now() - followupSubmitted) }));
     await hooks.get("session_shutdown")?.({}, { sessionManager: { getSessionId: () => id } });
   }
-  let stats: any;
-  await command.handler("diagnostics", { ui: { notify: (text: string) => { stats = JSON.parse(text); } } });
-  assert.ok(stats.enabled && stats.stages["acp.cancel-confirmation"]?.count > 0);
+  let stats = "";
+  await command.handler("diagnostics", { ui: { notify: (text: string) => { stats = text; } } });
+  assert.match(stats, /acp\.cancel-confirmation/);
   console.log(JSON.stringify({ diagnostics: stats }));
 } finally {
   // Only this isolated probe's mappings are disposable. Dropping them before

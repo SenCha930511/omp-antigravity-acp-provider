@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { inspectToolArguments, normalizeToolArguments, renderToolSignature } from "../extension/tool-args.ts";
+import { inspectToolArguments, normalizeToolArguments, renderToolSignature } from "../extension/runtime/tools/args.ts";
 
 const FILE_SCHEMA = {
   type: "object",

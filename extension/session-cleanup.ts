@@ -4,7 +4,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { lock } from "proper-lockfile";
 import { releaseAfter } from "./lock-release.ts";
-import { resolveAntigravityAcpDirectory } from "./vendor/pi-antigravity-acp-provider/src/acp/antigravity.ts";
+import { resolveAntigravityAcpDirectory } from "./runtime/acp/antigravity.ts";
 import { isMissingFileError, writeJsonAtomic } from "./fs-atomic.ts";
 import { AcpSessionStore, registerSessionStoreCleanup } from "./session-store.ts";
 import { sourceRoot, sourceId, findSources, type OmpSessionSource, type OmpSourceScan } from "./omp-session-source.ts";

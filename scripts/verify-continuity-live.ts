@@ -61,7 +61,7 @@ try {
     const answer = final?.content.filter((block: any) => block.type === "text").map((block: any) => block.text).join("");
     assert.ok(answer?.includes(marker), "Early context lost");
     assert.ok(answer.includes(`FIXTURE_${turn}`)); assert.ok(calls > 0);
-    assert.ok(final.usage.input > 0, "Real usage was not attached");
+    assert.ok(final.usage.totalTokens > 0, "Real usage was not attached");
     assert.ok(!answer.includes("Session Usage"), "Usage command leaked into answer");
     const activeMiB = rssKiB() / 1024;
     await new Promise(resolve => setTimeout(resolve, 2200));

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { usageFromPrompt } from "../extension/usage.ts";
-import { estimateContextTokens } from "../extension/context-transfer.ts";
+import { estimateContextTokens } from "../extension/runtime/prompt.ts";
 import { stableTools } from "../extension/tool-order.ts";
 
 test("OMP receives context occupancy separately from multi-call billable usage", () => {
@@ -48,10 +48,12 @@ test("a small OMP history cannot inherit a huge cumulative cacheRead", () => {
   assert.ok(usage.contextTokens! < usage.cacheRead / 10_000);
 });
 
-test("reordered tools retain stable schemas and function identities without changing the caller", () => {
+test("tool projection preserves caller order and function identities", () => {
   const read = { name: "read", execute() {} }, bash = { name: "bash", execute() {} };
   const original = [read, bash];
-  assert.deepEqual(stableTools(original), stableTools([bash, read]));
-  assert.equal(stableTools(original)[1], read);
+  assert.deepEqual(stableTools(original).map(tool => tool.name), ["read", "bash"]);
+  assert.deepEqual(stableTools([bash, read]).map(tool => tool.name), ["bash", "read"]);
+  assert.equal(stableTools(original)[0], read);
+  assert.equal(stableTools(original)[1], bash);
   assert.equal(original[0], read);
 });

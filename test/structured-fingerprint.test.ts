@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createStructuredFingerprintMemo } from "../extension/structured-fingerprint.ts";
+import { createStructuredFingerprintMemo } from "../extension/runtime/binding.ts";
 import { AntigravityRuntime, Type } from "../extension/runtime.mjs";
 
 test("structured snapshots reuse equivalent containers and detect deep schema/descriptor changes", () => {
