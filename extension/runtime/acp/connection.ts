@@ -6,6 +6,7 @@ import {
 	type AvailableCommand,
 	type InitializeResponse,
 	type McpServer,
+	type NewSessionRequest,
 	type PromptRequest,
 	type PromptResponse,
 	type RequestPermissionRequest,
@@ -26,6 +27,13 @@ import {
 } from "./session-state.ts";
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
+
+/**
+ * Official ACP session `_meta`. The SDK forwards the object verbatim, so
+ * routing callers hand over the pure builder's output and the base methods
+ * never inspect it.
+ */
+export type SessionMeta = NonNullable<NewSessionRequest["_meta"]>;
 
 export interface AntigravityConnectionHandlers {
 	onUpdate?: (notification: SessionNotification) => void | Promise<void>;
@@ -172,11 +180,12 @@ export class AntigravityAcpConnection {
 		cwd: string,
 		signal?: AbortSignal,
 		mcpServers: McpServer[] = [],
+		meta?: SessionMeta,
 	): Promise<AcpNewSessionResponse> {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.newSession({ cwd, mcpServers }),
+				this.connection.newSession({ cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) }),
 				this.operationTimeoutMs,
 				"session/new",
 			),
@@ -195,11 +204,12 @@ export class AntigravityAcpConnection {
 		cwd: string,
 		mcpServers: McpServer[] = [],
 		signal?: AbortSignal,
+		meta?: SessionMeta,
 	): Promise<SessionState> {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.loadSession({ sessionId, cwd, mcpServers }),
+				this.connection.loadSession({ sessionId, cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) }),
 				this.operationTimeoutMs,
 				"session/load",
 			),
@@ -213,11 +223,12 @@ export class AntigravityAcpConnection {
 		cwd: string,
 		mcpServers: McpServer[] = [],
 		signal?: AbortSignal,
+		meta?: SessionMeta,
 	): Promise<SessionState> {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.resumeSession({ sessionId, cwd, mcpServers }),
+				this.connection.resumeSession({ sessionId, cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) }),
 				this.operationTimeoutMs,
 				"session/resume",
 			),

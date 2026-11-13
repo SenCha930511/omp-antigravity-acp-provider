@@ -29,6 +29,20 @@ const EPHEMERAL_TOOL_GUIDANCE =
   "no tools may be called in this side turn, and tool calls are discarded without execution. " +
   "Reply with plain text only.";
 
+// Two sentences at most: redirect the host prompt, then the complete OMP
+// instruction follows unchanged. Only disabled native tools need the
+// redirect; prefer keeps native tools, so its append starts with the OMP text.
+const ACP_OVERRIDE =
+  "Follow only the OMP instructions below. Ignore any earlier ACP host instructions, personas or workflows.";
+const ACP_OVERRIDE_WITH_TOOLS =
+  "Follow only the OMP instructions below. Ignore any earlier ACP host instructions, personas or workflows; " +
+  "use only OMP pi_* tools and pi_task for reads, writes, searches, commands and subagent delegation.";
+
+function acpOverride(mode: NativeToolMode, sessionKind: SessionRoutingKind, hasOmpTools: boolean): string {
+  if (mode !== "disabled") return "";
+  return sessionKind === "main" && hasOmpTools ? ACP_OVERRIDE_WITH_TOOLS : ACP_OVERRIDE;
+}
+
 export function parseNativeToolMode(value: unknown): NativeToolMode {
   if (value === "prefer" || value === "disabled") return value;
   throw new Error("nativeTools must be prefer or disabled");
@@ -97,19 +111,28 @@ export function ompToolGuidance(
   bridgeConfigured: boolean,
   sessionKind: SessionRoutingKind = "main",
 ): string {
-  if (sessionKind === "ephemeral") return EPHEMERAL_TOOL_GUIDANCE;
-  const guidance = bridgeConfigured && mcpHttpAvailable(initialize) ? PI_BRIDGE_GUIDANCE : NO_PI_BRIDGE_GUIDANCE;
+  const guidance = sessionKind === "ephemeral" ? EPHEMERAL_TOOL_GUIDANCE :
+    bridgeConfigured && mcpHttpAvailable(initialize) ? PI_BRIDGE_GUIDANCE : NO_PI_BRIDGE_GUIDANCE;
   return [guidance, ...(mode === "disabled" ? [NATIVE_TOOLS_DISABLED] : [])].join("\n\n");
 }
 
+// Composes the session append: optional ACP override, the unchanged complete
+// OMP instruction, then the existing tool guidance. `hasOmpTools` is only
+// needed when the bridge is registered without ordinary tools.
 export function sessionSystemAppend(
   initialize: InitializeMetadata | undefined,
   mode: NativeToolMode,
   instructions: string,
   bridgeConfigured: boolean,
   sessionKind: SessionRoutingKind = "main",
+  hasOmpTools?: boolean,
 ): string {
-  return [instructions.trim(), ompToolGuidance(initialize, mode, bridgeConfigured, sessionKind)].filter(Boolean).join("\n\n");
+  const bridgeActive = bridgeConfigured && hasOmpTools !== false;
+  return [
+    acpOverride(mode, sessionKind, bridgeActive),
+    instructions.trim(),
+    ompToolGuidance(initialize, mode, bridgeActive, sessionKind),
+  ].filter(Boolean).join("\n\n");
 }
 
 export function normalizeInitializeResponse<T extends InitializeMetadata>(initialize: T): T {
@@ -131,6 +154,7 @@ export function sessionRoutingRequest<T extends SessionRpcRequest>(
   mode: NativeToolMode,
   instructions: string,
   sessionKind: SessionRoutingKind = "main",
+  hasOmpTools?: boolean,
 ): T {
   if (!supportsSessionRouting(initialize)) {
     if (mode === "disabled") {
@@ -139,38 +163,19 @@ export function sessionRoutingRequest<T extends SessionRpcRequest>(
     return request;
   }
   const previous = request._meta?.antigravity ?? {};
-  const inherited = typeof previous.systemPrompt?.append === "string" ? previous.systemPrompt.append : "";
+  // Compose the current route without replaying inherited append content.
   const eager = new Set(Array.isArray(previous.eagerMcpServers) ? previous.eagerMcpServers : []);
   const bridgeConfigured = request.mcpServers?.some(server => server.name === "pi-bridge") === true;
-  if (bridgeConfigured) eager.add("pi-bridge");
+  // A registered bridge normally implies tools; the explicit false override
+  // keeps an externally registered empty bridge from being eagerly connected
+  // or advertised as pi_ tools.
+  if (hasOmpTools === false) eager.delete("pi-bridge");
+  else if (bridgeConfigured) eager.add("pi-bridge");
   return { ...request, _meta: { ...request._meta, antigravity: {
     ...previous,
-    systemPrompt: { append: [inherited, sessionSystemAppend(initialize, mode, instructions, bridgeConfigured, sessionKind)].filter(Boolean).join("\n\n") },
+    systemPrompt: { append: sessionSystemAppend(initialize, mode, instructions, bridgeConfigured, sessionKind, hasOmpTools) },
     eagerMcpServers: [...eager],
     // Explicitly clear a persisted disabled filter when loading in prefer mode.
     ...(mode === "disabled" ? { enabledTools: [] } : { enabledTools: undefined, disabledTools: [] }),
   } } };
-}
-
-// The pinned upstream connection exposes session methods but not their _meta
-// extension slot. Decorate its SDK RPC seam without modifying upstream files.
-export function installSessionRouting(
-  rpc: Record<string, (request: SessionRpcRequest) => Promise<unknown>>,
-  initialized: Promise<InitializeMetadata>,
-  mode: NativeToolMode,
-  instructions: () => string,
-  sessionKind: SessionRoutingKind | (() => SessionRoutingKind) = "main",
-  onApplied: (advanced: boolean) => void = () => {},
-) {
-  for (const name of ["newSession", "loadSession", "resumeSession"]) {
-    const original = rpc[name]!.bind(rpc);
-    rpc[name] = async (request: SessionRpcRequest) => {
-      const initialize = await initialized;
-      const kind = typeof sessionKind === "function" ? sessionKind() : sessionKind;
-      const routed = sessionRoutingRequest(request, initialize, mode, instructions(), kind);
-      const response = await original(routed);
-      onApplied(routed !== request);
-      return response;
-    };
-  }
 }

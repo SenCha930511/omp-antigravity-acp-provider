@@ -4,7 +4,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  installSessionRouting,
   mcpHttpAvailable,
   normalizeInitializeResponse,
   sessionRoutingRequest,
@@ -12,6 +11,7 @@ import {
   type InitializeMetadata,
   type SessionRpcRequest,
 } from "../extension/tool-routing.ts";
+import { TierConnection } from "../extension/tier-connection.ts";
 import { loadNativeToolMode, saveNativeToolMode } from "../extension/tool-policy.ts";
 import { AntigravityRuntime } from "../extension/runtime.mjs";
 import type { AntigravityAcpConnection } from "../extension/runtime/acp/connection.ts";
@@ -103,7 +103,7 @@ test("disabled mode filters built-ins but retains MCP configuration and existing
   assert.equal(result._meta?.other, 1);
   assert.equal(result._meta?.antigravity?.extra, 2);
   const append = appendOf(result);
-  assert.match(append, /^Existing instructions/);
+  assert.doesNotMatch(append, /^Existing instructions/);
   assert.ok(append.includes(instructions));
   assert.match(append, /native tools are disabled/);
   assert.deepEqual(result._meta?.antigravity?.eagerMcpServers, ["other-server", "pi-bridge"]);
@@ -146,59 +146,170 @@ test("unknown runtimes keep the legacy prompt in prefer mode and fail closed in 
   }
 });
 
-test("new, load and resume RPCs all receive the complete instruction once", async () => {
-  const calls: Array<{ name: string; request: SessionRpcRequest }> = [];
-  const rpc: Record<string, (request: SessionRpcRequest) => Promise<unknown>> = {};
-  for (const name of ["newSession", "loadSession", "resumeSession"]) {
-    rpc[name] = async (routed: SessionRpcRequest) => {
-      calls.push({ name, request: routed });
-      return { sessionId: "fixture" };
-    };
-  }
-  installSessionRouting(rpc, Promise.resolve(initialize), "disabled", () => instructions);
-  for (const name of ["newSession", "loadSession", "resumeSession"]) {
-    assert.deepEqual(await rpc[name]!({ ...request, sessionId: "fixture" }), { sessionId: "fixture" });
-  }
-  assert.equal(calls.length, 3);
-  for (const call of calls) {
-    assert.deepEqual(call.request._meta?.antigravity?.enabledTools, []);
-    assert.deepEqual(call.request._meta?.antigravity?.eagerMcpServers, ["pi-bridge"]);
-    const append = appendOf(call.request);
-    assert.ok(append.startsWith(instructions), `${call.name} must carry the complete instruction`);
+interface RoutedMeta {
+  antigravity?: {
+    systemPrompt?: { append?: string };
+    eagerMcpServers?: string[];
+    enabledTools?: string[];
+    disabledTools?: string[];
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+function metaOf(args: unknown[]): RoutedMeta {
+  const value = args[args.length - 1];
+  assert.ok(typeof value === "object" && value !== null, "the base session method must receive the routed _meta");
+  return value as RoutedMeta;
+}
+
+test("new, load and resume requests all carry the complete instruction once", () => {
+  const requests: SessionRpcRequest[] = [
+    { ...request },
+    { sessionId: "fixture", ...request },
+    { sessionId: "fixture", ...request },
+  ];
+  for (const current of requests) {
+    const routed = sessionRoutingRequest(current, initialize, "disabled", instructions);
+    assert.deepEqual(routed._meta?.antigravity?.enabledTools, []);
+    assert.deepEqual(routed._meta?.antigravity?.eagerMcpServers, ["pi-bridge"]);
+    const append = appendOf(routed);
+    assert.ok(append.includes(instructions), "the complete instruction must be carried");
     assert.match(append, /maps to pi_task/);
     assert.match(append, /native tools are disabled/);
-    assert.equal(append.match(/CORE_POLICY/gu)?.length, 1, `${call.name} must not duplicate instructions`);
+    assert.equal(append.match(/CORE_POLICY/gu)?.length, 1, "routing must not duplicate instructions");
+    assert.equal(current._meta, undefined, "the caller's request must not be mutated");
   }
 });
 
-test("installSessionRouting reads the binding's ephemeral kind at session creation", async () => {
-  const calls: SessionRpcRequest[] = [];
-  let kind: "main" | "ephemeral" = "main";
-  const applied: boolean[] = [];
-  const rpc: Record<string, (request: SessionRpcRequest) => Promise<unknown>> = {};
-  for (const name of ["newSession", "loadSession", "resumeSession"]) {
-    rpc[name] = async (routed: SessionRpcRequest) => { calls.push(routed); return { sessionId: "fixture" }; };
-  }
-  installSessionRouting(rpc, Promise.resolve(initialize), "prefer", () => instructions, () => kind, advanced => applied.push(advanced));
-  await rpc.newSession!(request);
-  assert.match(appendOf(calls[0]!), /maps to pi_task/);
-  kind = "ephemeral";
-  await rpc.newSession!(request);
-  const append = appendOf(calls[1]!);
-  assert.match(append, /no tools may be called in this side turn/);
-  assert.doesNotMatch(append, /maps to pi_task/);
-  assert.deepEqual(applied, [true, true]);
+test("disabled routing redirects the host prompt before the complete OMP text", () => {
+  const original: SessionRpcRequest = {
+    ...request,
+    _meta: { antigravity: { extra: "kept", systemPrompt: { append: "Existing host instructions" } } },
+  };
+  const routed = sessionRoutingRequest(original, initialize, "disabled", instructions);
+  const append = appendOf(routed);
+  assert.ok(!append.includes("Existing host instructions"), "inherited append content must not be replayed");
+  assert.ok(append.indexOf("Follow only the OMP instructions below.") < append.indexOf("CORE_POLICY"),
+    "the override must precede the unchanged OMP instruction");
+  assert.match(append, /use only OMP pi_\* tools and pi_task for reads, writes, searches, commands and subagent delegation/);
+  assert.ok(append.indexOf("CORE_POLICY") < append.indexOf("OMP tools exposed by the authenticated pi-bridge"),
+    "existing tool guidance stays after the instruction");
+  assert.equal(routed._meta?.antigravity?.extra, "kept");
+  assert.equal(original._meta?.antigravity?.systemPrompt?.append, "Existing host instructions");
+
+  const preferred = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions));
+  assert.ok(preferred.startsWith(instructions), "prefer keeps the unchanged OMP instruction first");
+  assert.doesNotMatch(preferred, /Follow only the OMP instructions below/);
 });
 
-test("strict compatibility failure never dispatches a session RPC", async () => {
-  let count = 0;
-  const rpc: Record<string, (request: SessionRpcRequest) => Promise<unknown>> = {};
-  for (const name of ["newSession", "loadSession", "resumeSession"]) {
-    rpc[name] = async () => { count++; };
+test("an ephemeral or tool-less session gets only the short ACP override", () => {
+  const ephemeral = sessionRoutingRequest(request, initialize, "disabled", instructions, "ephemeral");
+  const ephemeralAppend = appendOf(ephemeral);
+  assert.ok(ephemeralAppend.startsWith("Follow only the OMP instructions below."));
+  assert.doesNotMatch(ephemeralAppend, /pi_\*|pi_task|subagent delegation/);
+  assert.match(ephemeralAppend, /no tools may be called in this side turn/);
+  assert.match(ephemeralAppend, /native tools are disabled/);
+  assert.ok(ephemeralAppend.indexOf("no tools may be called") < ephemeralAppend.indexOf("native tools are disabled"),
+    "the side-turn guidance stays before the native-disabled warning");
+  assert.deepEqual(ephemeral._meta?.antigravity?.enabledTools, [], "the protocol filter stays exact");
+  assert.deepEqual(ephemeral._meta?.antigravity?.eagerMcpServers, ["pi-bridge"],
+    "the shadow still eagerly connects the catalog bridge");
+
+  const toolLess = sessionRoutingRequest(request, initialize, "disabled", instructions, "main", false);
+  const toolLessAppend = appendOf(toolLess);
+  assert.ok(toolLessAppend.startsWith("Follow only the OMP instructions below."));
+  assert.doesNotMatch(toolLessAppend, /pi_\*|pi_task|subagent delegation/);
+  assert.match(toolLessAppend, /no OMP tools are exposed/);
+  assert.deepEqual(toolLess._meta?.antigravity?.eagerMcpServers, [],
+    "an externally registered empty bridge must not be eagerly connected");
+  assert.deepEqual(toolLess._meta?.antigravity?.enabledTools, []);
+});
+
+interface BaseSessionMethods {
+  initialize: () => Promise<InitializeMetadata>;
+  newSession: (...args: unknown[]) => Promise<{ sessionId: string }>;
+  resumeSession: (...args: unknown[]) => Promise<Record<string, unknown>>;
+  loadSession: (...args: unknown[]) => Promise<Record<string, unknown>>;
+}
+
+test("TierConnection hands each route to the base session method as _meta", async () => {
+  const parent: BaseSessionMethods = Object.getPrototypeOf(TierConnection.prototype);
+  const original = {
+    initialize: parent.initialize, newSession: parent.newSession,
+    resumeSession: parent.resumeSession, loadSession: parent.loadSession,
+  };
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  let advertised: InitializeMetadata = initialize;
+  parent.initialize = async () => advertised;
+  parent.newSession = async (...args) => { calls.push({ method: "newSession", args }); return { sessionId: "routed-new" }; };
+  parent.resumeSession = async (...args) => { calls.push({ method: "resumeSession", args }); return { availableCommands: [] }; };
+  parent.loadSession = async (...args) => { calls.push({ method: "loadSession", args }); return { availableCommands: [] }; };
+  const disabled = new TierConnection({
+    cwd: process.cwd(), command: process.execPath, args: ["-e", "setTimeout(() => {}, 1000)"],
+    handlers: {}, ompNativeTools: "disabled",
+  });
+  const prefer = new TierConnection({
+    cwd: process.cwd(), command: process.execPath, args: ["-e", "setTimeout(() => {}, 1000)"],
+    handlers: {}, ompNativeTools: "prefer",
+  });
+  try {
+    disabled.setOmpSystemInstructions(instructions);
+    const mcpServers = [{ name: "pi-bridge", type: "http" as const, url: "http://127.0.0.1:1" }];
+    await disabled.newSession("/fixture", undefined, mcpServers, { custom: "keep" });
+    assert.equal(disabled.toolRouting?.channel, "system-append");
+    const created = calls[0]!;
+    assert.equal(created.method, "newSession");
+    assert.equal(created.args[0], "/fixture");
+    assert.equal(created.args[1], undefined);
+    assert.deepEqual(created.args[2], mcpServers);
+    const meta = metaOf(created.args);
+    assert.equal(meta.custom, "keep", "caller metadata survives routing");
+    const append = meta.antigravity?.systemPrompt?.append;
+    assert.ok(typeof append === "string", "the routed request must carry a string system append");
+    assert.ok(append.startsWith("Follow only the OMP instructions below."));
+    assert.match(append, /use only OMP pi_\* tools and pi_task/);
+    assert.equal(append.match(/CORE_POLICY/gu)?.length, 1, "routing must not duplicate the instruction");
+    assert.deepEqual(meta.antigravity?.enabledTools, []);
+    assert.deepEqual(meta.antigravity?.eagerMcpServers, ["pi-bridge"]);
+
+    disabled.setOmpSessionKind("ephemeral");
+    await disabled.resumeSession("saved", "/fixture", mcpServers);
+    assert.equal(disabled.toolRouting?.channel, "system-append");
+    const resumed = calls[1]!;
+    assert.equal(resumed.method, "resumeSession");
+    assert.equal(resumed.args[0], "saved");
+    assert.deepEqual(resumed.args[2], mcpServers);
+    assert.equal(resumed.args[3], undefined, "the signal slot must stay positional");
+    const resumedAppend = metaOf(resumed.args).antigravity?.systemPrompt?.append;
+    assert.ok(typeof resumedAppend === "string");
+    assert.ok(resumedAppend.startsWith("Follow only the OMP instructions below."));
+    assert.doesNotMatch(resumedAppend, /pi_task|subagent delegation/);
+    assert.match(resumedAppend, /no tools may be called in this side turn/);
+
+    await disabled.loadSession("saved", "/fixture", mcpServers);
+    assert.equal(calls[2]!.method, "loadSession");
+    assert.equal(calls[2]!.args[0], "saved");
+    assert.equal(calls[2]!.args[3], undefined, "the signal slot must stay positional");
+    assert.match(metaOf(calls[2]!.args).antigravity?.systemPrompt?.append ?? "", /CORE_POLICY/);
+
+    advertised = { agentCapabilities: { mcpCapabilities: { http: true } } };
+    await assert.rejects(disabled.newSession("/fixture", undefined, mcpServers), /refusing to weaken/);
+    assert.equal(calls.length, 3, "an unsupported disabled route must never reach the base method");
+
+    prefer.setOmpSystemInstructions(instructions);
+    await prefer.newSession("/fixture", undefined, [], { custom: "legacy" });
+    assert.equal(prefer.toolRouting?.channel, "legacy-prompt");
+    assert.deepEqual(metaOf(calls[3]!.args), { custom: "legacy" },
+      "an unsupported runtime must not synthesize routing metadata");
+  } finally {
+    parent.initialize = original.initialize;
+    parent.newSession = original.newSession;
+    parent.resumeSession = original.resumeSession;
+    parent.loadSession = original.loadSession;
+    await disabled.close();
+    await prefer.close();
   }
-  installSessionRouting(rpc, Promise.resolve({}), "disabled", () => instructions);
-  await assert.rejects(rpc.newSession!(request), /refusing to weaken/);
-  assert.equal(count, 0);
 });
 
 test("tool policy persists independently and rejects invalid data instead of weakening it", () => {

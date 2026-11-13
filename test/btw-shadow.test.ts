@@ -10,7 +10,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { setImmediate as tick } from "node:timers/promises";
 import { AcpSessionStore, AntigravityRuntime, Type } from "../extension/runtime.mjs";
-import { installSessionRouting } from "../extension/tool-routing.ts";
+import { sessionRoutingRequest } from "../extension/tool-routing.ts";
 import { SessionRuntimePool } from "../extension/runtime-pool.ts";
 import { ownerRoutingId, resolveSessionRoute, sessionOwnerId, sideParentRoutingId } from "../extension/runtime/routing.ts";
 
@@ -110,8 +110,15 @@ async function fixture(options: { store?: boolean; routing?: boolean } = {}) {
         exit.resolve({ code: 0 });
       },
     };
-    // Mirror TierConnection's SDK seam so a routed fixture exercises the real
-    // installSessionRouting contract, including the binding's session kind.
+    // Mirror TierConnection's owned session methods so a routed fixture
+    // exercises the real direct-_meta contract, including the binding's kind.
+    const route = (request: any) => {
+      if (!options.routing) return request;
+      const routed = sessionRoutingRequest(request, initializeResponse, "prefer",
+        connection.systemInstructions, connection.sessionKind ?? "main");
+      connection.toolRouting.channel = routed === request ? "legacy-prompt" : "system-append";
+      return routed;
+    };
     const sdk = {
       async newSession(request: any) {
         connection.id = randomUUID();
@@ -130,16 +137,10 @@ async function fixture(options: { store?: boolean; routing?: boolean } = {}) {
       },
       async loadSession(request: any) { return sdk.resumeSession(request); },
     };
-    if (options.routing) {
-      connection.toolRouting = { nativeTools: "prefer", channel: "pending" };
-      installSessionRouting(sdk, Promise.resolve(initializeResponse), "prefer",
-        () => connection.systemInstructions, () => connection.sessionKind ?? "main", advanced => {
-          connection.toolRouting.channel = advanced ? "system-append" : "legacy-prompt";
-        });
-    }
-    connection.newSession = async (cwd: string, _signal?: AbortSignal, mcpServers: any[] = []) => sdk.newSession({ cwd, mcpServers });
-    connection.resumeSession = async (id: string, cwd: string, mcpServers: any[] = []) => sdk.resumeSession({ sessionId: id, cwd, mcpServers });
-    connection.loadSession = async (id: string, cwd: string, mcpServers: any[] = []) => sdk.loadSession({ sessionId: id, cwd, mcpServers });
+    if (options.routing) connection.toolRouting = { nativeTools: "prefer", channel: "pending" };
+    connection.newSession = async (cwd: string, _signal?: AbortSignal, mcpServers: any[] = []) => sdk.newSession(route({ cwd, mcpServers }));
+    connection.resumeSession = async (id: string, cwd: string, mcpServers: any[] = []) => sdk.resumeSession(route({ sessionId: id, cwd, mcpServers }));
+    connection.loadSession = async (id: string, cwd: string, mcpServers: any[] = []) => sdk.loadSession(route({ sessionId: id, cwd, mcpServers }));
     connection.setOmpSystemInstructions = (text: string) => { connection.systemInstructions = text; };
     connection.setOmpSessionKind = (kind: string) => { connection.sessionKind = kind; };
     connections.push(connection);

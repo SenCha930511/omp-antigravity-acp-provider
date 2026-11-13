@@ -1,8 +1,9 @@
 // OMP-facing seam over the owned ACP connection.
 // OMP effort -> advertised legacy ID -> official model/thought selectors.
-import { AntigravityAcpConnection } from "./runtime/acp/connection.ts";
+import { AntigravityAcpConnection, type SessionMeta } from "./runtime/acp/connection.ts";
+import type { AcpNewSessionResponse, SessionState } from "./runtime/acp/session-state.ts";
 import { choices, resolveSelection, selector } from "./selectors.ts";
-import { installSessionRouting, normalizeInitializeResponse, type NativeToolMode, type SessionRoutingKind } from "./tool-routing.ts";
+import { normalizeInitializeResponse, sessionRoutingRequest, type NativeToolMode, type SessionRpcRequest, type SessionRoutingKind } from "./tool-routing.ts";
 import { showAcpUpdate } from "./activity-presentation.ts";
 import { alignContextTokens, applyCompactionChunk, applyCompactionUpdate, isTerminalCompaction, type AcpCompactionNotice, type AcpCompactionRecord } from "./acp-compaction.ts";
 import { AgentNoticeFilter } from "./agent-notices.ts";
@@ -12,7 +13,7 @@ import type { SessionCleanup } from "./session-cleanup.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import { deferredAbortSignal, isSteerAbort, steerMode as resolveSteerMode, steerTimings as resolveSteerTimings, type SteerMode, type SteerTimings } from "./turn-cancellation.ts";
 import { PermissionIdentityRegistry } from "./permission-identity.ts";
-import type { AvailableCommand } from "@agentclientprotocol/sdk";
+import type { AvailableCommand, McpServer } from "@agentclientprotocol/sdk";
 
 const CONTINUATION_PROMPT = "Continue exactly where your previous output stopped. Do not repeat any earlier text.";
 function continuationLimit(): number {
@@ -144,10 +145,6 @@ export class TierConnection extends AntigravityAcpConnection {
     } });
     if (options.ompNativeTools) {
       this.toolRouting = { nativeTools: options.ompNativeTools, channel: "pending" };
-      installSessionRouting((this as unknown as { connection: unknown }).connection, this.initialized, options.ompNativeTools,
-        () => this.ompSystemInstructions, () => this.ompSessionKind, advanced => {
-        this.toolRouting!.channel = advanced ? "system-append" : "legacy-prompt";
-      });
     }
   }
 
@@ -271,8 +268,25 @@ export class TierConnection extends AntigravityAcpConnection {
     };
   }
 
-  override async newSession(...args: Parameters<AntigravityAcpConnection["newSession"]>) {
-    const session = await super.newSession(...args);
+  // Session routing is computed per call from the same pure builder the tests
+  // exercise, then handed to the base method as the official `_meta` argument.
+  private async sessionMeta(request: SessionRpcRequest): Promise<SessionMeta | undefined> {
+    const routing = this.toolRouting;
+    if (!routing) return request._meta;
+    const routed = sessionRoutingRequest(request, await this.initialize(), routing.nativeTools,
+      this.ompSystemInstructions, this.ompSessionKind);
+    routing.channel = routed === request ? "legacy-prompt" : "system-append";
+    return routed._meta;
+  }
+
+  override async newSession(
+    cwd: string,
+    signal?: AbortSignal,
+    mcpServers: McpServer[] = [],
+    meta?: SessionMeta,
+  ): Promise<AcpNewSessionResponse> {
+    const routed = await this.sessionMeta({ cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) });
+    const session = await super.newSession(cwd, signal, mcpServers, routed);
     if (this.cleanup) {
       try { this.cleanupLeases.set(session.sessionId, await this.cleanup.acquire(session.sessionId, true, this.process.pid!)); }
       catch { this.pendingOwned.add(session.sessionId); console.warn("[ACP cleanup] Registration deferred; preserving session files and retrying."); }
@@ -290,19 +304,33 @@ export class TierConnection extends AntigravityAcpConnection {
       this.cleanupLeases.set(id, await this.cleanup.acquire(id, false, this.process.pid!, 5000));
     }
   }
-  override async resumeSession(...args: Parameters<AntigravityAcpConnection["resumeSession"]>) {
-    await this.protectSession(args[0]);
-    const session = await super.resumeSession(...args);
+  override async resumeSession(
+    sessionId: string,
+    cwd: string,
+    mcpServers: McpServer[] = [],
+    signal?: AbortSignal,
+    meta?: SessionMeta,
+  ): Promise<SessionState> {
+    await this.protectSession(sessionId);
+    const routed = await this.sessionMeta({ sessionId, cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) });
+    const session = await super.resumeSession(sessionId, cwd, mcpServers, signal, routed);
     if ("availableCommands" in session && Array.isArray(session.availableCommands)) {
-      this.updateUsageCommands(args[0], session.availableCommands);
+      this.updateUsageCommands(sessionId, session.availableCommands);
     }
     return session;
   }
-  override async loadSession(...args: Parameters<AntigravityAcpConnection["loadSession"]>) {
-    await this.protectSession(args[0]);
-    const session = await super.loadSession(...args);
+  override async loadSession(
+    sessionId: string,
+    cwd: string,
+    mcpServers: McpServer[] = [],
+    signal?: AbortSignal,
+    meta?: SessionMeta,
+  ): Promise<SessionState> {
+    await this.protectSession(sessionId);
+    const routed = await this.sessionMeta({ sessionId, cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) });
+    const session = await super.loadSession(sessionId, cwd, mcpServers, signal, routed);
     if ("availableCommands" in session && Array.isArray(session.availableCommands)) {
-      this.updateUsageCommands(args[0], session.availableCommands);
+      this.updateUsageCommands(sessionId, session.availableCommands);
     }
     return session;
   }
