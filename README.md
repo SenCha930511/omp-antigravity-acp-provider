@@ -132,7 +132,7 @@ Create or edit `~/.omp/agent/antigravity-acp-provider/config.json`:
 }
 ```
 
-`permissions` accepts `default`, `auto_edit`, or `yolo`. `runtimeSource` accepts `auto`, `cli`, or `managed`. `nativeTools` accepts `prefer` or `disabled`. `usageMode` accepts `auto` or `off`. `debugToolUpdates` and `diagnostics` are booleans. Missing fields use these defaults: `permissions: "yolo"`, `runtimeSource: "auto"`, `nativeTools: "prefer"`, `debugToolUpdates: false`, `usageMode: "off"`, and `diagnostics: false`. Slash commands write the command-backed fields and keep the legacy setting files in sync. Context budgets remain in `context.json`; cleanup policy remains in `cleanup.json`.
+`permissions` accepts `default`, `auto_edit`, or `yolo`. `runtimeSource` accepts `auto`, `cli`, or `managed`. `nativeTools` accepts `prefer` or `disabled`. `usageMode` accepts `auto` or `off`. `debugToolUpdates` and `diagnostics` are config-only booleans. Missing fields use these defaults: `permissions: "yolo"`, `runtimeSource: "auto"`, `nativeTools: "prefer"`, `debugToolUpdates: false`, `usageMode: "off"`, and `diagnostics: false`. Slash commands write the command-backed fields and keep the legacy setting files in sync. Context budgets remain in `context.json`; cleanup policy remains in `cleanup.json`.
 
 - `auto` uses the CLI first and falls back to the managed runtime. If no usable CLI exists, it downloads the managed runtime.
 - `cli` requires a usable `agy` CLI. If the CLI is missing or unusable, the first ACP use fails and nothing is downloaded.
@@ -168,21 +168,19 @@ Use the `/antigravity-acp ` prefix once, followed by a row below. For example, `
 | `account` | Show the signed-in account, ACP authentication and non-secret OMP marker. Token ownership, logout behavior and account/store inconsistencies are not hidden. |
 | `login` | Start a fresh Google authorization. |
 | `logout` | Clear Antigravity credentials, saved sessions and the OMP marker. |
-| `quota` | Query live quota and print one model heading with one remaining/reset row per quota window. Query failures are reported explicitly. |
 | `refresh` | Discover and cache advertised models, then list the refreshed IDs. |
 | `usage` | Show configured → effective supplemental-query mode (`OMP_ACP_USAGE=off` forces `off`) and only populated per-connection context, compaction and accounting details. |
 | `usage auto` | Query supplemental usage after each reply. Context occupancy updates remain enabled. |
 | `usage off` | Skip supplemental queries without disabling context occupancy updates. |
 
-Quota results use a 60-second cache. When the adapter selects the CLI, the quota command runs the CLI's print-mode `/usage` command with the same `--app_data_dir` as the CLI ACP wrapper. When it selects managed ACP, the quota command uses a short-lived ACP session. An explicit `AGY_ACP_BIN` remains authoritative. If an ACP runtime does not advertise `usage`, the adapter reports the limitation without sending a model prompt. The quota display excludes usage counters for temporary ACP sessions.
+Quota results use a 60-second cache. When the adapter selects the CLI, the automatic quota query runs the CLI's print-mode `/usage` command with the same `--app_data_dir` as the CLI ACP wrapper. When it selects managed ACP, the query uses a short-lived ACP session. An explicit `AGY_ACP_BIN` remains authoritative. If an ACP runtime does not advertise `usage`, the adapter reports the limitation without sending a model prompt. Usage counters from temporary ACP sessions are excluded.
 
-OMP's built-in `omp usage`, interactive `/usage`, and the statusline `usage` segment read the same quota through the provider's registered usage source. The adapter uses the CLI `/usage` command first and queries an installed managed runtime only when the user is signed in. A usage probe never downloads a runtime. Statusline selects the active model's limit group when that group maps to one model. Multi-model groups remain visible in `/usage`. The custom `/antigravity-acp quota` command remains the detailed text view.
+OMP's built-in `omp usage`, interactive `/usage`, and the statusline `usage` segment read the same quota through the provider's registered usage source. The adapter uses the CLI `/usage` command first and queries an installed managed runtime only when the user is signed in. A usage probe never downloads a runtime. Statusline selects the active model's limit group when that group maps to one model. Multi-model groups remain visible in `/usage`.
 
 ### Advanced maintenance
 
 | Subcommand and options | Purpose |
 | --- | --- |
-| `tools` | Inspect offered/available OMP tools, every omission reason and live MCP capability checks. |
 | `context` | Show saved shared defaults separately from each cached model's effective limits and model-only overrides. Effective values include the input, output, reserve, transfer and image budgets used by runtime compatibility checks. |
 | `context set default KEY NUMBER` | Change a shared numeric context setting. |
 | `context set MODEL KEY NUMBER` | Change one model override. Reselect the model or restart OMP to refresh its displayed limits. |
@@ -193,10 +191,6 @@ OMP's built-in `omp usage`, interactive `/usage`, and the statusline `usage` seg
 | `cleanup timeout [DAYS]` | Apply timeout collection, optionally with a custom idle retention in days. |
 | `cleanup balanced [DAYS]` | Apply timeout and soft-budget cleanup with recovery protection, optionally with custom idle days. |
 | `cleanup budget MAX_SESSIONS MAX_MIB` | Set soft session/byte limits; `0` disables either limit. Active and recently used sessions can remain above a soft budget. Timeout deletion loses ACP-only state but retains OMP history. |
-| `diagnostics` | Show collection state and non-empty samples as count/median/max per stage. |
-| `diagnostics on\|off` | Enable or disable bounded local timing collection. |
-| `diagnostics reset` | Clear collected samples without changing the enabled state. |
-| `debug on\|off` | Toggle raw ACP tool-status lines; normal tool results and thought summaries are preserved. |
 | `native-tools prefer` | Let OMP tools shadow matching ACP-native tools. |
 | `native-tools disabled` | Disable ACP-native built-ins for strict OMP-tool sessions while retaining MCP configuration; connections are recreated on the next request. |
 | `permissions default` | Confirm edits and commands. |

@@ -240,8 +240,6 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       });
       return connection;
     }, currentPermissionProfile().wireMode, sessionStore);
-    (runtime as { ompQuotaCliPath?: string }).ompQuotaCliPath =
-      selectedLaunchPlan?.quota.kind === "cli" ? selectedLaunchPlan.quota.cliPath : undefined;
     instrumentRuntime(runtime, diagnostics);
     return {
       runtime,
@@ -410,13 +408,12 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   });
 
   pi.registerCommand("antigravity-acp", {
-    description: "Inspect ACP status/account/tools/usage/quota/context/cleanup, manage Antigravity login/logout, configure budgets, toggle debug, refresh models or set tool policies",
+    description: "Inspect ACP status/account/usage/context/cleanup, manage Antigravity login/logout, configure budgets, refresh models or set tool policies",
     handler: createAntigravityCommandHandler({
       configPath,
       contextPath,
       toolPolicyPath,
       cleanup,
-      diagnostics,
       connections,
       auth,
       catalog: catalogStore,
@@ -426,7 +423,6 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       getToolPolicy: () => toolPolicy,
       setToolPolicy: next => { toolPolicy = next; },
       setPermissionModeState: mode => { permissionMode = mode; },
-      getLastToolAudit: () => lastToolAudit,
       getRuntimeForSession: sessionId => runtimes.get(sessionId),
       acquireRuntimeForSession: sessionId => runtimes.acquire(sessionId),
       peekRuntimeForSession: sessionId => runtimes.peek(sessionId),

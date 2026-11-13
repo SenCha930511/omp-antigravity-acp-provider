@@ -6,13 +6,11 @@ import path from "node:path";
 import { createAntigravityArgumentCompletions, createAntigravityCommandHandler, type CommandControllerDeps, type RuntimeBundleView } from "../extension/commands.ts";
 import type { OmpCommandContext } from "../extension/auth-sync.ts";
 import { SessionCleanup } from "../extension/session-cleanup.ts";
-import { Diagnostics } from "../extension/diagnostics.ts";
 import type { TierConnection } from "../extension/tier-connection.ts";
 
 const bundle: RuntimeBundleView = {
   runtime: {
     snapshot: async () => ({ bindings: 0, permissionMode: "yolo", metrics: {}, processes: [] }),
-    quota: async () => { throw new Error("quota fixture not configured"); },
     setPermissionMode: async () => {},
     logout: async () => {},
     close: async () => {},
@@ -43,7 +41,6 @@ function makeHandler() {
     getToolPolicy: () => ({ nativeTools: "prefer", debugToolUpdates: false }),
     setToolPolicy: () => {},
     setPermissionModeState: () => {},
-    getLastToolAudit: () => undefined,
     getRuntimeForSession: () => { runtimeCreates++; return bundle; },
     peekRuntimeForSession: () => undefined,
     getSavedSessionCount: () => 0,
@@ -144,48 +141,22 @@ test("account retains credential-store errors without starting a runtime", async
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
-test("quota reports formatted live groups without ephemeral usage noise while holding and releasing a runtime lease", async () => {
+test("removed quota, tools, diagnostics and debug subcommands reject without a runtime or settings", async () => {
   const fixture = makeHandler();
-  let prepared = 0, released = 0, quotaCalls = 0;
+  let prepared = 0;
   fixture.deps.prepareRuntime = async () => { prepared++; };
-  fixture.deps.acquireRuntimeForSession = () => ({
-    value: {
-      ...bundle,
-      runtime: {
-        ...bundle.runtime,
-        quota: async () => {
-          quotaCalls++;
-          return { at: Date.UTC(2026, 10, 10, 12), groups: [
-            { displayName: "Gemini 4 Argon", buckets: [
-              { window: "5h", remainingFraction: 0.42, resetTime: "2026-11-10T18:30:00.000Z" },
-              { window: "weekly", remainingFraction: 0.75 },
-            ] },
-            { displayName: "Gemini 3.8 Flash", buckets: [] },
-          ] };
-        },
-        snapshot: async () => ({ bindings: 1, permissionMode: "yolo", metrics: { totals: { turns: 3 } }, processes: [] }),
-      },
-    },
-    release: () => { released++; },
-  });
-  await fixture.handler("quota", fixture.ctx);
-  assert.equal(prepared, 1);
-  assert.equal(quotaCalls, 1);
-  assert.equal(released, 1);
-  const report = fixture.notices[0]!;
-  assert.match(report, /^Antigravity quota\n  Gemini 4 Argon\n    5h\s+42% remaining · reset 2026-11-10T18:30:00.000Z\n    weekly\s+75% remaining/);
-  assert.match(report, /  Gemini 3.8 Flash\n    no percentage limits reported/);
-  assert.doesNotMatch(report, /Usage:|\{|\},|displayName|remainingFraction/);
+  for (const input of [
+    "quota", "quota extra",
+    "tools", "tools extra",
+    "diagnostics", "diagnostics on", "diagnostics reset", "diagnostics on extra",
+    "debug", "debug on", "debug off", "debug on extra",
+  ]) {
+    await assert.rejects(fixture.handler(input, fixture.ctx), /Usage: \/antigravity-acp \[status\|account\|/);
+  }
+  assert.equal(prepared, 0, "the removed quota command must not prepare a runtime");
+  assert.deepEqual(fs.readdirSync(fixture.state), [], "Removed commands must not write settings");
+  assert.equal(fixture.notices.length, 0);
   assert.equal(fixture.runtimeCreates(), 0);
-  fs.rmSync(fixture.state, { recursive: true, force: true });
-});
-
-test("quota failures are explicit reports and extra arguments do not prepare a runtime", async () => {
-  const fixture = makeHandler();
-  await fixture.handler("quota", fixture.ctx);
-  assert.match(fixture.notices[0]!, /Antigravity quota\n  Status:\s+unavailable\n  Reason:\s+quota fixture not configured/);
-  await assert.rejects(fixture.handler("quota extra", fixture.ctx), /^Error: Usage: \/antigravity-acp quota$/);
-  assert.equal(fixture.runtimeCreates(), 1, "only the valid quota query creates a runtime");
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
@@ -196,9 +167,8 @@ test("unknown subcommands and stray arguments fail with usage errors, not a runt
   await assert.rejects(fixture.handler("permissions", fixture.ctx), /Usage: \/antigravity-acp permissions/);
   await assert.rejects(fixture.handler("permissions default extra", fixture.ctx), /Usage: \/antigravity-acp permissions/);
   await assert.rejects(fixture.handler("refresh extra", fixture.ctx), /Usage: \/antigravity-acp refresh/);
-  await assert.rejects(fixture.handler("tools extra", fixture.ctx), /Usage: \/antigravity-acp tools/);
   await assert.rejects(fixture.handler("status extra", fixture.ctx), /Usage: \/antigravity-acp \[status\|account\|/);
-  for (const command of ["usage off extra", "debug on extra", "native-tools disabled extra"]) {
+  for (const command of ["usage off extra", "native-tools disabled extra"]) {
     await assert.rejects(fixture.handler(command, fixture.ctx), /Usage: \/antigravity-acp/);
   }
   assert.deepEqual(fs.readdirSync(fixture.state), [], "Invalid commands must not write settings");
@@ -273,7 +243,7 @@ test("permissions and native-tools do not mutate live state or close runtimes if
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
-test("status and tools hold a runtime lease for their snapshot", async () => {
+test("status holds a runtime lease for its snapshot", async () => {
   const fixture = makeHandler();
   let acquired = 0, released = 0;
   fixture.deps.acquireRuntimeForSession = () => {
@@ -281,16 +251,14 @@ test("status and tools hold a runtime lease for their snapshot", async () => {
     return { value: bundle, release: () => { released++; } };
   };
   await fixture.handler("status", fixture.ctx);
-  await fixture.handler("tools", fixture.ctx);
   const lines = fixture.notices[0]!.split("\n");
   assert.equal(lines[0], "Antigravity ACP (OMP adapter)");
   assert.ok(lines.slice(1).every(line => line.startsWith("  ")), "status fields form one indented list");
   assert.match(fixture.notices[0]!, /Permission:\s+requested default → wire yolo/);
   assert.match(fixture.notices[0]!, /Active sessions:\s+0/);
   assert.doesNotMatch(fixture.notices[0]!, /Processes|omittedTools|\{|\}/);
-  assert.equal(fixture.notices[1], "No model request yet. Send a message with this ACP model to inspect its offered OMP tools.");
-  assert.equal(acquired, 2);
-  assert.equal(released, 2);
+  assert.equal(acquired, 1);
+  assert.equal(released, 1);
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
@@ -336,60 +304,6 @@ test("status summarizes live runtime details without process JSON or zero metric
   assert.doesNotMatch(report, /processes|mcpHttp|waitingForTools|\{|\}/);
   assert.equal(acquired, 1);
   assert.equal(released, 1);
-  fs.rmSync(fixture.state, { recursive: true, force: true });
-});
-
-test("tools lists every projected and live tool omission with its reason", async () => {
-  const fixture = makeHandler();
-  let released = 0;
-  fixture.deps.getLastToolAudit = () => ({
-    offered: ["read", "unsupported"],
-    available: ["read"],
-    omitted: [{ name: "unsupported", reason: "Schema contains unsupported union" }],
-  });
-  fixture.deps.acquireRuntimeForSession = () => ({
-    value: {
-      ...bundle,
-      runtime: {
-        ...bundle.runtime,
-        snapshot: async () => ({
-          bindings: 1,
-          permissionMode: "default",
-          metrics: {},
-          processes: [{ key: "runtime-key", mcpHttp: false, omittedTools: [{ name: "live-only", reason: "Agent did not advertise MCP over HTTP" }] }],
-        }),
-      },
-    },
-    release: () => { released++; },
-  });
-  await fixture.handler("tools", fixture.ctx);
-  const report = fixture.notices[0]!;
-  assert.match(report, /Offered:\s+2/);
-  assert.match(report, /Available:\s+read/);
-  assert.match(report, /unsupported:\s+Schema contains unsupported union/);
-  assert.match(report, /MCP over HTTP:\s+no/);
-  assert.match(report, /Omitted live-only:\s+Agent did not advertise MCP over HTTP/);
-  assert.doesNotMatch(report, /"omitted"|omittedTools|\[|\{/);
-  assert.equal(released, 1);
-  fs.rmSync(fixture.state, { recursive: true, force: true });
-});
-
-test("diagnostics prints count, median and max per stage without empty statistics", async () => {
-  const fixture = makeHandler();
-  const diagnostics = new Diagnostics(path.join(fixture.state, "diagnostics.json"));
-  fixture.deps.diagnostics = diagnostics;
-  await fixture.handler("diagnostics", fixture.ctx);
-  assert.match(fixture.notices[0]!, /Collection:\s+off/);
-  assert.doesNotMatch(fixture.notices[0]!, /Samples|stages|\{|\}/);
-  diagnostics.configure(true);
-  diagnostics.record("history.compare", 1.25);
-  diagnostics.record("history.compare", 3.5);
-  await fixture.handler("diagnostics", fixture.ctx);
-  const report = fixture.notices[1]!;
-  assert.match(report, /Collection:\s+on/);
-  assert.match(report, /Samples:\s+2 \/ 128/);
-  assert.match(report, /history\.compare:\s+count 2 · median 3\.5 ms · max 3\.5 ms/);
-  assert.doesNotMatch(report, /"medianMs"|"samples"/);
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
@@ -464,7 +378,7 @@ test("argument completions list every subcommand and stay in sync with the handl
   const all = items("");
   const labels = all.map(item => item.label);
   assert.deepEqual(labels,
-    ["status", "account", "login", "logout", "tools", "usage", "quota", "context", "cleanup", "diagnostics", "debug", "native-tools", "permissions", "refresh"]);
+    ["status", "account", "login", "logout", "usage", "context", "cleanup", "native-tools", "permissions", "refresh"]);
   for (const item of all) {
     assert.equal(item.value, `${item.label} `);
     assert.ok(item.description.length > 0);
@@ -490,8 +404,6 @@ test("argument completions filter by prefix, ignore case, and chain fixed values
   assert.equal(items("CLEANUP b")[0]!.value, "cleanup balanced ");
   assert.deepEqual(items("usage a").map(item => item.label), ["auto"]);
   assert.equal(items("usage a")[0]!.value, "usage auto ");
-  assert.deepEqual(items("diagnostics res").map(item => item.label), ["reset"]);
-  assert.deepEqual(items("debug o").map(item => item.label), ["on", "off"]);
   assert.deepEqual(items("native-tools p").map(item => item.label), ["prefer"]);
   assert.deepEqual(items("permissions auto-e").map(item => item.label), ["auto-edit"]);
   assert.deepEqual(items("permissions y").map(item => item.label), ["yolo"]);
@@ -499,6 +411,9 @@ test("argument completions filter by prefix, ignore case, and chain fixed values
   assert.equal(complete("status x"), null);
   assert.equal(complete("refresh "), null);
   assert.equal(complete("login x"), null);
+  for (const removed of ["quota", "tools", "diagnostics", "debug"]) {
+    assert.equal(complete(removed), null, `${removed} is no longer a subcommand`);
+  }
   assert.equal(complete(" "), null);
 });
 

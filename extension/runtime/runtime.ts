@@ -35,7 +35,7 @@ import {
 } from "./acp/antigravity.ts";
 import { AntigravityAcpConnection, type AntigravityConnectionOptions } from "./acp/connection.ts";
 import { abortError, AntigravityAcpError, errorMessage } from "./acp/errors.ts";
-import { fetchCliQuota, parseUsageQuota, quotaExhaustion, type AntigravityQuotaSnapshot } from "../usage-accounting.ts";
+import { parseUsageQuota, quotaExhaustion, type AntigravityQuotaSnapshot } from "../usage-accounting.ts";
 import { AcpSessionStore } from "../session-store.ts";
 import { sessionModels, sessionModes, type AcpModelInfo, type AcpNewSessionResponse, type SessionState } from "./acp/session-state.ts";
 import {
@@ -153,8 +153,8 @@ interface Binding {
 	restored: boolean;
 }
 
-// TierConnection decorates the SDK session RPC seam with the OMP instruction
-// channel. The base connection type stays unaware of that adapter-only seam.
+// TierConnection computes routing metadata for the owned connection's session
+// methods. The owned base connection forwards it through standard ACP requests.
 interface OmpRoutedConnection {
 	toolRouting?: { nativeTools: NativeToolMode; channel: "pending" | "system-append" | "legacy-prompt" };
 	setOmpSystemInstructions?: (text: string) => void;
@@ -321,7 +321,6 @@ export class AntigravityRuntime {
 	private readonly metrics = new RuntimeMetrics();
 	private permissionMode: PermissionMode;
 	private readonly ompRelayThresholdMs: number | undefined;
-	ompQuotaCliPath: string | undefined;
 	private quotaCache: AntigravityQuotaSnapshot | undefined;
 	private quotaCacheOwner: string | undefined;
 	private readonly quotaInFlights = new Set<OmpQuotaRequest>();
@@ -428,10 +427,6 @@ export class AntigravityRuntime {
 	private async ompFetchQuota(apiKey: string | undefined, signal: AbortSignal): Promise<AntigravityQuotaSnapshot> {
 		this.assertActive();
 		const epoch = this.bindingEpoch;
-		if (this.ompQuotaCliPath) {
-			if (signal.aborted) throw abortError();
-			return fetchCliQuota(this.ompQuotaCliPath, signal);
-		}
 		if (this.ensureAgent) await ensureAntigravityAcpReady();
 		if (signal.aborted) throw abortError();
 		this.assertEpoch(epoch);

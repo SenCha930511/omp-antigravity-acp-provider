@@ -14,29 +14,45 @@ import { Type } from "../extension/runtime.mjs";
 
 test("actual OMP wrapper refreshes tool audit for same-array additions/removals and schema/name edits", async () => {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tools-mutable-"));
-  const hooks = new Map<string, Function>(), notices: string[] = [];
-  let provider: any, command: any;
+  const hooks = new Map<string, Function>(), traces: string[] = [];
+  const originalError = console.error, previousTrace = process.env.OMP_ACP_TRACE;
+  let provider: any;
   try {
+    process.env.OMP_ACP_TRACE = "1";
+    // The wrapper publishes the audit it actually used through its trace line.
+    console.error = (...args: unknown[]) => {
+      if (args[0] === "[ACP tools]" && typeof args[1] === "string") traces.push(args[1]);
+    };
     await registerOmpAdapter({ on: (name: string, fn: Function) => hooks.set(name, fn), registerTool() {},
       registerProvider: (_name: string, value: any) => { provider = value; },
-      registerCommand: (_name: string, value: any) => { command = value; } }, state);
+      registerCommand() {} }, state);
     assert.equal(provider.usage?.id, "antigravity-acp");
     assert.equal(typeof provider.usage?.fetchUsage, "function");
     const tools: any[] = [{ name: "read", description: "read", parameters: Type.Object({ path: Type.String() }) }];
-    async function audit() {
+    async function audit(): Promise<{ offered: string[]; available: string[]; omitted: Array<{ name: string; reason: string }> }> {
       // Abort before startup: exercises real tool projection, but never spawns
       // ACP, reads credentials or sends a model request.
       for await (const _ of provider.streamSimple(provider.models[0], { messages: [{ role: "user", content: "synthetic", timestamp: 1 }], tools }, { signal: AbortSignal.abort() })) {}
-      await command.handler("tools", { ui: { notify: (s: string) => notices.push(s) } });
-      return notices.pop()!;
+      const trace = traces.pop();
+      assert.ok(trace, "the wrapper must publish the tool audit it used");
+      return JSON.parse(trace);
     }
-    assert.match(await audit(), /Available: read/);
+    assert.deepEqual((await audit()).available, ["read"]);
     tools.push({ name: "bash", parameters: Type.Object({ cmd: Type.String() }) });
-    assert.match(await audit(), /Available: read, bash/);
-    tools.splice(0, 1); assert.match(await audit(), /Available: bash(?:\n|$)/);
-    tools[0].name = "renamed"; assert.match(await audit(), /Available: renamed/);
-    tools[0].parameters.type = "array"; assert.match(await audit(), /schema omitted/);
-  } finally { await hooks.get("session_shutdown")?.({}, {}); await fs.rm(state, { recursive: true, force: true }); }
+    assert.deepEqual((await audit()).available, ["read", "bash"]);
+    tools.splice(0, 1); assert.deepEqual((await audit()).available, ["bash"]);
+    tools[0].name = "renamed"; assert.deepEqual((await audit()).available, ["renamed"]);
+    tools[0].parameters.type = "array";
+    const omitted = (await audit()).omitted;
+    assert.deepEqual(omitted.map(tool => tool.name), ["renamed"]);
+    assert.match(omitted[0]!.reason, /schema omitted/);
+  } finally {
+    console.error = originalError;
+    if (previousTrace === undefined) delete process.env.OMP_ACP_TRACE;
+    else process.env.OMP_ACP_TRACE = previousTrace;
+    await hooks.get("session_shutdown")?.({}, {});
+    await fs.rm(state, { recursive: true, force: true });
+  }
 });
 
 test("inference refuses to start ACP when the local Google login is absent", async () => {
