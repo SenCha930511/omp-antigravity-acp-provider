@@ -280,12 +280,12 @@ function cliWrapperPath(stateDir: string, platform: NodeJS.Platform): string {
 function cliWrapperScript(agyPath: string, platform: NodeJS.Platform = process.platform): string {
   if (platform === "win32") {
     const escaped = agyPath.replace(/%/g, "%%");
-    return `@echo off\r\nsetlocal\r\nset "OMP_ACP_EXTRA="\r\nif "%OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS%"=="1" set "OMP_ACP_EXTRA=--dangerously-skip-permissions"\r\n"${escaped}" acp --app_data_dir=antigravity-acp %OMP_ACP_EXTRA% %*\r\nexit /b %ERRORLEVEL%\r\n`;
+    return `@echo off\r\nsetlocal\r\nset "OMP_ACP_EXTRA="\r\nif "%OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS%"=="1" set "OMP_ACP_EXTRA=--dangerously-skip-permissions"\r\nif not defined OMP_ACP_AGENT goto launch\r\nsetlocal EnableDelayedExpansion\r\nif not "!OMP_ACP_AGENT!"=="" goto launch_with_agent\r\nendlocal\r\ngoto launch\r\n:launch_with_agent\r\n"${escaped}" acp --app_data_dir=antigravity-acp --agent "!OMP_ACP_AGENT!" %OMP_ACP_EXTRA% %*\r\nexit /b %ERRORLEVEL%\r\n:launch\r\n"${escaped}" acp --app_data_dir=antigravity-acp %OMP_ACP_EXTRA% %*\r\nexit /b %ERRORLEVEL%\r\n`;
   }
   // --app_data_dir=antigravity-acp is the managed .par's own default: the CLI
   // binary would otherwise default to antigravity-cli, mixing ACP sessions
   // with personal CLI chats outside session cleanup's tracked tree.
-  return `#!/bin/sh\nif [ "\${OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS:-}" = "1" ]; then\n  set -- --dangerously-skip-permissions "$@"\nfi\nexec '${agyPath.replace(/'/g, "'\\''")}' acp --app_data_dir=antigravity-acp "$@"\n`;
+  return `#!/bin/sh\nif [ "\${OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS:-}" = "1" ]; then\n  set -- --dangerously-skip-permissions "$@"\nfi\nif [ -n "\${OMP_ACP_AGENT:-}" ]; then\n  set -- --agent "$OMP_ACP_AGENT" "$@"\nfi\nexec '${agyPath.replace(/'/g, "'\\''")}' acp --app_data_dir=antigravity-acp "$@"\n`;
 }
 
 function writeCliWrapper(file: string, agyPath: string, platform: NodeJS.Platform = process.platform): void {

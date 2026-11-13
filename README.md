@@ -117,6 +117,8 @@ Selection order:
 
 The adapter never installs the `agy` CLI. It downloads the managed runtime only in `auto` when no usable CLI is selected. Inference and quota use the same selection.
 
+`OMP_ACP_AGENT` sets a process-wide default agent for new CLI-launched ACP sessions. Set it before creating a new OMP session. Unset or empty preserves the default agy agent. Changing it requires a new OMP session. Restarting OMP and resuming an old conversation is not enough because agy retains the original agent on resumed conversations. The variable does not provide per-subagent dynamic selection. For custom agents, agy controls command availability. An explicit non-wrapper `AGY_ACP_BIN` override and the managed runtime do not consume this variable.
+
 On the first session start after OMP launches, the adapter attempts one background model refresh. A successful refresh re-registers the provider so newly advertised models and their API-equivalent rates become available. If login or ACP startup fails, the cached catalog remains usable and `/antigravity-acp refresh` still forces a refresh.
 
 Create or edit `~/.omp/agent/antigravity-acp-provider/config.json`:

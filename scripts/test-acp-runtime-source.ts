@@ -95,17 +95,22 @@ function setRuntimeSource(stateDir: string, runtimeSource: string): void {
   assert.equal(resolveAcpPermissionProfile(repeated, "yolo").wireMode, "default");
   assert.equal(resolveAcpPermissionProfile(repeated, "yolo").autoApproveProcess, true);
 
-  for (const marker of ["1", "0", undefined, ""]) {
-    const childEnv = freshEnv();
-    if (marker !== undefined) childEnv.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS = marker;
-    fs.rmSync(argvRecord, { force: true });
-    const result = spawnSync(wrapper, ["--fixture-argument"], { env: childEnv, encoding: "utf8" });
-    assert.equal(result.status, 0, result.stderr);
-    const argv = fs.readFileSync(argvRecord, "utf8").trimEnd().split("\n");
-    assert.equal(argv.filter(value => value === "--dangerously-skip-permissions").length, marker === "1" ? 1 : 0,
-      `dangerous flag count with marker ${JSON.stringify(marker)}`);
-    assert.deepEqual(argv.slice(0, 2), ["acp", "--app_data_dir=antigravity-acp"]);
-    assert.equal(argv.at(-1), "--fixture-argument");
+  for (const agent of [undefined, "", "code-reviewer", "agent with spaces"]) {
+    for (const marker of ["1", "0", undefined, ""]) {
+      const childEnv = freshEnv();
+      if (agent !== undefined) childEnv.OMP_ACP_AGENT = agent;
+      if (marker !== undefined) childEnv.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS = marker;
+      fs.rmSync(argvRecord, { force: true });
+      const result = spawnSync(wrapper, ["--fixture-argument"], { env: childEnv, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      const argv = fs.readFileSync(argvRecord, "utf8").trimEnd().split("\n");
+      const expected = ["acp", "--app_data_dir=antigravity-acp"];
+      if (agent) expected.push("--agent", agent);
+      if (marker === "1") expected.push("--dangerously-skip-permissions");
+      expected.push("--fixture-argument");
+      assert.deepEqual(argv, expected,
+        `argv with agent ${JSON.stringify(agent)} and marker ${JSON.stringify(marker)}`);
+    }
   }
   assert.doesNotThrow(() => assertSelectedAcpCliLaunch(stateDir, preference, env));
   assert.throws(() => assertSelectedAcpCliLaunch(stateDir, preference, { ...env, AGY_ACP_BIN: "/usr/bin/false" }), /not selected by AGY_ACP_BIN/);
@@ -284,7 +289,9 @@ if (process.platform !== "win32") {
   const script = fs.readFileSync(wrapper, "utf8");
   assert.match(script, /^@echo off\r\n/);
   assert.match(script, /acp --app_data_dir=antigravity-acp/);
-  assert.match(script, /if "%OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS%"=="1" set "OMP_ACP_EXTRA=--dangerously-skip-permissions"/);
+  assert.match(script, /if not defined OMP_ACP_AGENT goto launch\r\nsetlocal EnableDelayedExpansion\r\nif not "!OMP_ACP_AGENT!"=="" goto launch_with_agent\r\nendlocal\r\ngoto launch\r\n:launch_with_agent\r\n/);
+  assert.match(script, /--agent "!OMP_ACP_AGENT!" %OMP_ACP_EXTRA% %\*\r\n/);
+  assert.doesNotMatch(script, /%OMP_ACP_AGENT%/);
   assert.doesNotMatch(script, /if defined[^\r\n]*\(/);
   assert.doesNotThrow(() => assertSelectedAcpCliLaunch(stateDir, preference, env, "win32"));
   assert.throws(() => assertSelectedAcpCliLaunch(stateDir, preference, env, "linux"), /wrapper is missing, changed/);
