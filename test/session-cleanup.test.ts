@@ -5,6 +5,8 @@ import afs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { SessionCleanup, saveCleanupPolicy } from "../extension/session-cleanup.ts";
 import { AcpSessionStore } from "../extension/session-store.ts";
 import { findSources } from "../extension/omp-session-source.ts";
@@ -294,6 +296,43 @@ test("malformed mappings block deletion and asynchronous directory inspection yi
   for (let i = 0; i < 100; i++) fs.writeFileSync(path.join(f.acp, "brain", id, String(i)), "fixture");
   let tick = false; const timer = setTimeout(() => { tick = true; }, 0);
   assert.equal(await f.cleaner.collect(), 1); clearTimeout(timer); assert.equal(tick, true);
+});
+
+test("a competing process acquires its lease while cleanup is still walking session sizes", async t => {
+  const f = fixture(t), id = f.session();
+  saveCleanupPolicy(f.cleaner.policyPath, { mode: "off", idleDays: 7 });
+  await f.cleaner.release(await f.cleaner.acquire(id, true, 987654));
+  type Inspection = { inspect(file: string): Promise<number> };
+  const internal = f.cleaner as unknown as Inspection, inspect = internal.inspect;
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+  internal.inspect = async file => { entered.resolve(); await gate.promise; return inspect.call(f.cleaner, file); };
+  const collected = f.cleaner.collect();
+  await entered.promise;
+  // The child shares only the registry file: it has its own module state, so it
+  // contends like another OMP process instead of queueing on this process's
+  // transaction chain.
+  const peer = spawn("bun", [path.resolve("test/fixtures/cleanup-peer-acquire.ts"), path.join(f.root, "state"), f.acp, id],
+    { stdio: ["ignore", "pipe", "pipe"] });
+  const exited = once(peer, "exit");
+  let lease = "", failure = "";
+  peer.stdout.setEncoding("utf8").on("data", (chunk: string) => { lease += chunk; });
+  peer.stderr.setEncoding("utf8").on("data", (chunk: string) => { failure += chunk; });
+  let token: string | undefined;
+  try {
+    await exited;
+    assert.equal(peer.exitCode, 0, `peer acquire failed with ${lease.trim() || failure.trim()}`);
+    token = lease.trim();
+    assert.match(token, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i, "the peer holds a real lease");
+    const state = path.join(f.root, "state");
+    const registry = path.join(state, fs.readdirSync(state).find(name => name.startsWith("cleanup-sessions-"))!);
+    assert.match(fs.readFileSync(registry, "utf8"), new RegExp(token), "the lease is persisted at the registry path while traversal stays blocked");
+  } finally {
+    gate.resolve();
+    await collected;
+    if (peer.exitCode === null && peer.signalCode === null) peer.kill("SIGKILL");
+    await exited.catch(() => {});
+    if (token) await f.cleaner.release(token);
+  }
 });
 
 test("malformed individual mapping records preserve every cleanup candidate", async t => {
