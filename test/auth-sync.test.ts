@@ -6,14 +6,23 @@ import path from "node:path";
 import {
   MARKER,
   OmpAuthCoordinator,
+  authReady,
   createKeychain,
+  formatLogoutSummary,
+  inspectAcpAuth,
   keychain,
   logoutFollow,
   runSecurity,
+  secretService,
   type OmpCommandContext,
 } from "../extension/auth-sync.ts";
 
 const settle = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+// These tests exercise the macOS keychain path on every host. Keep the Linux
+// Secret Service probe away from the real user keyring unless a test opts in.
+const noSecretService = async () => undefined;
+secretService.present = noSecretService;
+secretService.remove = noSecretService;
 const NOT_FOUND_STDERR = "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.";
 
 interface AuthFixture {
@@ -146,26 +155,299 @@ test("durable removal fails closed and fresh login refuses", async () => {
   process.env.GEMINI_HOME = home;
   const originalPresent = keychain.present;
   const originalRemove = keychain.remove;
+  const originalRetryMs = logoutFollow.removalRetryMs;
   keychain.present = async () => true;
   keychain.remove = async () => true;
+  logoutFollow.removalRetryMs = 0;
   try {
-    const coordinator = new OmpAuthCoordinator({
-      pi: { on: () => {} },
-      connections: new Set(),
-      isPoolBusy: () => false,
-      logoutAllRuntimes: async () => {},
-      closeAllRuntimes: async () => {},
-      onSyncProvider: () => {},
-    });
-    assert.equal(await coordinator.removeKeychainCredentialDurably(), false,
+    const fixture = authCoordinatorFixture();
+    const result = await fixture.coordinator.performCommandLogout(fixture.ctx);
+    assert.equal(result.keychainRemoved, false,
       "three unverified rounds must report failure, not success");
-    await assert.rejects(coordinator.beginFreshGoogleLogin(),
-      /Unable to confirm removal of the Antigravity keychain entry/);
+    assert.equal(result.keyringRemoved, undefined, "no Linux keyring applies to this host");
+    await assert.rejects(fixture.coordinator.beginFreshGoogleLogin(),
+      /Unable to confirm removal of the Antigravity/);
   } finally {
     keychain.present = originalPresent;
     keychain.remove = originalRemove;
+    logoutFollow.removalRetryMs = originalRetryMs;
     if (savedHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = savedHome;
     await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+// The Linux Secret Service item is a complete local login: the ACP server reads
+// it before its file store, so no acp_token.json exists to inspect.
+test("a keyring login is oauth-refreshable when no token file exists", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-keyring-"));
+  const savedHome = process.env.GEMINI_HOME;
+  const savedKey = process.env.GEMINI_API_KEY;
+  const originalKeychainPresent = keychain.present;
+  let secretCalls = 0;
+  process.env.GEMINI_HOME = home;
+  delete process.env.GEMINI_API_KEY;
+  keychain.present = async () => undefined;
+  secretService.present = async () => { secretCalls++; return true; };
+  try {
+    const auth = await inspectAcpAuth();
+    assert.equal(auth.status, "oauth-refreshable");
+    assert.equal(auth.authType, "oauth-personal");
+    assert.equal(auth.keyring, true);
+    assert.equal(auth.tokenFile, false);
+    assert.equal(auth.settingsFile, false);
+    assert.equal(await authReady(), true);
+    assert.ok(secretCalls > 0, "only the injected keyring runner may be probed");
+    await assert.rejects(fs.access(path.join(home, "antigravity-acp", "acp_token.json")));
+    assert.deepEqual(await fs.readdir(home), [], "the isolated store stays untouched");
+    assert.equal(process.env.GEMINI_HOME, home);
+    // An explicit auth type in the settings file survives the keyring fallback.
+    await fs.mkdir(path.join(home, "antigravity-acp"), { recursive: true });
+    await fs.writeFile(path.join(home, "antigravity-acp", "settings.json"),
+      JSON.stringify({ auth: { type: "oauth-enterprise" } }));
+    const typed = await inspectAcpAuth();
+    assert.equal(typed.status, "oauth-refreshable");
+    assert.equal(typed.authType, "oauth-enterprise");
+    assert.equal(typed.settingsFile, true);
+    assert.equal(typed.keyring, true);
+  } finally {
+    keychain.present = originalKeychainPresent;
+    secretService.present = noSecretService;
+    if (savedHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = savedHome;
+    if (savedKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = savedKey;
+    await fs.rm(home, { recursive: true, force: true });
+  }
+  assert.equal(process.env.GEMINI_HOME, savedHome);
+  assert.equal(process.env.GEMINI_API_KEY, savedKey);
+});
+
+test("an absent keyring item stays missing and not ready", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-keyring-"));
+  const savedHome = process.env.GEMINI_HOME;
+  const savedKey = process.env.GEMINI_API_KEY;
+  const originalKeychainPresent = keychain.present;
+  process.env.GEMINI_HOME = home;
+  delete process.env.GEMINI_API_KEY;
+  keychain.present = async () => undefined;
+  secretService.present = async () => false;
+  try {
+    const auth = await inspectAcpAuth();
+    assert.equal(auth.status, "missing");
+    assert.equal(auth.keyring, undefined);
+    assert.equal(auth.tokenFile, false);
+    assert.equal(await authReady(), false);
+  } finally {
+    keychain.present = originalKeychainPresent;
+    secretService.present = noSecretService;
+    if (savedHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = savedHome;
+    if (savedKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = savedKey;
+    await fs.rm(home, { recursive: true, force: true });
+  }
+  assert.equal(process.env.GEMINI_HOME, savedHome);
+  assert.equal(process.env.GEMINI_API_KEY, savedKey);
+});
+
+test("api-key and token-file logins keep priority over the keyring", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-keyring-"));
+  const savedHome = process.env.GEMINI_HOME;
+  const savedKey = process.env.GEMINI_API_KEY;
+  let secretCalls = 0;
+  process.env.GEMINI_HOME = home;
+  process.env.GEMINI_API_KEY = "synthetic-api-key";
+  secretService.present = async () => { secretCalls++; return true; };
+  try {
+    const apiKey = await inspectAcpAuth();
+    assert.equal(apiKey.status, "api-key-env");
+    assert.equal(apiKey.authType, "gemini-api-key");
+    assert.equal(apiKey.keyring, undefined);
+    delete process.env.GEMINI_API_KEY;
+    await fs.mkdir(path.join(home, "antigravity-acp"), { recursive: true });
+    await fs.writeFile(path.join(home, "antigravity-acp", "acp_token.json"),
+      JSON.stringify({ refresh_token: "synthetic-refresh-token" }));
+    const file = await inspectAcpAuth();
+    assert.equal(file.status, "oauth-refreshable");
+    assert.equal(file.tokenFile, true);
+    assert.equal(file.keyring, undefined);
+    assert.equal(await authReady(), true);
+    assert.equal(secretCalls, 0, "the keyring is only consulted when the file store is missing");
+  } finally {
+    secretService.present = noSecretService;
+    if (savedHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = savedHome;
+    if (savedKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = savedKey;
+    await fs.rm(home, { recursive: true, force: true });
+  }
+  assert.equal(process.env.GEMINI_HOME, savedHome);
+  assert.equal(process.env.GEMINI_API_KEY, savedKey);
+});
+
+test("fresh login clears a present keyring entry only after runtime shutdown", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-keyring-"));
+  const savedHome = process.env.GEMINI_HOME;
+  const originalKeychainPresent = keychain.present;
+  const originalKeychainRemove = keychain.remove;
+  const originalSecretRemove = secretService.remove;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  const order: string[] = [];
+  let present = true, keyringRemoves = 0, keychainRemoves = 0, closed = false;
+  process.env.GEMINI_HOME = home;
+  logoutFollow.removalRetryMs = 0;
+  keychain.present = async () => undefined;
+  keychain.remove = async () => { keychainRemoves++; return undefined; };
+  secretService.present = async () => present;
+  secretService.remove = async () => {
+    assert.equal(closed, true, "adapter runtimes must exit before the keyring is cleared");
+    keyringRemoves++;
+    order.push("keyring-remove");
+    present = false;
+    return true;
+  };
+  try {
+    const fixture = authCoordinatorFixture({
+      logoutAllRuntimes: async () => { order.push("logout"); },
+      closeAllRuntimes: async () => { order.push("close"); closed = true; },
+    });
+    const result = await fixture.coordinator.performCommandLogout(fixture.ctx);
+    assert.equal(result.keyringRemoved, true);
+    assert.equal(result.keychainRemoved, undefined, "the macOS keychain does not apply here");
+    assert.equal(result.ompMarker, "absent");
+    assert.equal(keyringRemoves, 1);
+    assert.equal(keychainRemoves, 0);
+    assert.ok(order.indexOf("logout") < order.indexOf("keyring-remove"), JSON.stringify(order));
+    assert.ok(order.indexOf("close") < order.indexOf("keyring-remove"), JSON.stringify(order));
+    // A second fresh login finds the entry gone and must not remove it again.
+    await fixture.coordinator.beginFreshGoogleLogin();
+    assert.equal(keyringRemoves, 1, "an absent keyring entry is not removed again");
+  } finally {
+    keychain.present = originalKeychainPresent;
+    keychain.remove = originalKeychainRemove;
+    secretService.present = noSecretService;
+    secretService.remove = originalSecretRemove;
+    logoutFollow.removalRetryMs = originalRetryMs;
+    if (savedHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = savedHome;
+    await fs.rm(home, { recursive: true, force: true });
+  }
+  assert.equal(process.env.GEMINI_HOME, savedHome);
+});
+
+test("a keyring entry that survives removal refuses a fresh login", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-keyring-"));
+  const savedHome = process.env.GEMINI_HOME;
+  const originalKeychainPresent = keychain.present;
+  const originalSecretRemove = secretService.remove;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  let removes = 0;
+  process.env.GEMINI_HOME = home;
+  logoutFollow.removalRetryMs = 0;
+  keychain.present = async () => undefined;
+  // The removal claims success but a dying server flushes the item back.
+  secretService.present = async () => true;
+  secretService.remove = async () => { removes++; return true; };
+  try {
+    const fixture = authCoordinatorFixture();
+    const result = await fixture.coordinator.performCommandLogout(fixture.ctx);
+    assert.equal(result.keyringRemoved, false, "a still-present entry must never certify removal");
+    assert.ok(removes >= 2, "removal is verified across repeated attempts");
+    const beforeLogin = removes;
+    await assert.rejects(fixture.coordinator.beginFreshGoogleLogin(), (error: Error) => {
+      assert.match(error.message, /Unable to confirm removal of the Antigravity/);
+      assert.doesNotMatch(error.message, /synthetic|refresh_token|token=/);
+      return true;
+    });
+    assert.ok(removes > beforeLogin, "the refused login re-checks instead of trusting the old result");
+  } finally {
+    keychain.present = originalKeychainPresent;
+    secretService.present = noSecretService;
+    secretService.remove = originalSecretRemove;
+    logoutFollow.removalRetryMs = originalRetryMs;
+    if (savedHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = savedHome;
+    await fs.rm(home, { recursive: true, force: true });
+  }
+  assert.equal(process.env.GEMINI_HOME, savedHome);
+});
+
+test("a failing keyring removal cannot certify a fresh login", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-keyring-"));
+  const savedHome = process.env.GEMINI_HOME;
+  const originalKeychainPresent = keychain.present;
+  const originalSecretRemove = secretService.remove;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  process.env.GEMINI_HOME = home;
+  logoutFollow.removalRetryMs = 0;
+  keychain.present = async () => undefined;
+  secretService.present = async () => true;
+  secretService.remove = async () => { throw new Error("Unable to remove the Antigravity keyring entry"); };
+  try {
+    const fixture = authCoordinatorFixture();
+    // A failing removal may surface as a rejection or as an unconfirmed
+    // result; neither may be reported as a completed logout.
+    const logout = await fixture.coordinator.performCommandLogout(fixture.ctx).then(
+      (result: { keyringRemoved?: boolean }) => ({ result }),
+      (error: Error) => ({ error }),
+    );
+    if ("error" in logout) assert.match(logout.error.message, /Unable to (?:remove|confirm)/);
+    else assert.equal(logout.result.keyringRemoved, false, "a failed removal must not report success");
+    await assert.rejects(fixture.coordinator.beginFreshGoogleLogin(), (error: Error) => {
+      assert.match(error.message, /Unable to (?:remove|confirm)/);
+      assert.doesNotMatch(error.message, /synthetic|refresh_token|token=/);
+      return true;
+    });
+  } finally {
+    keychain.present = originalKeychainPresent;
+    secretService.present = noSecretService;
+    secretService.remove = originalSecretRemove;
+    logoutFollow.removalRetryMs = originalRetryMs;
+    if (savedHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = savedHome;
+    await fs.rm(home, { recursive: true, force: true });
+  }
+  assert.equal(process.env.GEMINI_HOME, savedHome);
+});
+
+test("the logout summary names the system keyring without exposing a token", () => {
+  const both = formatLogoutSummary({ keychainRemoved: true, keyringRemoved: true, ompMarker: "removed" });
+  assert.match(both,
+    /Google credentials, saved ACP sessions, the macOS keychain entry, the system keyring entry and the OMP marker record cleared/);
+  assert.doesNotMatch(both, /token|secret|refresh/i);
+  assert.match(formatLogoutSummary({ keychainRemoved: undefined, keyringRemoved: false }),
+    /The system keyring entry was not present or not removable/);
+  assert.doesNotMatch(formatLogoutSummary({ keychainRemoved: false, keyringRemoved: undefined }),
+    /system keyring/, "an inapplicable keyring stays out of the macOS summary");
+});
+
+test("the followed logout clears the keyring with the keychain and marker", async () => {
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  const originalSecretRemove = secretService.remove;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  let keychainEntry = true, keychainRemoves = 0, keyringEntry = true, keyringRemoves = 0;
+  keychain.present = async () => keychainEntry;
+  keychain.remove = async () => { keychainRemoves++; keychainEntry = false; return true; };
+  secretService.present = async () => keyringEntry;
+  secretService.remove = async () => { keyringRemoves++; keyringEntry = false; return true; };
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  try {
+    const fixture = authCoordinatorFixture();
+    fixture.coordinator.watchOmpCredentials(fixture.ctx);
+    fixture.storeMarker();
+    fixture.removeMarker();
+    await settle(40);
+    const followed = fixture.followedNotices();
+    assert.equal(followed.length, 1, "exactly one followed logout");
+    assert.match(followed[0]!,
+      /the macOS keychain entry and the system keyring entry cleared/);
+    assert.equal(keychainRemoves, 1);
+    assert.equal(keyringRemoves, 1);
+    assert.equal(keychainEntry, false);
+    assert.equal(keyringEntry, false);
+    await settle(40);
+    assert.equal(fixture.followedNotices().length, 1, "no duplicate follow-up logout");
+  } finally {
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    secretService.present = noSecretService;
+    secretService.remove = originalSecretRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
   }
 });
 

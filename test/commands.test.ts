@@ -4,9 +4,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createAntigravityArgumentCompletions, createAntigravityCommandHandler, type CommandControllerDeps, type RuntimeBundleView } from "../extension/commands.ts";
-import type { OmpCommandContext } from "../extension/auth-sync.ts";
+import { keychain, secretService, type OmpCommandContext } from "../extension/auth-sync.ts";
 import { SessionCleanup } from "../extension/session-cleanup.ts";
 import type { TierConnection } from "../extension/tier-connection.ts";
+
+// These command paths report credential state without a live runtime. Keep the
+// Linux Secret Service probe away from the real user keyring unless a test
+// opts in; the default "not applicable" result matches the macOS keychain stub.
+const noSecretService = async () => undefined;
+secretService.present = noSecretService;
+secretService.remove = noSecretService;
 
 const bundle: RuntimeBundleView = {
   runtime: {
@@ -139,6 +146,63 @@ test("account retains credential-store errors without starting a runtime", async
   assert.doesNotMatch(fixture.notices[0]!, /\{|"present"/);
   assert.equal(fixture.runtimeCreates(), 0);
   fs.rmSync(fixture.state, { recursive: true, force: true });
+});
+
+test("account, status and login read keyring health instead of a Promise", async () => {
+  const fixture = makeHandler();
+  const savedHome = process.env.GEMINI_HOME;
+  const savedKey = process.env.GEMINI_API_KEY;
+  const originalKeychainPresent = keychain.present;
+  process.env.GEMINI_HOME = fixture.state;
+  delete process.env.GEMINI_API_KEY;
+  keychain.present = async () => false;
+  secretService.present = async () => true;
+  try {
+    // A keyring-only login has no token file and no macOS keychain entry.
+    await fixture.handler("account", fixture.ctx);
+    const account = fixture.notices.at(-1)!;
+    assert.match(account, /Google account:\s+signed in[^\n]*system keyring/);
+    assert.match(account, /ACP authentication:\s+oauth-refreshable · oauth-personal/);
+    assert.doesNotMatch(account, /undefined|\[object Promise\]/);
+
+    await fixture.handler("status", fixture.ctx);
+    const status = fixture.notices.at(-1)!;
+    assert.match(status, /Login:\s+ready/);
+    assert.doesNotMatch(status, /not ready|undefined|\[object Promise\]/);
+
+    let freshLogins = 0;
+    fixture.deps.auth = {
+      watchOmpCredentials() {},
+      beginFreshGoogleLogin: async () => { freshLogins++; },
+      noteLoginSucceeded: () => {},
+    } as unknown as CommandControllerDeps["auth"];
+    await fixture.handler("login", fixture.ctx);
+    assert.equal(freshLogins, 1, "login must still run a fresh Google sign-in");
+    const login = fixture.notices.at(-1)!;
+    assert.match(login, /Antigravity Google login finished/);
+    assert.match(login, /ACP auth: oauth-refreshable \(oauth-personal\)/);
+    assert.doesNotMatch(login, /undefined|\[object Promise\]/);
+
+    fixture.deps.auth = {
+      watchOmpCredentials() {},
+      performCommandLogout: async () => ({ keychainRemoved: false, keyringRemoved: true, ompMarker: "removed" }),
+    } as unknown as CommandControllerDeps["auth"];
+    await fixture.handler("logout", fixture.ctx);
+    const logout = fixture.notices.at(-1)!;
+    assert.match(logout,
+      /logged out — Google credentials, saved ACP sessions, the system keyring entry and the OMP marker record cleared/);
+    assert.doesNotMatch(logout, /synthetic|refresh_token|token=/);
+    await assert.rejects(fixture.handler("quota", fixture.ctx), /Usage:/,
+      "the removed quota subcommand must stay removed next to the auth commands");
+  } finally {
+    keychain.present = originalKeychainPresent;
+    secretService.present = noSecretService;
+    if (savedHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = savedHome;
+    if (savedKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = savedKey;
+    fs.rmSync(fixture.state, { recursive: true, force: true });
+  }
+  assert.equal(process.env.GEMINI_HOME, savedHome);
+  assert.equal(process.env.GEMINI_API_KEY, savedKey);
 });
 
 test("removed quota, tools, diagnostics and debug subcommands reject without a runtime or settings", async () => {

@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { CatalogStore } from "../extension/catalog-store.ts";
-import { keychain } from "../extension/auth-sync.ts";
+import { keychain, secretService } from "../extension/auth-sync.ts";
 import type { OmpCommandContext } from "../extension/auth-sync.ts";
 import { registerOmpAdapter } from "../extension/index.ts";
 import { MANAGED_AUTH_MARKER, TierConnection, usableApiKey } from "../extension/runtime.mjs";
@@ -78,11 +78,15 @@ async function adapterHarness(authRequests: AuthRequest[], create: () => TierCon
     GEMINI_HOME: process.env.GEMINI_HOME,
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,
     present: keychain.present,
+    secretPresent: secretService.present,
+    secretRemove: secretService.remove,
   };
   process.env.AGY_ACP_BIN = cli;
   process.env.GEMINI_HOME = geminiHome;
   delete process.env.GEMINI_API_KEY;
   keychain.present = async () => false;
+  secretService.present = async () => false;
+  secretService.remove = async () => undefined;
   const hooks = new Map<string, (event: unknown, ctx: OmpCommandContext) => unknown>();
   let provider: {
     models: Array<{ id: string }>;
@@ -105,6 +109,8 @@ async function adapterHarness(authRequests: AuthRequest[], create: () => TierCon
     if (previous.GEMINI_HOME === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = previous.GEMINI_HOME;
     if (previous.GEMINI_API_KEY === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previous.GEMINI_API_KEY;
     keychain.present = previous.present;
+    secretService.present = previous.secretPresent;
+    secretService.remove = previous.secretRemove;
     await hooks.get("session_shutdown")?.({}, {} as OmpCommandContext);
     await fs.rm(root, { recursive: true, force: true });
   }

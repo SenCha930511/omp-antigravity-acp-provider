@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { loadAdapterConfig, loadRuntimeSourcePreference, saveAdapterPermissionMode, updateAdapterConfig } from "../extension/adapter-config.ts";
 import { registerOmpAdapter } from "../extension/index.ts";
-import { keychain, type OmpCommandContext } from "../extension/auth-sync.ts";
+import { keychain, secretService, type OmpCommandContext } from "../extension/auth-sync.ts";
 import { resolveDefaultPiConfigPath, resolveLegacyGeminiConfigPath } from "../extension/runtime/config.ts";
 
 test("runtimeSource defaults to auto and survives permission updates", () => {
@@ -67,6 +67,10 @@ test("adapter startup preserves permissions from either legacy config location",
   const keys = ["HOME", "PI_CODING_AGENT_DIR", "PI_CONFIG_DIR", "GEMINI_HOME"] as const;
   const previousEnv = new Map(keys.map(key => [key, process.env[key]]));
   const previousKeychain = keychain.present;
+  const previousSecretPresent = secretService.present;
+  const previousSecretRemove = secretService.remove;
+  secretService.present = async () => false;
+  secretService.remove = async () => undefined;
   for (const pathOfLegacy of [resolveDefaultPiConfigPath, resolveLegacyGeminiConfigPath]) {
     const state = path.join(root, String(pathOfLegacy.name), "agent", "antigravity-acp-provider");
     const hooks = new Map<string, (event: unknown, ctx: OmpCommandContext) => unknown>();
@@ -100,6 +104,8 @@ test("adapter startup preserves permissions from either legacy config location",
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
       keychain.present = previousKeychain;
+      secretService.present = previousSecretPresent;
+      secretService.remove = previousSecretRemove;
     }
   }
   fs.rmSync(root, { recursive: true, force: true });
