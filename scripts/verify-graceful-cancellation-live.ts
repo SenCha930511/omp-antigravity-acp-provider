@@ -8,6 +8,10 @@ import { registerOmpAdapter } from "../extension/index.ts";
 import { Diagnostics } from "../extension/diagnostics.ts";
 import { TierConnection, Type } from "../extension/runtime.mjs";
 if (!process.argv.includes("--live")) throw new Error("Pass --live; uses Flash quota only.");
+// This probe creates a fresh adapter state. Do not mistake the real profile's
+// generated CLI wrapper for an unrelated fresh state's external override.
+const previousAcpBin = process.env.AGY_ACP_BIN;
+delete process.env.AGY_ACP_BIN;
 const timeoutMs = Number(process.env.OMP_ACP_PROBE_TIMEOUT_MS ?? 90_000);
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000) throw new Error("Invalid live probe timeout");
 const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-graceful-cancel-live-"));
@@ -23,6 +27,7 @@ Diagnostics.prototype.record = function(stage: string, ms: number) {
 };
 const seen = new Map<any, Set<string>>();
 const calls: Array<{ id: string; prompt: any[]; stop?: string; started: number; aborted?: number; terminal?: number; cancels: number }> = [];
+const observedEventTypes = new Map<string, Map<string, number>>();
 const original = TierConnection.prototype.prompt;
 const originalCancel = TierConnection.prototype.cancel;
 const cancelDescriptor = Object.getOwnPropertyDescriptor(TierConnection.prototype, "cancel");
@@ -59,13 +64,21 @@ try {
     const first = calls.length; let interrupted: any;
     for await (const event of provider.streamSimple(model, { messages, tools }, { sessionId: id, reasoning: "low",
       signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]) })) {
-      if ((mode === "text" && event.type === "text_delta") || (mode === "tools" && event.type === "toolcall_end")) controller.abort();
+      const types = observedEventTypes.get(mode) ?? new Map<string, number>();
+      types.set(event.type, (types.get(event.type) ?? 0) + 1);
+      observedEventTypes.set(mode, types);
+      if ((mode === "text" && event.type === "text_delta") || (mode === "tools" && event.type === "toolcall_end")) {
+        // A reasonless abort means queue-steering, not an explicit desired
+        // cancellation. This probe needs the immediate session/cancel path.
+        controller.abort("probe requested cancellation");
+      }
       if (event.type === "error") interrupted = structuredClone(event.error);
     }
     const interruptedDelivered = performance.now();
     assert.ok(controller.signal.aborted && interrupted,
       `${mode} did not reach a cancellable output chunk; elapsed=${Math.round(interruptedDelivered - (calls[first]?.started ?? interruptedDelivered))}ms; ` +
-      `terminal=${calls[first]?.stop ?? "none"}; error=${String(interrupted?.errorMessage ?? "none").replace(/https?:\/\/\S+/g, "[URL]").slice(0, 160)}`);
+      `terminal=${calls[first]?.stop ?? "none"}; eventTypes=${JSON.stringify(Object.fromEntries(observedEventTypes.get(mode) ?? []))}; ` +
+      `error=${String(interrupted?.errorMessage ?? "none").replace(/https?:\/\/\S+/g, "[URL]").slice(0, 160)}`);
     assert.equal(calls[first].stop, "cancelled", "Official terminal acknowledgement must survive the client wrapper");
     messages.push(interrupted, { role: "user", timestamp: Date.now(), content: "The previous request is cancelled. New request: reply with exactly NEW_REQUEST_OK. Do not use tools or resume the previous request." });
     let answer: any;
@@ -89,6 +102,8 @@ try {
   assert.ok(stages.includes("acp.cancel-confirmation"), "the adapter must record the cancellation confirmation");
   console.log(JSON.stringify({ diagnostics: { samples: recorded.length, stages } }));
 } finally {
+  if (previousAcpBin === undefined) delete process.env.AGY_ACP_BIN;
+  else process.env.AGY_ACP_BIN = previousAcpBin;
   // Only this isolated probe's mappings are disposable. Dropping them before
   // retirement allows the new mapped-session protection to keep user data safe.
   await fs.rm(path.join(state, "sessions.json"), { force: true });

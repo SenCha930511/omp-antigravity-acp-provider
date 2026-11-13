@@ -270,7 +270,7 @@ export class TierConnection extends AntigravityAcpConnection {
 
   // Session routing is computed per call from the same pure builder the tests
   // exercise, then handed to the base method as the official `_meta` argument.
-  private async sessionMeta(request: SessionRpcRequest): Promise<SessionMeta | undefined> {
+  protected async sessionMeta(request: SessionRpcRequest): Promise<SessionMeta | undefined> {
     const routing = this.toolRouting;
     if (!routing) return request._meta;
     const routed = sessionRoutingRequest(request, await this.initialize(), routing.nativeTools,

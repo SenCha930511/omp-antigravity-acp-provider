@@ -29,13 +29,35 @@ async function ready(root: string): Promise<boolean> {
   }
 }
 
-async function installPackage(destination: string): Promise<void> {
-  console.error(`[${ADAPTER_NAME}] Preparing prebuilt adapter ${ADAPTER_VERSION} and dependencies (first load only)…`);
-  await execute(process.platform === "win32" ? "npm.cmd" : "npm", [
+export function quoteBatchArgument(value: string): string {
+  if (/["%\r\n]/u.test(value)) throw new Error("Windows batch arguments may not contain quotes, percent signs, or newlines");
+  return `"${value}"`;
+}
+
+export function resolveNpmInstallCommand(destination: string, platform: NodeJS.Platform = process.platform): { command: string; args: string[] } {
+  const installFlags = [
     "install", "--prefix", destination, `${ADAPTER_NAME}@${ADAPTER_VERSION}`,
     "--registry=https://registry.npmjs.org/", "--save-exact", "--omit=dev",
     "--legacy-peer-deps", "--ignore-scripts", "--no-audit", "--no-fund",
-  ], { timeout: 240_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true });
+  ];
+  if (platform !== "win32") return { command: "npm", args: installFlags };
+  const quoted = installFlags.map(argument =>
+    argument === destination ? quoteBatchArgument(argument) : argument);
+  return {
+    command: process.env.ComSpec ?? "cmd.exe",
+    args: ["/d", "/s", "/e:on", "/v:off", "/c", `call "npm.cmd" ${quoted.join(" ")}`],
+  };
+}
+
+async function installPackage(destination: string): Promise<void> {
+  console.error(`[${ADAPTER_NAME}] Preparing prebuilt adapter ${ADAPTER_VERSION} and dependencies (first load only)…`);
+  const launch = resolveNpmInstallCommand(destination);
+  await execute(launch.command, launch.args, {
+    timeout: 240_000,
+    maxBuffer: 2 * 1024 * 1024,
+    windowsHide: true,
+    windowsVerbatimArguments: process.platform === "win32",
+  });
 }
 
 async function provision(cache: string, install: (directory: string) => Promise<void>): Promise<string> {

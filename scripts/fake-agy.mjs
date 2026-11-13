@@ -446,6 +446,9 @@ async function handleMessage(incoming) {
         ...(modern
           ? mcpHttpOverride === undefined ? {} : { mcpCapabilities: { http: mcpHttpOverride === "true" } }
           : { mcpCapabilities: { http: true } }),
+        sessionCapabilities: {
+          ...(process.env.FAKE_AGY_SESSION_LIST === "1" ? { list: {} } : {}),
+        },
       },
     });
     return;
@@ -457,6 +460,16 @@ async function handleMessage(incoming) {
     } catch (error) {
       respondError(incoming.id, -32603, error instanceof Error ? error.message : String(error));
     }
+    return;
+  }
+  if (incoming.method === "session/list") {
+    if (process.env.FAKE_AGY_SESSION_LIST !== "1") {
+      respondError(incoming.id, -32601, "Method not found");
+      return;
+    }
+    respond(incoming.id, {
+      sessions: [...sessions.values()].map(state => ({ sessionId: state.id, cwd: incoming.params?.cwd ?? process.cwd() })),
+    });
     return;
   }
   if (incoming.method === "session/set_mode" || incoming.method === "session/set_config_option") {

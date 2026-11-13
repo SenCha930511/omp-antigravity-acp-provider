@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { AcpFailure } from "./acp-errors.ts";
+import { resolveCommandProbe } from "./runtime/launch.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -159,11 +160,13 @@ function parseCliResetTime(value: string): string | undefined {
 }
 
 export async function fetchCliQuota(cliPath: string, signal?: AbortSignal): Promise<AntigravityQuotaSnapshot> {
-  const { stdout } = await execFileAsync(cliPath, ["--app_data_dir=antigravity-acp", "-p", "/usage"], {
+  const launch = resolveCommandProbe(cliPath, ["--app_data_dir=antigravity-acp", "-p", "/usage"]);
+  const { stdout } = await execFileAsync(launch.command, launch.args, {
     encoding: "utf8",
     timeout: 30_000,
     maxBuffer: 1024 * 1024,
     windowsHide: true,
+    windowsVerbatimArguments: process.platform === "win32",
     ...(signal ? { signal } : {}),
   });
   return parseCliUsageQuota(stdout);

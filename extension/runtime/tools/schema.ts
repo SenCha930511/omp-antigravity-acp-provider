@@ -203,24 +203,21 @@ function sanitizeNode(value: object, depth: number, budget: ProjectionBudget): P
 		else return { reason: "unsupported_keyword" };
 		if (!valid) return { reason: "invalid_keyword_value" };
 		if (key === "type" && list !== undefined) {
-			// Deduplicate the validated names before emission: a singleton or a
-			// nullable pair projects to one scalar string, while genuine unions
+			// Deduplicate the validated names before emission: a singleton
+			// projects to one scalar string, while genuine unions
 			// are composed after every keyword is known so existing combinators
 			// stay intact regardless of property order.
 			const names: string[] = [];
 			for (const item of list) {
 				if (typeof item === "string" && !names.includes(item)) names.push(item);
 			}
-			const concrete = names.filter((name) => name !== "null");
 			if (names.length === 1) {
 				const name = names[0];
 				spend(budget, 0, key.length + 3 + scalarChars(name));
 				output.type = name;
-			} else if (names.length === 2 && concrete.length === 1) {
-				const name = concrete[0];
-				spend(budget, 0, key.length + 3 + scalarChars(name));
-				output.type = name;
 			} else {
+				// Nullable unions must retain null as a semantic alternative. A
+				// single concrete type is not an equivalent projection.
 				typeUnion = names;
 			}
 			continue;

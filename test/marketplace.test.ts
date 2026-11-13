@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { ADAPTER_NAME, ADAPTER_VERSION, ensureAdapter } from "../marketplace/antigravity-acp/provision.ts";
+import { ADAPTER_NAME, ADAPTER_VERSION, ensureAdapter, resolveNpmInstallCommand } from "../marketplace/antigravity-acp/provision.ts";
 
 async function fakeInstall(directory: string) {
   const root = path.join(directory, "node_modules", ADAPTER_NAME);
@@ -15,6 +15,25 @@ async function fakeInstall(directory: string) {
   await fs.writeFile(path.join(root, "extension/assets/src/acp/supervisor.mjs"), "export {};");
   await fs.writeFile(path.join(root, "extension/assets/runtime-manifest.json"), "{}");
 }
+
+test("Windows installation invokes npm.cmd with verbatim quoting for paths with spaces", () => {
+  const destination = "C:\\Users\\Jane Doe\\cache & tools\\.install-demo";
+  assert.deepEqual(resolveNpmInstallCommand(destination, "win32"), {
+    command: process.env.ComSpec ?? "cmd.exe",
+    args: ["/d", "/s", "/e:on", "/v:off", "/c",
+      `call "npm.cmd" install --prefix "C:\\Users\\Jane Doe\\cache & tools\\.install-demo" ${ADAPTER_NAME}@${ADAPTER_VERSION} --registry=https://registry.npmjs.org/ --save-exact --omit=dev --legacy-peer-deps --ignore-scripts --no-audit --no-fund`],
+  });
+  assert.throws(() => resolveNpmInstallCommand("C:\\bad\"path\\install", "win32"), /quotes, percent signs, or newlines/);
+  assert.throws(() => resolveNpmInstallCommand("C:\\Users\\%cache%\\install", "win32"), /percent signs/);
+  assert.deepEqual(resolveNpmInstallCommand(destination, "linux"), {
+    command: "npm",
+    args: [
+      "install", "--prefix", destination, `${ADAPTER_NAME}@${ADAPTER_VERSION}`,
+      "--registry=https://registry.npmjs.org/", "--save-exact", "--omit=dev",
+      "--legacy-peer-deps", "--ignore-scripts", "--no-audit", "--no-fund",
+    ],
+  });
+});
 
 test("marketplace provision shares concurrent work and warm loads stay offline", async () => {
   const root = await fs.mkdtemp(path.join(tmpdir(), "omp-marketplace-unit-"));

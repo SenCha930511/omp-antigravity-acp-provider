@@ -43,9 +43,22 @@ function stubAgyExe(script: string, directory = bin): string {
   return file;
 }
 
+function stubAgyCmd(version = "9.9.9", directory = bin): string {
+  fs.mkdirSync(directory, { recursive: true });
+  const file = path.join(directory, "agy.cmd");
+  const script = process.platform === "win32"
+    ? `@echo off\r\nif "%~1"=="acp" if "%~2"=="--version" echo ${version}\r\nexit /b 0\r\n`
+    : `#!/bin/sh\necho ${version}\n`;
+  fs.writeFileSync(file, script);
+  fs.chmodSync(file, 0o755);
+  return file;
+}
+
 function removeAgy(): void {
   fs.rmSync(path.join(bin, "agy"), { force: true });
   fs.rmSync(path.join(bin, "agy.exe"), { force: true });
+  fs.rmSync(path.join(bin, "agy.cmd"), { force: true });
+  fs.rmSync(path.join(bin, "agy.bat"), { force: true });
 }
 
 function setManagedVersion(version: string): void {
@@ -367,7 +380,7 @@ if (process.platform !== "win32") {
   // command processor; the plan still names the exact wrapper path.
   const winSpawn = resolveLaunchSpawn(plan, "win32");
   assert.equal(winSpawn.command, process.env.ComSpec ?? "cmd.exe");
-  assert.deepEqual(winSpawn.args, ["/d", "/s", "/c", `call "${wrapper}"`]);
+  assert.deepEqual(winSpawn.args, ["/d", "/s", "/e:on", "/v:off", "/c", `call "${wrapper}"`]);
   // Off Windows the same plan still names the exact wrapper and spawns it directly.
   assert.deepEqual(resolveLaunchSpawn(plan, "linux"), { command: wrapper, args: [] });
   const repeated = await planFor(stateDir, { env, platform: "win32" });
@@ -384,6 +397,30 @@ if (process.platform !== "win32") {
   const parenScript = fs.readFileSync(wrapperPath(parenStateDir, "win32"), "utf8");
   assert.match(parenScript, /Program Files \(x86\)/);
   assert.doesNotMatch(parenScript, /if defined[^\r\n]*\(/);
+}
+
+// Windows PATH discovery must find npm-style .cmd shims, not only a POSIX
+// shim or a native .exe. Probing is the local fixture, never the real CLI.
+{
+  removeAgy();
+  const cli = stubAgyCmd("1.5.8");
+  setManagedVersion("1.4.5");
+  const env = freshEnv();
+  const stateDir = freshStateDir();
+  const plan = await planFor(stateDir, { env, platform: "win32" });
+  assert.equal(plan.source, "cli", "agy.cmd on PATH must be eligible on Windows");
+  assert.equal(plan.cliPath, cli);
+  assert.equal(plan.cliVersion, "1.5.8");
+  assert.equal(plan.target?.kind === "wrapper" ? plan.target.path : undefined, wrapperPath(stateDir, "win32"));
+  assert.equal(env.AGY_ACP_BIN, undefined);
+
+  // An identical wrapper path with different casing is still this adapter's
+  // stale wrapper on Windows, not an external override that pins stale state.
+  const mixedCaseWrapper = wrapperPath(stateDir, "win32").replace(/agy-acp-cli\.cmd$/u, "AGY-ACP-CLI.CMD");
+  const mixedCaseEnv = { ...env, AGY_ACP_BIN: mixedCaseWrapper };
+  const recovered = await planFor(stateDir, { env: mixedCaseEnv, platform: "win32" });
+  assert.equal(recovered.source, "cli", "wrapper identity must be case-insensitive on Windows");
+  assert.equal(recovered.cliPath, cli);
 }
 
 // A wrapper already named by AGY_ACP_BIN is the adapter's own decision, not a

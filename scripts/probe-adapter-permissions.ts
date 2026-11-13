@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { resolveAcpPermissionProfile, resolveLaunchSpawn, resolveManagedAcpCommand, resolveRuntimeLaunchPlan, type RuntimeLaunchPlan } from "../extension/runtime/launch.ts";
+import { resolveAcpPermissionProfile, resolveLaunchTarget, resolveManagedAcpCommand, resolveRuntimeLaunchPlan, type RuntimeLaunchPlan } from "../extension/runtime/launch.ts";
 import { resolveAntigravityAcpDirectory } from "../extension/runtime/acp/antigravity.ts";
 
 if (!process.argv.includes("--live")) {
@@ -35,14 +35,13 @@ function removeConversation(sessionId: string | undefined) {
 
 async function probe(plan: RuntimeLaunchPlan, fixture: ProbeCase) {
   const profile = resolveAcpPermissionProfile(plan, fixture.requested);
-  const launch = resolveLaunchSpawn(plan);
+  const launch = resolveLaunchTarget(plan);
   let acpSessionId: string | undefined;
   let promptAttempts = 0;
   const runtime = new AntigravityRuntime(options => {
     const connection = new TierConnection({
       ...options,
-      command: launch.command,
-      args: [...launch.args],
+      launch,
       env: {
         ...process.env,
         ...options.env,

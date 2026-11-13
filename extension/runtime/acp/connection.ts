@@ -5,6 +5,7 @@ import {
 	type AuthenticateRequest,
 	type AvailableCommand,
 	type InitializeResponse,
+	type ListSessionsResponse,
 	type McpServer,
 	type NewSessionRequest,
 	type PromptRequest,
@@ -315,6 +316,17 @@ export class AntigravityAcpConnection {
 
 	async cancel(sessionId: string): Promise<void> {
 		await this.connection.cancel({ sessionId });
+	}
+
+	// The caller checks `sessionCapabilities.list` before enumerating. Listing
+	// uses the same initialization, request deadline, and external cancellation.
+	async listSessions(cwd: string, signal?: AbortSignal): Promise<ListSessionsResponse> {
+		await this.initialize();
+		return this.withAbort(this.withDeadline(
+			this.connection.listSessions({ cwd }),
+			this.operationTimeoutMs,
+			"session/list",
+		), signal);
 	}
 
 	// `session/close` frees a session server-side and is optional in ACP. The

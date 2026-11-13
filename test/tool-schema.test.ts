@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { projectToolSchema } from "../extension/runtime/tools/schema.ts";
 import { relayControlTool } from "../extension/runtime/tools/relay.ts";
 import { PiMcpBridge } from "../extension/runtime/tools/bridge.ts";
+import { Value } from "typebox/value";
 import type { Tool } from "@earendil-works/pi-ai";
 
 test("TypeBox relay schema stays visible in the projected bridge catalog", () => {
@@ -21,7 +22,7 @@ test("TypeBox relay schema stays visible in the projected bridge catalog", () =>
   assert.deepEqual(bridge.omissions, []);
 });
 
-test("nullable property types project to the string type downstream consumers accept", () => {
+test("nullable property types preserve null with string leaf types", () => {
   const parameters = {
     type: "object",
     properties: { skip: { type: ["number", "null"] } },
@@ -33,9 +34,10 @@ test("nullable property types project to the string type downstream consumers ac
   assert.ok(properties !== null && typeof properties === "object" && !Array.isArray(properties), "properties must be an object");
   assert.ok("skip" in properties, "skip must be projected");
   const skip = properties.skip;
-  assert.ok(skip !== null && typeof skip === "object" && !Array.isArray(skip), "skip must be a schema object");
-  assert.ok("type" in skip, "skip must keep a type");
-  assert.equal(skip.type, "number");
+  assert.deepEqual(skip, { anyOf: [{ type: "number" }, { type: "null" }] });
+  assert.equal(Value.Check(parameters, { skip: null }), true, "the original MCP schema must accept null too");
+  assert.equal(Value.Check(parameters, { skip: 0 }), true);
+  assert.equal(Value.Check(parameters, { skip: "0" }), false);
   assert.doesNotMatch(JSON.stringify(projected.schema), /"type":\s*\[/);
 });
 

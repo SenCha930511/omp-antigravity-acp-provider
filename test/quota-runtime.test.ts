@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { quotaFromPrompt } from "../extension/runtime/status.ts";
 import { fetchCliQuota } from "../extension/usage-accounting.ts";
+import { resolveCommandProbe } from "../extension/runtime/launch.ts";
 import type { PromptResponse } from "@agentclientprotocol/sdk";
 
 test("CLI quota runs the selected CLI's print-mode /usage without an ACP connection", { skip: process.platform === "win32" }, async () => {
@@ -24,6 +25,18 @@ test("CLI quota runs the selected CLI's print-mode /usage without an ACP connect
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("Windows .cmd quota goes through cmd.exe without shell mode or losing arguments", () => {
+  const cli = "C:\\Program Files (x86)\\Team & Tools\\agy.cmd";
+  const args = ["--app_data_dir=antigravity-acp", "-p", "/usage"];
+  assert.deepEqual(resolveCommandProbe(cli, args, "win32"), {
+    command: process.env.ComSpec ?? "cmd.exe",
+    args: ["/d", "/s", "/e:on", "/v:off", "/c", `call "${cli}"`, ...args],
+  });
+  assert.deepEqual(resolveCommandProbe(cli, args, "darwin"), { command: cli, args });
+  assert.throws(() => resolveCommandProbe("C:\\Users\\%jane%\\agy.cmd", [], "win32"), /percent signs/);
+  assert.deepEqual(resolveCommandProbe("~/bin/100%/agy", args, "darwin"), { command: "~/bin/100%/agy", args });
 });
 
 const quotaPrompt = (quota: Record<string, unknown>): PromptResponse =>

@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { resolveLaunchSpawn, resolveLaunchTarget, writeCliWrapper, type RuntimeLaunchPlan } from "../extension/runtime/launch.ts";
+import { resolveLaunchSpawn, resolveLaunchTarget, resolveManagedAcpCommand, writeCliWrapper, type RuntimeLaunchPlan } from "../extension/runtime/launch.ts";
 import { resolveProcessSpawn, resolveSupervisorEntry } from "../extension/runtime/process.ts";
 
 const cwd = process.cwd();
@@ -34,6 +34,26 @@ function wrapperPlan(wrapper: string): RuntimeLaunchPlan {
     cliVersion: "1.5.3",
   };
 }
+
+test("Windows managed runtime selection uses the native exe, not an unrelated POSIX par", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "acp-windows-command-"));
+  const root = path.join(home, ".local", "opt", "agy-acp", "current");
+  try {
+    fs.mkdirSync(root, { recursive: true });
+    const par = path.join(root, "agy_acp_server.par");
+    const exe = path.join(root, "agy_acp_server.exe");
+    for (const file of [par, exe]) {
+      fs.writeFileSync(file, "fixture");
+      fs.chmodSync(file, 0o755);
+    }
+    assert.deepEqual(resolveManagedAcpCommand(home, "win32"), { command: exe, args: [] });
+    fs.rmSync(exe);
+    assert.equal(resolveManagedAcpCommand(home, "win32"), undefined);
+    assert.deepEqual(resolveManagedAcpCommand(home, "linux"), { command: par, args: ["--uid="] });
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("a launch record is spawned through the supervisor", () => {
   const spawn = resolveProcessSpawn({ cwd, launch: { command: "/opt/agy-wrapper", args: ["--app_data_dir=antigravity-acp"] } });
@@ -80,7 +100,7 @@ test("the direct spawn form keeps the Windows command-processor wrapper", () => 
   assert.deepEqual(resolveLaunchSpawn(plan, "linux"), { command: wrapper, args: [] });
   const winSpawn = resolveLaunchSpawn(plan, "win32");
   assert.equal(winSpawn.command, process.env.ComSpec ?? "cmd.exe");
-  assert.deepEqual(winSpawn.args, ["/d", "/s", "/c", `call "${wrapper}"`]);
+  assert.deepEqual(winSpawn.args, ["/d", "/s", "/e:on", "/v:off", "/c", `call "${wrapper}"`]);
 });
 
 test("a plan without a spawn target fails closed", () => {
