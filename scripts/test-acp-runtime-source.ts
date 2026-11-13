@@ -262,6 +262,7 @@ for (const script of ["exit 1", "echo prerelease"]) {
   assert.equal(assertSelectedAcpCliLaunch(stateDir, preference, env, "darwin"), undefined);
   assert.equal(env.AGY_ACP_BIN, wrapper);
   const command = path.join(home, ".local", "opt", "agy-acp", "current", "agy_acp_server.par");
+
   assert.deepEqual(resolveManagedAcpCommand(home, "linux"), { command, args: ["--uid="] });
   const explicit = { ...env, AGY_ACP_BIN: "/opt/custom-quota-bin" };
   assert.equal(assertSelectedAcpCliLaunch(stateDir, { source: "env" }, explicit, "darwin"), undefined);
