@@ -333,6 +333,7 @@ test("a competing process acquires its lease while cleanup is still walking sess
     await exited.catch(() => {});
     if (token) await f.cleaner.release(token);
   }
+  assert.equal(f.cleaner.status().ownedBytes, 37, "unlocked measurement retains the five conversation files and tool.json bytes");
 });
 
 test("malformed individual mapping records preserve every cleanup candidate", async t => {

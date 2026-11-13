@@ -19,3 +19,23 @@ test("nullable property types project to the string type downstream consumers ac
   assert.equal(skip.type, "number");
   assert.doesNotMatch(JSON.stringify(projected.schema), /"type":\s*\[/);
 });
+
+test("type unions preserve existing combinators and use string leaf types", () => {
+  const members = [
+    { type: "number", minimum: 0 },
+    { type: "string", maxLength: 4 },
+  ];
+  const projected = projectToolSchema({
+    type: "object",
+    properties: { choice: { anyOf: members, type: ["number", "string"] } },
+  });
+  if (!("schema" in projected)) assert.fail(`schema omitted (${projected.reason})`);
+  const properties: unknown = projected.schema.properties;
+  assert.ok(properties !== null && typeof properties === "object" && !Array.isArray(properties));
+  assert.ok("choice" in properties, "choice must be projected");
+  const choice = properties.choice;
+  assert.ok(choice !== null && typeof choice === "object" && !Array.isArray(choice), "choice must be a schema object");
+  assert.deepEqual(choice.anyOf, members);
+  assert.deepEqual(choice.allOf, [{ anyOf: [{ type: "number" }, { type: "string" }] }]);
+  assert.doesNotMatch(JSON.stringify(projected.schema), /"type":\s*\[/);
+});
