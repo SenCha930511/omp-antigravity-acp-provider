@@ -31,6 +31,26 @@ This is an independent adaptation, **NOT** an official Google or OMP integration
 - Loopback traffic always bypasses proxied environments. When `HTTP(S)_PROXY` or `ALL_PROXY` is set for the ACP child process, the adapter appends `localhost`, `127.0.0.1` and `::1` to `NO_PROXY`/`no_proxy` so the loopback MCP bridge is never routed through an external proxy.
 - OAuth material is redacted from failure text. Authorization URLs, sensitive query values, `Bearer` tokens and OAuth pairs such as `code_challenge` or `access_token` are masked before messages reach OMP, while ordinary diagnostics like `exit code=1` stay intact.
 
+## Supported platforms
+
+The adapter is a Node.js OMP plugin. The table lists the configuration each platform accepts and the validation actually performed, not a promise that every path has been run on every system.
+
+| Platform | Configuration | Validation |
+| --- | --- | --- |
+| macOS on arm64 | `agy` on `PATH`, an explicit `AGY_ACP_BIN`, or the managed runtime in `~/.local/opt/agy-acp/`. Keychain lookups use `/usr/bin/security`. | Live: Gemini inference, MCP tools, steering, cancellation and continuation, local plugin linking. |
+| Linux | `agy` on `PATH`, an explicit `AGY_ACP_BIN`, or the managed runtime. Secret Service items are inspected and removed with `secret-tool` from libsecret. | Offline tests with synthetic fixtures. No live Linux run in this environment. |
+| Windows | `agy.exe` on `PATH`, an explicit `AGY_ACP_BIN` pointing at your ACP command, or the generated `.cmd` wrapper. | Configuration only. The supervisor wrapper and the full managed-runtime download have not been run on Windows. |
+
+### Credentials and keyrings
+
+Google browser consent works on every platform. The ACP server stores the result in its own credential store, and the adapter checks the same store for login readiness and logout.
+
+- **macOS.** The adapter checks the login keychain item `gemini` / `antigravity-acp` with `/usr/bin/security`. The attribute-only lookup does not prompt for the keychain password. Logout removes that item. Keychain-stored tokens expose no account email, so `account` shows the address only when a token file exists.
+- **Linux.** Secret Service holds the same item as `service=gemini`, `username=antigravity`. The adapter needs `secret-tool` from libsecret to detect or delete it; install it from your distribution's libsecret package. A confirmed missing item is distinct from an unavailable or locked backend. Without `secret-tool`, the backend's state cannot be confirmed. Login readiness falls back to the token file under `~/.gemini/antigravity-acp/` and to `GEMINI_API_KEY`. A login that exists only in Secret Service is not detected in that state, while token-file and API-key inference still work.
+- **Windows.** There is no keyring integration. The token file and `GEMINI_API_KEY` are supported credential sources.
+
+On Windows, CLI discovery searches for `agy` and `agy.exe`. Set `AGY_ACP_BIN` explicitly for an npm-generated `.cmd` shim. The `.cmd` supervisor wrapper has not been exercised on Windows.
+
 ## Install: for human
 
 Follow these steps in order. The whole flow takes a few minutes, plus Google's sign-in. A runtime download is only needed when no usable `agy` CLI is installed.
@@ -39,7 +59,7 @@ Follow these steps in order. The whole flow takes a few minutes, plus Google's s
 
 - OMP is installed and `omp --version` works.
 - Node.js 22.19 or newer (`node --version`) and npm are on `PATH`; the marketplace launcher uses them on first load.
-- A supported platform: macOS, Linux or Windows. Live testing has been on macOS.
+- A supported platform: macOS, Linux or Windows. [Supported platforms](#supported-platforms) lists what each one accepts and what has been validated.
 - Internet access when no usable `agy` CLI is installed. The managed fallback downloads separately (about 383 MiB on macOS) into `~/.local/opt/agy-acp/`.
 
 ### 2. Install exactly one adapter
@@ -65,7 +85,7 @@ The provider registers at startup. Restart every running OMP process so they agr
 
 ### 4. Sign in
 
-Run `/login`, choose **Google Antigravity (ACP)**, and complete Google's consent in the browser. On a headless machine the provider relays the callback URL.
+Run `/login`, choose **Google Antigravity (ACP)**, and complete Google's consent in the browser. On a headless machine the provider relays the callback URL. Alternatively, add the **Antigravity Gemini API key** method in `/login` and paste a Gemini API key, or export `GEMINI_API_KEY` before starting OMP. On Linux, keyring requirements are covered under [Supported platforms](#supported-platforms).
 
 ### 5. Load models and pick one
 
@@ -225,7 +245,8 @@ A `refusal` stop reason is reported as an explicit provider refusal. An empty `e
 ## Limitations vs direct OAuth
 
 - No direct model API endpoint or reverse-proxy mode.
-- No API-key, service-account, or raw OAuth-token authentication; Google browser consent is required.
+- Credentials come from the ACP server's own stores: Google browser consent, `GEMINI_API_KEY`, or a Gemini API key saved in OMP's auth store. Raw OAuth tokens supplied by hand and service accounts are not accepted. Keyring access is limited to what the adapter can inspect; see [Supported platforms](#supported-platforms).
+- Usage and quota through a key saved in OMP's auth store can be incomplete, because the host usage provider is not passed that credential.
 - Only models advertised by the ACP server are available.
 - Only thinking levels confirmed by the ACP server are selectable.
 - No arbitrary generation controls: temperature, top_p, seed, stop sequences, tool_choice, response format, or output-token limit.
@@ -236,6 +257,12 @@ A `refusal` stop reason is reported as an explicit provider refusal. An empty `e
 - No standalone client; a usable ACP server, either the `agy` CLI or the managed runtime, is required.
 
 Detailed behavior, advanced settings and limitations: [docs/](docs/) and [CHANGELOG.md](CHANGELOG.md).
+
+## Contributors
+
+The Linux Secret Service credential handling is adapted from [Maddock (@notmaddock)](https://github.com/notmaddock)'s work in [PR #2](https://github.com/SenCha930511/omp-antigravity-acp-provider/pull/2). Upstream project attribution stays in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+GitHub counts a contributor when a commit that credits them, as author or through a `Co-authored-by:` trailer, reaches the default branch ([contributor list](https://docs.github.com/en/repositories/viewing-activity-and-data-for-your-repository/viewing-a-projects-contributors), [co-authored commits](https://docs.github.com/en/pull-requests/how-tos/commit-changes/creating-a-commit-with-multiple-authors)). Until commits carrying that credit are on the default branch of the public repository, its contributors page will not list the addition.
 
 ## License
 
