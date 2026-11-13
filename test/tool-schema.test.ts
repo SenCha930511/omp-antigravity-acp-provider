@@ -1,6 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { projectToolSchema } from "../extension/runtime/tools/schema.ts";
+import { relayControlTool } from "../extension/runtime/tools/relay.ts";
+import { PiMcpBridge } from "../extension/runtime/tools/bridge.ts";
+import type { Tool } from "@earendil-works/pi-ai";
+
+test("TypeBox relay schema stays visible in the projected bridge catalog", () => {
+  const response = projectToolSchema(relayControlTool.parameters);
+  if ("reason" in response) assert.fail(`relay schema was omitted (${response.reason})`);
+  assert.deepEqual(response.schema, {
+    type: "object",
+    required: ["call_id"],
+    properties: { call_id: { type: "string", minLength: 1 } },
+  });
+  const tools: Tool[] = [
+    { ...relayControlTool, execute: async () => ({ content: [{ type: "text" as const, text: "fixture" }] }) },
+  ];
+  const bridge = new PiMcpBridge({ tools, onCall: async () => ({ content: [{ type: "text" as const, text: "fixture" }] }) });
+  assert.equal(bridge.empty, false, "the relay catalog must not be empty after TypeBox projection");
+  assert.deepEqual(bridge.omissions, []);
+});
 
 test("nullable property types project to the string type downstream consumers accept", () => {
   const parameters = {
