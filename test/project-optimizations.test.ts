@@ -20,6 +20,8 @@ test("actual OMP wrapper refreshes tool audit for same-array additions/removals 
     await registerOmpAdapter({ on: (name: string, fn: Function) => hooks.set(name, fn), registerTool() {},
       registerProvider: (_name: string, value: any) => { provider = value; },
       registerCommand: (_name: string, value: any) => { command = value; } }, state);
+    assert.equal(provider.usage?.id, "antigravity-acp");
+    assert.equal(typeof provider.usage?.fetchUsage, "function");
     const tools: any[] = [{ name: "read", description: "read", parameters: Type.Object({ path: Type.String() }) }];
     async function audit() {
       // Abort before startup: exercises real tool projection, but never spawns

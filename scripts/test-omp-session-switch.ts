@@ -128,7 +128,7 @@ try {
   assert.match(current(afterTree), /REQ_AFTER_TREE_REWIND/);
   console.log("Actual OMP RPC: /tree rewind rebuilds without discarded branch messages: PASS");
 
-  const cleanupRegistryFile = (await fs.readdir(state)).find(name => name.startsWith("cleanup-sessions-"))!;
+  await fs.mkdir(path.join(state, "cleanup-sessions-0.json.lock"), { recursive: true });
   async function assertFreshSourceTransition(request: string): Promise<void> {
     const beforeFresh = (await command("get_state")).data;
     const previousAcp = prompts(await trace()).at(-1).id;
@@ -145,7 +145,9 @@ try {
     let postFreshSourceTracked = false;
     let postRecord: unknown, prevRecord: unknown;
     for (let i = 0; i < 200; i++) {
-      const reg = JSON.parse(await fs.readFile(path.join(state, cleanupRegistryFile), "utf8"));
+      const filename = (await fs.readdir(state)).find(file => file.startsWith("cleanup-sessions-") && file.endsWith(".json"));
+      if (filename === undefined) { await delay(10); continue; }
+      const reg = JSON.parse(await fs.readFile(path.join(state, filename), "utf8"));
       postRecord = reg.sessions.find((s: any) => s.id === postFreshAcp);
       prevRecord = reg.sessions.find((s: any) => s.id === previousAcp);
       if (postRecord?.ompSource?.file === path.resolve(fresh.sessionFile) && prevRecord?.replaced === true) {

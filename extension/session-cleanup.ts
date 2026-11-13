@@ -3,6 +3,7 @@ import afs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { lock } from "proper-lockfile";
+import { releaseAfter } from "./lock-release.ts";
 import { resolveAntigravityAcpDirectory } from "./vendor/pi-antigravity-acp-provider/src/acp/antigravity.ts";
 import { isMissingFileError, writeJsonAtomic } from "./fs-atomic.ts";
 import { AcpSessionStore, registerSessionStoreCleanup } from "./session-store.ts";
@@ -106,8 +107,12 @@ export class SessionCleanup {
   private transaction<T>(action: (r: Registry) => T | Promise<T>): Promise<T> {
     const pending = (tails.get(this.registryPath) ?? Promise.resolve()).catch(() => {}).then(async () => {
       await afs.mkdir(path.dirname(this.registryPath), { recursive: true, mode: 0o700 });
-      const release = await lock(this.registryPath, { realpath: false, stale: 600_000, retries: 0 });
+      let compromised: Error | undefined;
+      const release = await lock(this.registryPath, { realpath: false, stale: 600_000, retries: 0,
+        onCompromised: (error: Error) => { compromised = error; } });
+      let primaryFailed = false;
       try {
+        if (compromised) throw compromised;
         let r: Registry = { version: 1, sessions: [] };
         try { r = JSON.parse(await afs.readFile(this.registryPath, "utf8")); } catch (e) { if (!isMissingFileError(e)) throw e; }
         if (r.version !== 1 || !Array.isArray(r.sessions) || !r.sessions.every(v => UUID.test(v.id) && typeof v.owned === "boolean" && Number.isFinite(v.lastUsed) && Array.isArray(v.leases) &&
@@ -118,15 +123,17 @@ export class SessionCleanup {
           (v.ompSource === undefined || (typeof v.ompSource.id === "string" && typeof v.ompSource.file === "string" && typeof v.ompSource.root === "string" && Number.isFinite(v.ompSource.device) && Number.isFinite(v.ompSource.inode) && (v.ompSource.missingSince === undefined || Number.isFinite(v.ompSource.missingSince)))) &&
           v.leases.every(l => typeof l.token === "string" && Number.isSafeInteger(l.pid) && l.pid > 0 && Number.isSafeInteger(l.serverPid) && l.serverPid > 0))) throw new Error("Invalid ACP cleanup registry; refusing deletion");
         if (new Set(r.sessions.map(v => v.id.toLowerCase())).size !== r.sessions.length) throw new Error("Duplicate ACP cleanup ownership; refusing deletion");
+        const transactionRetirements = new Map(this.storeRetired);
+        const transactionDiscards = new Map(this.storeDiscarded);
         const applyStoreNotes = () => {
-          for (const [id, keyGroup] of this.storeRetired) {
+          for (const [id, keyGroup] of transactionRetirements) {
             const v = r.sessions.find(s => s.id === id);
             if (v?.owned && v.retiredFor === undefined && !v.replaced) {
               v.retiredFor = keyGroup;
               v.replaced = false;
             }
           }
-          for (const [id, at] of this.storeDiscarded) {
+          for (const [id, at] of transactionDiscards) {
             const v = r.sessions.find(s => s.id === id);
             if (v?.owned) {
               v.replaced = true;
@@ -138,18 +145,30 @@ export class SessionCleanup {
         applyStoreNotes();
         const actions = this.intents.slice(); for (const apply of actions) apply(r);
         for (const v of r.sessions) if (this.touched.has(v.id)) v.lastUsed = Math.max(v.lastUsed, this.touched.get(v.id)!);
+        if (compromised) throw compromised;
         const result = await action(r);
         applyStoreNotes();
+        if (compromised) throw compromised;
         const tmp = this.registryPath + "." + randomUUID() + ".tmp";
         try { await afs.writeFile(tmp, JSON.stringify(r), { mode: 0o600, flag: "wx" }); await afs.rename(tmp, this.registryPath); }
         finally { await afs.rm(tmp, { force: true }); }
         this.intents.splice(0, actions.length);
-        this.storeRetired.clear();
-        this.storeDiscarded.clear();
+        for (const [id, keyGroup] of transactionRetirements) {
+          if (this.storeRetired.get(id) === keyGroup) this.storeRetired.delete(id);
+        }
+        for (const [id, at] of transactionDiscards) {
+          if (this.storeDiscarded.get(id) === at) this.storeDiscarded.delete(id);
+        }
         const retained = new Set(r.sessions.map(v => v.id));
         for (const id of this.touched.keys()) if (!retained.has(id)) this.touched.delete(id);
+        if (compromised) throw compromised;
         return result;
-      } finally { await release(); }
+      } catch (error) {
+        primaryFailed = true;
+        throw error;
+      } finally {
+        await releaseAfter(release, primaryFailed, compromised);
+      }
     });
     tails.set(this.registryPath, pending);
     void pending.finally(() => { if (tails.get(this.registryPath) === pending) tails.delete(this.registryPath); }).catch(() => {});

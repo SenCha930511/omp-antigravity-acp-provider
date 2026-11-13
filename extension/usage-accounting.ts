@@ -1,4 +1,8 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { AcpFailure } from "./acp-errors.ts";
+
+const execFileAsync = promisify(execFile);
 
 export interface SessionUsage {
   input: number; completion: number; thinking: number; cached?: number; total: number;
@@ -83,11 +87,15 @@ export function parseUsageQuota(markdown: string, now = Date.now()): Antigravity
     const bucket = QUOTA_BUCKET.exec(line);
     if (bucket && groups.length) {
       const [, label, percent, reset] = bucket;
+      const remainingFraction = Number(percent) / 100;
+      if (!Number.isFinite(remainingFraction) || remainingFraction < 0 || remainingFraction > 1) {
+        throw new AcpFailure("protocol", `Antigravity /usage reply had an invalid percentage: ${percent}%`);
+      }
       const resetTime = reset ? resetIso(reset) : undefined;
       if (reset && !resetTime) throw new AcpFailure("protocol", `Antigravity /usage reply had an invalid quota reset time: ${reset}`);
       groups.at(-1)!.buckets.push({
         window: /weekly/iu.test(label!) ? "weekly" : /five hour/iu.test(label!) ? "5h" : label!,
-        remainingFraction: Number(percent) / 100,
+        remainingFraction,
         ...(resetTime ? { resetTime } : {}),
       });
       continue;
@@ -99,6 +107,66 @@ export function parseUsageQuota(markdown: string, now = Date.now()): Antigravity
     throw new AcpFailure("protocol", `Antigravity /usage reply had no quota groups: ${reason}`);
   }
   return { at: now, groups };
+}
+
+export function parseCliUsageQuota(output: string, now = Date.now()): AntigravityQuotaSnapshot {
+  const groups = new Map<string, AntigravityQuotaSnapshot["groups"][number]>();
+  for (const raw of output.split(/\r?\n/u)) {
+    const columns = raw.trim().split("\t").map(value => value.trim());
+    if (columns.length < 3) continue;
+    const [displayName, label, percent, reset] = columns;
+    if (!displayName || !label || !/^\d+(?:\.\d+)?%$/u.test(percent ?? "")) continue;
+    const value = Number(percent!.slice(0, -1));
+    if (!Number.isFinite(value) || value < 0 || value > 100) {
+      throw new AcpFailure("protocol", `Antigravity CLI /usage returned an invalid percentage: ${percent}`);
+    }
+    let resetTime: string | undefined;
+    if (reset) {
+      resetTime = parseCliResetTime(reset);
+      if (!resetTime) {
+        throw new AcpFailure("protocol", `Antigravity CLI /usage returned an invalid reset time: ${reset}`);
+      }
+    }
+    const group = groups.get(displayName) ?? { displayName, buckets: [] };
+    group.buckets.push({
+      window: /weekly/iu.test(label) ? "weekly" : /five hour/iu.test(label) ? "5h" : label,
+      remainingFraction: value / 100,
+      ...(resetTime ? { resetTime } : {}),
+    });
+    groups.set(displayName, group);
+  }
+  if (!groups.size) {
+    const reason = output.trim() ? `unrecognized format (${output.length} characters)` : "no text returned";
+    throw new AcpFailure("protocol", `Antigravity CLI /usage reply had no quota groups: ${reason}`);
+  }
+  return { at: now, groups: [...groups.values()] };
+}
+
+function parseCliResetTime(value: string): string | undefined {
+  const components = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/u.exec(value);
+  if (!components) return;
+  const milliseconds = (components[7] ?? "0").slice(0, 3).padEnd(3, "0");
+  const timestamp = Date.parse(`${value.slice(0, 19)}.${milliseconds}${components[8]}`);
+  if (!Number.isFinite(timestamp)) return;
+  const zone = components[8]!;
+  const offsetMinutes = zone === "Z" ? 0
+    : (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6))) * (zone[0] === "+" ? 1 : -1);
+  const calendar = new Date(timestamp + offsetMinutes * 60_000);
+  if (calendar.getUTCFullYear() !== Number(components[1]) || calendar.getUTCMonth() + 1 !== Number(components[2]) ||
+    calendar.getUTCDate() !== Number(components[3]) || calendar.getUTCHours() !== Number(components[4]) ||
+    calendar.getUTCMinutes() !== Number(components[5]) || calendar.getUTCSeconds() !== Number(components[6])) return;
+  return new Date(timestamp).toISOString();
+}
+
+export async function fetchCliQuota(cliPath: string, signal?: AbortSignal): Promise<AntigravityQuotaSnapshot> {
+  const { stdout } = await execFileAsync(cliPath, ["--app_data_dir=antigravity-acp", "-p", "/usage"], {
+    encoding: "utf8",
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+    windowsHide: true,
+    ...(signal ? { signal } : {}),
+  });
+  return parseCliUsageQuota(stdout);
 }
 
 export function quotaExhaustion(text: string, now = Date.now()): { resetAt?: string } | undefined {

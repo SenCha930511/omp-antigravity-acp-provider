@@ -100,22 +100,30 @@ export function armSteerGiveup(
   return { dispose: () => { done = true; clearTimeout(timer); detach?.(); } };
 }
 
-// Keeps the vendored prompt transport alive after the caller aborts. The
+// Keeps the vendored prompt transport alive after a queue-steering abort. The
 // upstream prompt() closes the whole connection 1.5s after an abort, which
 // would destroy the warm session before drainCancelledTurn can reuse it. The
 // give-up follows the same activity clock as the drain, so a turn that is
-// still producing output never loses its transport early.
+// still producing output never loses its transport early. immediateOnAbort
+// skips the hold for explicit user/internal cancellation, where the upstream
+// prompt must send session/cancel at once.
 export function deferredAbortSignal(
   signal: AbortSignal,
   timings: SteerTimings,
   activity?: { source: SteerActivitySource; sessionId: string },
   holdOnAbort?: () => boolean,
+  immediateOnAbort?: () => boolean,
 ): { signal: AbortSignal; dispose: () => void } {
   if (!(timings.idleMs > 0)) return { signal, dispose: () => undefined };
   const controller = new AbortController();
   let giveup: { dispose: () => void } | undefined;
   const onAbort = () => {
-    if (giveup || holdOnAbort?.()) return;
+    if (giveup) return;
+    if (holdOnAbort?.()) return;
+    if (immediateOnAbort?.()) {
+      controller.abort(signal.reason);
+      return;
+    }
     giveup = armSteerGiveup(activity?.source, activity?.sessionId, timings, () => controller.abort(signal.reason));
   };
 

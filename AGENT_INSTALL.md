@@ -19,7 +19,8 @@ Steps:
 6. Tell the user to restart OMP, then run `/login` → "Google Antigravity (ACP)" and `/antigravity-acp refresh` inside OMP. Do not perform these steps yourself.
 
 Notes:
-- The adapter auto-selects the newer of the `agy` CLI's bundled server and its managed registry runtime; no channel configuration is required. An explicit `AGY_ACP_BIN` environment variable overrides the choice — do not set it unless the user asks.
+- The adapter prefers a usable `agy` CLI and falls back to the managed registry runtime. It never installs the CLI. An explicit `AGY_ACP_BIN` environment variable overrides the choice. Do not set it unless the user asks.
+- To pin a channel, set `runtimeSource` in `~/.omp/agent/antigravity-acp-provider/config.json` to `auto`, `cli`, or `managed`. A pinned source fails instead of downloading the other channel.
 - ACP sessions are stored under `~/.gemini/antigravity-acp/`. The user's personal `agy` CLI chats under `~/.gemini/antigravity-cli/` are never read or deleted by the adapter.
 
 Acceptance: one adapter installed, `omp models antigravity-acp --json` returns valid JSON, and no credential material appears in any output. Report the commands run, the adapter version, any model IDs and the first step that failed.

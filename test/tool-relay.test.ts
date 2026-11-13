@@ -131,7 +131,7 @@ test("unknown and expired call ids fail closed", async () => {
   await call;
 });
 
-test("cancelAll resolves waiters through the original promise", async () => {
+test("cancelAll settles current waiters and keeps the reason for later waits", async () => {
   const { clock, relay } = relayFor();
   const deferred = Promise.withResolvers<CallToolResult>();
   const call = relay.call({ id: "call-1", name: "read", arguments: {} }, () => deferred.promise);
@@ -139,13 +139,61 @@ test("cancelAll resolves waiters through the original promise", async () => {
   clock.advance(100);
   await call;
   assert.equal(relay.pendingCount, 1);
+
+  const waiting = relay.await("call-1");
+  relay.cancelAll("turn cancelled");
+  const cancelled = await waiting;
+  assert.equal(cancelled.isError, true);
+  assert.match(textOf(cancelled), /turn cancelled/);
+
+  const later = await relay.await("call-1");
+  assert.equal(later.isError, true);
+  assert.match(textOf(later), /turn cancelled/);
+  assert.equal(relay.pendingCount, 0);
+
+  deferred.resolve(result("late"));
+  await Promise.resolve();
+  assert.match(textOf(await relay.await("call-1")), /turn cancelled/);
+});
+
+test("cancelAll settles a call that is still waiting", async () => {
+  const { relay } = relayFor(1_000);
+  const deferred = Promise.withResolvers<CallToolResult>();
+  const call = relay.call({ id: "call-1", name: "read", arguments: {} }, () => deferred.promise);
+  relay.cancelAll("cancelled promptly");
+  const cancelled = await call;
+  assert.equal(cancelled.isError, true);
+  assert.match(textOf(cancelled), /cancelled promptly/);
+});
+
+test("a threshold timeout cannot overwrite a cancellation in the same synchronous turn", async () => {
+  const { clock, relay } = relayFor();
+  const deferred = Promise.withResolvers<CallToolResult>();
+  const call = relay.call({ id: "call-1", name: "read", arguments: {} }, () => deferred.promise);
+  clock.advance(100);
+  relay.cancelAll("cancelled after timeout");
+  const cancelled = await call;
+  assert.equal(cancelled.isError, true);
+  assert.match(textOf(cancelled), /cancelled after timeout/);
+  assert.match(textOf(await relay.await("call-1")), /cancelled after timeout/);
+  deferred.resolve(result("late"));
+  await Promise.resolve();
+  assert.match(textOf(await relay.await("call-1")), /cancelled after timeout/);
+});
+
+test("an await timeout cannot overwrite a cancellation in the same synchronous turn", async () => {
+  const { clock, relay } = relayFor();
+  const deferred = Promise.withResolvers<CallToolResult>();
+  relay.call({ id: "call-1", name: "read", arguments: {} }, () => deferred.promise);
   const waiting = relay.await("call-1");
   clock.advance(100);
-  await waiting;
-  assert.equal(relay.pendingCount, 1);
-  deferred.resolve({ content: [{ type: "text", text: "cancelled" }], isError: true });
-  relay.cancelAll("turn cancelled");
-  assert.equal(relay.pendingCount, 0);
+  relay.cancelAll("cancelled after wait timeout");
+  const cancelled = await waiting;
+  assert.equal(cancelled.isError, true);
+  assert.match(textOf(cancelled), /cancelled after wait timeout/);
+  deferred.resolve(result("late"));
+  await Promise.resolve();
+  assert.match(textOf(await relay.await("call-1")), /cancelled after wait timeout/);
 });
 
 test("relay config accepts only 0 or 5000 through 165000", () => {

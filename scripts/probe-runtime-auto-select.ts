@@ -5,16 +5,17 @@
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { loadRuntimeSourcePreference } from "../extension/adapter-config.ts";
 if (!process.argv.includes("--live")) throw new Error("Pass --live explicitly; this probe creates an ACP session and may consume quota.");
 
 delete process.env.AGY_ACP_BIN;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stateDir = path.join(os.homedir(), ".omp", "agent", "antigravity-acp-provider");
 
-const { preferNewestAcpRuntime } = await import(pathToFileURL(path.join(root, "extension/acp-runtime-source.ts")).href);
-const preference = await preferNewestAcpRuntime(stateDir);
+const { selectAcpRuntime } = await import(pathToFileURL(path.join(root, "extension/acp-runtime-source.ts")).href);
+const preference = await selectAcpRuntime(stateDir);
 const { TierConnection, ensureAntigravityAcpReady } = await import(pathToFileURL(path.join(root, "extension/runtime.mjs")).href);
-await ensureAntigravityAcpReady();
+if (loadRuntimeSourcePreference(stateDir) === "auto") await ensureAntigravityAcpReady();
 
 const report: { preference: unknown; wrapper: string | null; advertisedModels: unknown[] } = {
   preference,

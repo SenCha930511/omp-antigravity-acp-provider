@@ -28,3 +28,9 @@ test("built runtime passes the full-context estimate to the final usage projecti
   assert.match(text, /usageFromPrompt2\(response, binding\.ompFallbackContextTokens\)/,
     "the final response must receive the full OMP context estimate");
 });
+
+test("built supervisor launches adapter-generated Windows wrappers", { skip: !built }, () => {
+  const text = fs.readFileSync(path.resolve("extension/assets/src/acp/supervisor.mjs"), "utf8");
+  assert.ok(text.includes('const windowsBatch = process.platform === "win32" && /\\.(?:cmd|bat)$/iu.test(agentCommand);'));
+  assert.ok(text.includes("windowsVerbatimArguments: true"));
+});

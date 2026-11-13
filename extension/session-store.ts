@@ -3,6 +3,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { lock } from "proper-lockfile";
+import { releaseAfter } from "./lock-release.ts";
 import { resolvePiAgentDir } from "./vendor/pi-antigravity-acp-provider/src/config.ts";
 
 interface SavedSessionRecord {
@@ -152,8 +153,17 @@ export class AcpSessionStore {
           await delay(10);
         }
       }
-      try { if (compromised) throw compromised; await work(); if (compromised) throw compromised; }
-      finally { await release(); }
+      let primaryFailed = false;
+      try {
+        if (compromised) throw compromised;
+        await work();
+        if (compromised) throw compromised;
+      } catch (error) {
+        primaryFailed = true;
+        throw error;
+      } finally {
+        await releaseAfter(release!, primaryFailed, compromised);
+      }
     });
   }
   private async read(): Promise<SavedSessionRecord[]> {

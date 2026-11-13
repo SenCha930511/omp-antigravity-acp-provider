@@ -447,15 +447,18 @@ export class TierConnection extends AntigravityAcpConnection {
     const queueHold = () => this.steerMode === "queue" && signal !== undefined && isSteerAbort(signal);
     const aborted = () => {
       abortedAt = performance.now();
-      // Queue mode keeps the ACP turn alive after OMP's steering abort. Freeze
-      // output from this point so the checkpoint matches what OMP retained.
-      if (queueHold()) this.muteSteerChunks(id);
+      // Freeze output after any abort so the cancellation checkpoint matches
+      // what OMP retained. Queue mode still holds the transport; explicit user
+      // cancellation aborts it immediately.
+      this.muteSteerChunks(id);
     };
     signal?.addEventListener("abort", aborted, { once: true });
     // The server may acknowledge session/cancel but still send final updates.
-    // A transport abort would close the whole connection 1.5s later. Hold it
-    // while the draining turn is alive; queue mode holds until it completes.
-    const deferred = signal ? deferredAbortSignal(signal, this.steerTimings, { source: this, sessionId: id }, queueHold) : undefined;
+    // A transport abort would close the whole connection 1.5s later, so queue
+    // steering holds it while the draining turn is alive. Explicit user or
+    // internal cancellation skips the hold so the upstream prompt sends
+    // session/cancel at once.
+    const deferred = signal ? deferredAbortSignal(signal, this.steerTimings, { source: this, sessionId: id }, queueHold, () => !isSteerAbort(signal)) : undefined;
     try { await this.cleanup?.touch(id); } catch { /* Cleanup must not affect inference. */ }
     try {
       const queryUsage = process.env.OMP_ACP_USAGE !== "off" && this.usageMode !== "off" && this.usageCommands.has(id);
