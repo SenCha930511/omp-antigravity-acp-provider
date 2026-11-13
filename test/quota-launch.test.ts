@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { registerOmpAdapter } from "../extension/index.ts";
-import type { OmpCommandContext } from "../extension/auth-sync.ts";
+import { secretService, type OmpCommandContext } from "../extension/auth-sync.ts";
 import { inspectRuntimeLaunchPlan, resolveLaunchTarget, type DirectCommand } from "../extension/runtime/launch.ts";
 import type { TierConnection } from "../extension/runtime.mjs";
 
@@ -68,10 +68,14 @@ test("quota ACP sessions use the verified launch record from the selected plan",
     AGY_ACP_BIN: process.env.AGY_ACP_BIN,
     GEMINI_HOME: process.env.GEMINI_HOME,
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    secretPresent: secretService.present,
+    secretRemove: secretService.remove,
   };
   process.env.AGY_ACP_BIN = cli;
   process.env.GEMINI_HOME = geminiHome;
   process.env.GEMINI_API_KEY = "offline-fixture";
+  secretService.present = async () => false;
+  secretService.remove = async () => undefined;
   const captured: CapturedConnection[] = [];
   const hooks = new Map<string, (event: unknown, ctx: OmpCommandContext) => unknown>();
   let provider: { usage?: QuotaUsageProvider } | undefined;
@@ -99,6 +103,8 @@ test("quota ACP sessions use the verified launch record from the selected plan",
     if (previous.AGY_ACP_BIN === undefined) delete process.env.AGY_ACP_BIN; else process.env.AGY_ACP_BIN = previous.AGY_ACP_BIN;
     if (previous.GEMINI_HOME === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = previous.GEMINI_HOME;
     if (previous.GEMINI_API_KEY === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previous.GEMINI_API_KEY;
+    secretService.present = previous.secretPresent;
+    secretService.remove = previous.secretRemove;
     await hooks.get("session_shutdown")?.({}, {} as OmpCommandContext);
     await fs.rm(root, { recursive: true, force: true });
   }

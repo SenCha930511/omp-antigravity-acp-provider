@@ -1,6 +1,6 @@
-import { describeCredentialStorage, inspectAntigravityAuth } from "./runtime.mjs";
+import { describeCredentialStorage } from "./runtime.mjs";
 import { saveAdapterPermissionMode, updateAdapterConfig, type AdapterPermissionMode } from "./adapter-config.ts";
-import { antigravityAccountEmail, authReady, formatLogoutSummary, keychain, ompCredentialSummary, type OmpAuthCoordinator, type OmpCommandContext } from "./auth-sync.ts";
+import { antigravityAccountEmail, authReady, formatLogoutSummary, inspectAcpAuth, keychain, ompCredentialSummary, type OmpAuthCoordinator, type OmpCommandContext } from "./auth-sync.ts";
 import { parseNativeToolMode, type NativeToolMode } from "./tool-routing.ts";
 import { saveToolPolicy, type ToolPolicy } from "./tool-policy.ts";
 import { DEFAULT_USAGE_MODE, updateContextSettings, resolveContextOptions, saveContextSettings, type ContextSettings } from "./context-settings.ts";
@@ -432,7 +432,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         lease.release();
       }
       deps.auth.noteLoginSucceeded?.();
-      const auth = inspectAntigravityAuth();
+      const auth = await inspectAcpAuth();
       const email = antigravityAccountEmail();
       ctx.ui.notify(`Antigravity Google login finished${email ? ` as ${email}` : ""} — fresh sign-in; ACP auth: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}.`, "info");
       return;
@@ -440,15 +440,15 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
 
     if (command === "logout") {
       if (value) throw new Error("Usage: /antigravity-acp logout");
-      const { keychainRemoved, ompMarker } = await deps.auth.performCommandLogout(ctx);
+      const { keychainRemoved, keyringRemoved, ompMarker } = await deps.auth.performCommandLogout(ctx);
       // Keep the confirmation terse; /antigravity-acp account shows the details.
-      ctx.ui.notify(formatLogoutSummary({ keychainRemoved, ompMarker }), "info");
+      ctx.ui.notify(formatLogoutSummary({ keychainRemoved, keyringRemoved, ompMarker }), "info");
       return;
     }
 
     if (command === "account") {
       if (value) throw new Error("Usage: /antigravity-acp account");
-      const auth = inspectAntigravityAuth();
+      const auth = await inspectAcpAuth();
       let ompSource: string | undefined;
       try { ompSource = ctx?.modelRegistry?.authStorage?.keys?.describe?.("antigravity-acp", sessionIdOf(ctx)); } catch { /* host version dependent */ }
       // Reading saved state needs no live runtime; show live numbers only
@@ -458,11 +458,15 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       const permissionMode = deps.getPermissionMode();
       const omp = ompCredentialSummary(ctx);
       const accountEmail = antigravityAccountEmail();
+      const googleAccount = accountEmail
+        ?? (auth.keyring === true ? "signed in · system keyring entry; email unavailable"
+          : (await keychain.present()) === true ? "signed in · keychain token; email unavailable"
+          : "not signed in");
       const marker = omp.present === undefined ? "unknown; host did not expose the credential store"
         : omp.present ? `present · ${omp.record} · authorized ${omp.authorizedAt ?? "unknown time"}${omp.email && omp.email !== accountEmail ? ` · account ${omp.email}` : ""}`
         : "not stored; run /login or /antigravity-acp login";
       const fields: DisplayField[] = [
-        ["Google account", accountEmail ?? ((await keychain.present()) === true ? "signed in · keychain token; email unavailable" : "not signed in")],
+        ["Google account", googleAccount],
         ["ACP authentication", `${auth.status}${auth.authType ? ` · ${auth.authType}` : ""}`],
         ["Credential storage", describeCredentialStorage()],
         ["OMP login marker", marker],
@@ -553,8 +557,10 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       const thinking = [...deps.connections].map(connection => connection.confirmedThinking).filter((value): value is { model: string; effort: string } => Boolean(value));
       const stopped = snapshot.processes.filter(process => process.alive === false).length;
       const ignoredNoise = snapshot.processes.reduce((total, process) => total + (process.ignoredStdoutNoiseLines ?? 0), 0);
+      const ready = await authReady();
+      const login = ready ? "ready" : `not ready · ${(await inspectAcpAuth()).status}`;
       ctx.ui.notify(section("Antigravity ACP (OMP adapter)", [
-        ["Login", (await authReady()) ? "ready" : `not ready · ${inspectAntigravityAuth().status}`],
+        ["Login", login],
         ["Runtime", versions.join(", ") || undefined],
         ["Native channel", channels.join(", ") || undefined],
         ["Permission", requestedLabel === wireLabel ? requestedLabel : `requested ${requestedLabel} → wire ${wireLabel}`],

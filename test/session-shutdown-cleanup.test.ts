@@ -6,7 +6,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { registerOmpAdapter } from "../extension/index.ts";
 import { AcpSessionStore, AntigravityRuntime, SessionCleanup } from "../extension/runtime.mjs";
-import type { OmpCommandContext } from "../extension/auth-sync.ts";
+import { secretService, type OmpCommandContext } from "../extension/auth-sync.ts";
 import type { TierConnection } from "../extension/tier-connection.ts";
 
 type Hook = (event: unknown, ctx: OmpCommandContext) => unknown;
@@ -36,6 +36,11 @@ test("session_shutdown finishes cleanup after runtime teardown rejection and pre
   };
   const savedEnvironment = Object.fromEntries(Object.keys(environment).map(key => [key, process.env[key]]));
   Object.assign(process.env, environment);
+
+  const originalSecretPresent = secretService.present;
+  const originalSecretRemove = secretService.remove;
+  secretService.present = async () => false;
+  secretService.remove = async () => undefined;
 
   const hooks = new Map<string, Hook>();
   const runtimeIds = new Map<object, string>();
@@ -213,6 +218,8 @@ test("session_shutdown finishes cleanup after runtime teardown rejection and pre
     AntigravityRuntime.prototype.close = originalClose;
     SessionCleanup.prototype.flushStoreNotes = originalFlush;
     SessionCleanup.prototype.stop = originalStop;
+    secretService.present = originalSecretPresent;
+    secretService.remove = originalSecretRemove;
     for (const [key, value] of Object.entries(savedEnvironment)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }

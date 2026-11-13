@@ -374,17 +374,12 @@ test("a failing keyring removal cannot certify a fresh login", async () => {
   logoutFollow.removalRetryMs = 0;
   keychain.present = async () => undefined;
   secretService.present = async () => true;
-  secretService.remove = async () => { throw new Error("Unable to remove the Antigravity keyring entry"); };
+  secretService.remove = async () => undefined;
   try {
     const fixture = authCoordinatorFixture();
-    // A failing removal may surface as a rejection or as an unconfirmed
-    // result; neither may be reported as a completed logout.
-    const logout = await fixture.coordinator.performCommandLogout(fixture.ctx).then(
-      (result: { keyringRemoved?: boolean }) => ({ result }),
-      (error: Error) => ({ error }),
-    );
-    if ("error" in logout) assert.match(logout.error.message, /Unable to (?:remove|confirm)/);
-    else assert.equal(logout.result.keyringRemoved, false, "a failed removal must not report success");
+    const result = await fixture.coordinator.performCommandLogout(fixture.ctx);
+    assert.equal(result.keyringRemoved, false,
+      "a known-present keyring that becomes unavailable must not certify removal");
     await assert.rejects(fixture.coordinator.beginFreshGoogleLogin(), (error: Error) => {
       assert.match(error.message, /Unable to (?:remove|confirm)/);
       assert.doesNotMatch(error.message, /synthetic|refresh_token|token=/);

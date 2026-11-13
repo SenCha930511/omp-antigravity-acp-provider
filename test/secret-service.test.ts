@@ -111,10 +111,14 @@ test("clear succeeds, a bare exit 1 is already absent, other failures are fixed"
 	}, "linux");
 	assert.equal(await unavailable.remove(), undefined, "an unavailable keyring cannot be certified as removed");
 
+	const unavailableForCleanup = createSecretService(async () => {
+		throw failure({ code: "ETIMEDOUT", killed: true, signal: "SIGTERM", stdout: SYNTHETIC_SECRET, stderr: RAW_FAILURE });
+	}, "linux");
+	assert.equal(await unavailableForCleanup.remove(), undefined, "an interrupted clear cannot certify a deletion");
+
 	const messages = new Set<string>();
 	for (const error of [
 		failure({ code: 2, killed: false, signal: null, stdout: SYNTHETIC_SECRET, stderr: RAW_FAILURE }),
-		failure({ code: "ETIMEDOUT", killed: true, signal: "SIGTERM", stdout: SYNTHETIC_SECRET, stderr: RAW_FAILURE }),
 	]) {
 		const failing = createSecretService(async () => { throw error; }, "linux");
 		await assert.rejects(failing.remove(), (thrown: unknown) => {
