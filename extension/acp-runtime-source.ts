@@ -1,11 +1,5 @@
 // Google ships the same ACP server through two channels: the registry-signed
 // runtime installed under ~/.local/opt/agy-acp, and the agy CLI, which bundles
-// the server and self-updates on its own. The registry has lagged the CLI
-// (Claude and GPT-OSS models arrived in the CLI's server first), so when the
-// CLI on PATH is newer the adapter routes the launch through upstream's
-// AGY_ACP_BIN override instead of modifying vendored code. An explicit
-// AGY_ACP_BIN always wins, and every OMP process re-evaluates the choice so a
-// registry release that moves back ahead reclaims the launch.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -13,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { loadRuntimeSourcePreference } from "./adapter-config.ts";
 import { writeJsonAtomic } from "./fs-atomic.ts";
 
 const execFileAsync = promisify(execFile);
@@ -34,6 +29,43 @@ export interface AcpPermissionProfile {
   autoApproveProcess: boolean;
 }
 
+export type AcpQuotaSource =
+  | { kind: "cli"; cliPath: string }
+  | { kind: "acp"; command: string; args: string[] };
+
+export async function resolveAcpQuotaSource(
+  stateDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  home = os.homedir(),
+  platform: NodeJS.Platform = process.platform,
+  signal?: AbortSignal,
+  preference?: AcpRuntimePreference,
+): Promise<AcpQuotaSource | undefined> {
+  const wrapper = cliWrapperPath(stateDir, platform);
+  const configured = env.AGY_ACP_BIN?.trim();
+  const configuredIsWrapper = configured !== undefined && path.resolve(configured) === path.resolve(wrapper);
+  if (configured && !configuredIsWrapper) return { kind: "acp", ...resolveExplicitAcpCommand(configured, home, platform) };
+  if (preference?.source === "env") return configured ? { kind: "acp", ...resolveExplicitAcpCommand(configured, home, platform) } : undefined;
+  if (preference?.source === "cli") return preference.cliPath ? { kind: "cli", cliPath: preference.cliPath } : undefined;
+  if (preference?.source === "managed") {
+    const managed = resolveManagedAcpCommand(home, platform);
+    return managed ? { kind: "acp", ...managed } : undefined;
+  }
+  const runtimeSource = loadRuntimeSourcePreference(stateDir);
+  if (runtimeSource === "managed") {
+    const managed = resolveManagedAcpCommand(home, platform);
+    return managed ? { kind: "acp", ...managed } : undefined;
+  }
+  const recorded = configuredIsWrapper ? readRuntimeSourceRecord(stateDir) : undefined;
+  const recordedCli = recorded?.cliPath !== undefined && isExecutableFile(recorded.cliPath)
+    ? recorded.cliPath : undefined;
+  const cli = recordedCli ?? (await findAgyCli(env, signal))?.path;
+  if (cli) return { kind: "cli", cliPath: cli };
+  if (runtimeSource === "cli") return undefined;
+  const managed = resolveManagedAcpCommand(home, platform);
+  return managed ? { kind: "acp", ...managed } : undefined;
+}
+
 export function resolveAcpPermissionProfile(
   preference: AcpRuntimePreference | undefined,
   requestedMode: AcpRequestedPermissionMode,
@@ -46,6 +78,28 @@ export function resolveAcpPermissionProfile(
       : modernCli && requestedMode === "auto_edit" ? "accept-edits" : requestedMode,
     autoApproveProcess: modernCli && requestedMode === "yolo",
   };
+}
+
+function resolveExplicitAcpCommand(
+  configured: string,
+  home: string,
+  platform: NodeJS.Platform,
+): { command: string; args: string[] } {
+  const command = configured === "~" ? home
+    : configured.startsWith("~/") ? path.join(home, configured.slice(2)) : configured;
+  if (platform !== "linux") return { command, args: [] };
+  try {
+    const fd = fs.openSync(command, "r");
+    try {
+      const prefix = Buffer.alloc(2);
+      const count = fs.readSync(fd, prefix, 0, prefix.length, 0);
+      return { command, args: prefix.subarray(0, count).toString("utf8") === "#!" ? [] : ["--uid="] };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return { command, args: [] };
+  }
 }
 
 export function resolveManagedAcpCommand(
@@ -63,66 +117,80 @@ export function assertSelectedAcpCliLaunch(
   stateDir: string,
   preference: AcpRuntimePreference | undefined,
   env: NodeJS.ProcessEnv = process.env,
-  purpose: "inference" | "quota" = "inference",
-  home = os.homedir(),
+  platform: NodeJS.Platform = process.platform,
 ): { command: string; args: string[] } | undefined {
-  const automaticWrapper = path.join(stateDir, "agy-acp-cli.sh");
-  const configured = env.AGY_ACP_BIN?.trim();
-  if (purpose === "quota" && configured && path.resolve(configured) !== path.resolve(automaticWrapper)) return undefined;
-  if (purpose === "quota") {
-    const managed = resolveManagedAcpCommand(home);
-    if (!managed) throw new Error("Managed ACP binary is missing or not executable for quota");
-    env.AGY_ACP_BIN = managed.command;
-    return managed;
-  }
   if (preference?.source !== "cli") return;
-  const wrapper = path.join(stateDir, "agy-acp-cli.sh");
+  const wrapper = cliWrapperPath(stateDir, platform);
+  const configured = env.AGY_ACP_BIN?.trim();
   let intact = false;
   try {
-    intact = preference.cliPath !== undefined && fs.readFileSync(wrapper, "utf8") === cliWrapperScript(preference.cliPath);
+    intact = preference.cliPath !== undefined && fs.readFileSync(wrapper, "utf8") === cliWrapperScript(preference.cliPath, platform);
   } catch {
     // Missing and unreadable wrappers fail the same launch check.
   }
-  if (env.AGY_ACP_BIN !== wrapper || !isExecutableFile(wrapper) || !intact) {
+  if (!configured || path.resolve(configured) !== path.resolve(wrapper) || !isExecutableFile(wrapper) || !intact) {
     throw new Error(`Selected ACP CLI wrapper is missing, changed, not executable, or not selected by AGY_ACP_BIN: ${wrapper}`);
   }
 }
 
-export async function preferNewestAcpRuntime(
+export async function selectAcpRuntime(
   stateDir: string,
   env: NodeJS.ProcessEnv = process.env,
   home = os.homedir(),
+  platform: NodeJS.Platform = process.platform,
 ): Promise<AcpRuntimePreference> {
-  const wrapper = path.join(stateDir, "agy-acp-cli.sh");
+  const wrapper = cliWrapperPath(stateDir, platform);
   const configured = env.AGY_ACP_BIN?.trim();
-  // A wrapper written by this adapter is not a user override. A second
-  // extension instance can see the first instance's AGY_ACP_BIN and must
-  // recover the CLI profile instead of treating it as an explicit env runtime.
-  if (configured && path.resolve(configured) === path.resolve(wrapper)) {
-    const cli = await findAgyCli(env);
-    if (cli) {
-      const preference = { source: "cli", cliPath: cli.path, cliVersion: cli.version, managedVersion: readManagedVersion(home) } as const;
-      writeCliWrapper(wrapper, cli.path);
-      writeRuntimeSourceRecord(stateDir, preference);
-      env.AGY_ACP_BIN = wrapper;
-      return preference;
-    }
-    const recorded = readRuntimeSourceRecord(stateDir);
-    if (recorded) return recorded;
-  } else if (configured) {
-    return { source: "env" };
-  }
-  // The generated wrapper is a POSIX shell script that upstream launches
-  // directly; Windows cannot execute it, so it stays managed-only there.
-  if (process.platform === "win32") return { source: "managed" };
-  const cli = await findAgyCli(env);
+  const configuredIsWrapper = configured !== undefined && path.resolve(configured) === path.resolve(wrapper);
+  if (configured && !configuredIsWrapper) return { source: "env" };
+  const runtimeSource = loadRuntimeSourcePreference(stateDir);
   const managedVersion = readManagedVersion(home);
-  if (!cli || (managedVersion && compareVersions(cli.version, managedVersion) <= 0)) {
-    if (configured) delete env.AGY_ACP_BIN;
-    return { source: "managed", cliPath: cli?.path, cliVersion: cli?.version, managedVersion };
+  if (runtimeSource === "cli") {
+    if (configuredIsWrapper) delete env.AGY_ACP_BIN;
+    const cli = await findAgyCli(env);
+    if (!cli) throw new Error('runtimeSource is "cli" in config.json, but no usable agy CLI was found. Install the CLI or set runtimeSource to "auto".');
+    return selectCli(stateDir, wrapper, env, platform, cli, managedVersion);
   }
+  if (runtimeSource === "managed") {
+    if (configuredIsWrapper) delete env.AGY_ACP_BIN;
+    if (!resolveManagedAcpCommand(home, platform)) {
+      throw new Error('runtimeSource is "managed" in config.json, but the managed ACP runtime is missing. Install it or set runtimeSource to "auto".');
+    }
+    return { source: "managed", managedVersion };
+  }
+  const cli = await findAgyCli(env);
+  if (cli) {
+    try {
+      return selectCli(stateDir, wrapper, env, platform, cli, managedVersion);
+    } catch {
+      // Fall through to recorded CLI or managed runtime when wrapper persistence fails.
+    }
+  }
+  if (configuredIsWrapper) {
+    const recorded = readRuntimeSourceRecord(stateDir);
+    if (recorded && isExecutableFile(recorded.cliPath)) {
+      try {
+        writeCliWrapper(wrapper, recorded.cliPath, platform);
+        return recorded;
+      } catch {
+        // Fall through to managed runtime when wrapper persistence fails.
+      }
+    }
+  }
+  if (configured) delete env.AGY_ACP_BIN;
+  return { source: "managed", cliPath: cli?.path, cliVersion: cli?.version, managedVersion };
+}
+
+function selectCli(
+  stateDir: string,
+  wrapper: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  cli: { path: string; version: string },
+  managedVersion: string | undefined,
+): AcpRuntimePreference {
   const preference = { source: "cli", cliPath: cli.path, cliVersion: cli.version, managedVersion } as const;
-  writeCliWrapper(wrapper, cli.path);
+  writeCliWrapper(wrapper, cli.path, platform);
   writeRuntimeSourceRecord(stateDir, preference);
   env.AGY_ACP_BIN = wrapper;
   return preference;
@@ -148,13 +216,16 @@ function readRuntimeSourceRecord(stateDir: string): AcpRuntimePreference | undef
   }
 }
 
-async function findAgyCli(env: NodeJS.ProcessEnv): Promise<{ path: string; version: string } | undefined> {
+async function findAgyCli(env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<{ path: string; version: string } | undefined> {
   const agy = findExecutableOnPath("agy", env) ?? findExecutableOnPath("agy.exe", env);
   if (!agy) return undefined;
   try {
     // `acp --version` both proves the subcommand exists and reports the
     // bundled server version; a CLI without it must not be selected.
-    const { stdout } = await execFileAsync(agy, ["acp", "--version"], { timeout: CLI_VERSION_TIMEOUT_MS });
+    const { stdout } = await execFileAsync(agy, ["acp", "--version"], {
+      timeout: CLI_VERSION_TIMEOUT_MS,
+      ...(signal ? { signal } : {}),
+    });
     const version = /\d+\.\d+\.\d+/.exec(stdout)?.[0];
     return version ? { path: agy, version } : undefined;
   } catch {
@@ -202,15 +273,23 @@ function compareVersions(left: string, right: string): number {
   return 0;
 }
 
-function cliWrapperScript(agyPath: string): string {
+function cliWrapperPath(stateDir: string, platform: NodeJS.Platform): string {
+  return path.join(stateDir, platform === "win32" ? "agy-acp-cli.cmd" : "agy-acp-cli.sh");
+}
+
+function cliWrapperScript(agyPath: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") {
+    const escaped = agyPath.replace(/%/g, "%%");
+    return `@echo off\r\nsetlocal\r\nset "OMP_ACP_EXTRA="\r\nif "%OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS%"=="1" set "OMP_ACP_EXTRA=--dangerously-skip-permissions"\r\n"${escaped}" acp --app_data_dir=antigravity-acp %OMP_ACP_EXTRA% %*\r\nexit /b %ERRORLEVEL%\r\n`;
+  }
   // --app_data_dir=antigravity-acp is the managed .par's own default: the CLI
   // binary would otherwise default to antigravity-cli, mixing ACP sessions
   // with personal CLI chats outside session cleanup's tracked tree.
-  return `#!/bin/sh\nif [ -n "\${OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS:-}" ]; then\n  set -- --dangerously-skip-permissions "$@"\nfi\nexec '${agyPath.replace(/'/g, "'\\''")}' acp --app_data_dir=antigravity-acp "$@"\n`;
+  return `#!/bin/sh\nif [ "\${OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS:-}" = "1" ]; then\n  set -- --dangerously-skip-permissions "$@"\nfi\nexec '${agyPath.replace(/'/g, "'\\''")}' acp --app_data_dir=antigravity-acp "$@"\n`;
 }
 
-function writeCliWrapper(file: string, agyPath: string): void {
-  const script = cliWrapperScript(agyPath);
+function writeCliWrapper(file: string, agyPath: string, platform: NodeJS.Platform = process.platform): void {
+  const script = cliWrapperScript(agyPath, platform);
   try {
     if (fs.readFileSync(file, "utf8") === script) return;
   } catch {

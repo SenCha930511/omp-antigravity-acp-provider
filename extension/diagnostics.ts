@@ -3,7 +3,11 @@ import { writeJsonAtomic, isMissingFileError } from "./fs-atomic.ts";
 export class Diagnostics {
   private enabled = false;
   private readonly samples: Array<{ stage: string; ms: number }> = [];
-  constructor(private readonly file: string) {
+  constructor(private readonly file: string, enabled?: boolean) {
+    if (enabled !== undefined) {
+      this.enabled = enabled;
+      return;
+    }
     try { this.enabled = JSON.parse(fs.readFileSync(file, "utf8")).enabled === true; } catch (e) { if (!isMissingFileError(e)) this.enabled = false; }
   }
   configure(enabled: boolean) { writeJsonAtomic(this.file, { enabled }, false); this.enabled = enabled; if (!enabled) this.samples.length = 0; }

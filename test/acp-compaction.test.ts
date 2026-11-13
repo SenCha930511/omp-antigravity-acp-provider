@@ -108,3 +108,48 @@ test("TierConnection forwards normal ACP updates through the presentation filter
     await connection.close();
   }
 });
+
+test("TierConnection aborts the upstream prompt immediately for explicit cancellation", async () => {
+  const original = AntigravityAcpConnection.prototype.prompt;
+  let upstreamSignal: AbortSignal | undefined;
+  const started = Promise.withResolvers<void>();
+  AntigravityAcpConnection.prototype.prompt = async (_request: any, signal?: AbortSignal) => {
+    upstreamSignal = signal;
+    started.resolve();
+    return new Promise((_, reject) => {
+      const abort = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+    });
+  };
+  const connection: any = Object.assign(Object.create(TierConnection.prototype), {
+    activePrompts: 0,
+    usageMode: "off",
+    usageQueryCount: 0,
+    usageQueryMs: 0,
+    steerMode: "queue",
+    steerTimings: { idleMs: 60_000, maxMs: 300_000 },
+    contextUsage: new Map(),
+    ompContextWindows: new Map(),
+    compactions: new Map(),
+    usageStatus: new Map(),
+    usageBaselines: new Map(),
+    usageCommands: new Set(),
+    usageCaptures: new Map(),
+    firstOutput: new Map(),
+    steerMuted: new Set(),
+    steerActivity: new Map(),
+  });
+  try {
+    const cancelled = new AbortController();
+    const pending = connection.prompt({ sessionId: "session", prompt: [] }, cancelled.signal);
+    await started.promise;
+    cancelled.abort("user cancelled");
+    await assert.rejects(pending);
+    assert.equal(upstreamSignal?.aborted, true, "explicit cancellation must not wait for the grace");
+    assert.equal(upstreamSignal?.reason, "user cancelled");
+    assert.equal(connection.steerMuted.has("session"), true, "cancellation must freeze late ACP output");
+  } finally {
+    AntigravityAcpConnection.prototype.prompt = original;
+  }
+});

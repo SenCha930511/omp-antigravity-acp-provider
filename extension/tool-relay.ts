@@ -1,4 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 
 import {
@@ -72,6 +73,8 @@ interface RelayRecord {
   name: string;
   argumentsKey: string;
   promise: Promise<CallToolResult>;
+  cancellation: Promise<CallToolResult>;
+  cancel: (result: CallToolResult) => void;
   state: RelayState;
   result?: CallToolResult;
 }
@@ -121,14 +124,17 @@ export class ToolRelay {
     const argumentsKey = canonicalArguments(invocation.arguments);
     const duplicate = this.findDuplicate(invocation.name, argumentsKey);
     if (duplicate) return relayNoticeResult(duplicate.callId);
-    const callId = invocation.id || crypto.randomUUID();
+    const callId = invocation.id || randomUUID();
     const promise = start();
+    const cancellation = Promise.withResolvers<CallToolResult>();
     const record: RelayRecord = {
       callId,
       turn: this.turn,
       name: invocation.name,
       argumentsKey,
       promise,
+      cancellation: cancellation.promise,
+      cancel: cancellation.resolve,
       state: "pending",
     };
     this.records.set(callId, record);
@@ -136,7 +142,8 @@ export class ToolRelay {
       result => this.settle(record, result),
       () => this.settle(record, relayError("The original tool call failed before returning a result")),
     );
-    const outcome = await this.wait(promise, this.config.thresholdMs);
+    const outcome = await this.wait(Promise.race([promise, record.cancellation]), this.config.thresholdMs);
+    if (record.state === "cancelled") return record.result ?? relayError("The original tool call returned no result");
     if (outcome.timedOut) {
       if (record.state === "pending") record.state = "relayed";
       return relayNoticeResult(callId);
@@ -153,7 +160,8 @@ export class ToolRelay {
     if (record.state === "fulfilled" || record.state === "failed" || record.state === "cancelled") {
       return record.result ?? relayError("The original tool call has no result");
     }
-    const outcome = await this.wait(record.promise, this.config.thresholdMs);
+    const outcome = await this.wait(Promise.race([record.promise, record.cancellation]), this.config.thresholdMs);
+    if (record.state === "cancelled") return record.result ?? relayError("The original tool call returned no result");
     if (outcome.timedOut) {
       if (record.state === "pending") record.state = "relayed";
       return relayNoticeResult(callId);
@@ -162,13 +170,13 @@ export class ToolRelay {
   }
 
   cancelAll(reason: string): void {
+    const result = relayError(reason);
     for (const record of this.records.values()) {
-      if (record.state === "pending" || record.state === "relayed") {
-        record.state = "cancelled";
-        record.result = relayError(reason);
-      }
+      if (record.state !== "pending" && record.state !== "relayed") continue;
+      record.state = "cancelled";
+      record.result = result;
+      record.cancel(result);
     }
-    this.records.clear();
   }
 
   private settle(record: RelayRecord, result: CallToolResult): void {

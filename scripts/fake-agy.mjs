@@ -393,6 +393,18 @@ async function prompt(state, id, params) {
       finishPrompt(state, id, { stopReason: "end_turn" });
       return;
     }
+    if (text.includes("WIRE_TOOL_ALIAS_TEST")) {
+      const result = await callToolWithRelay(state, "pi_read", { file_path: "/wire-alias" });
+      notify(state, message(`TOOL:${textOf(result)}`));
+      finishPrompt(state, id, { stopReason: "end_turn" });
+      return;
+    }
+    if (text.includes("WIRE_TOOL_MISSING_TEST")) {
+      const result = await callTool(state, "pi_read", {});
+      notify(state, message(`TOOL:${textOf(result)}`));
+      finishPrompt(state, id, { stopReason: "end_turn" });
+      return;
+    }
     if (text.includes("Continue exactly where your previous output stopped")) {
       notify(state, message("CONTINUED"));
       finishPrompt(state, id, { stopReason: "end_turn" });

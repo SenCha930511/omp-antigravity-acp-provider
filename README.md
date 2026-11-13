@@ -17,27 +17,30 @@ This is an independent adaptation, **NOT** an official Google or OMP integration
 ## Features
 
 - All server-advertised models, including Claude, GPT-OSS and future IDs when the ACP endpoint advertises them.
-- Newest-server auto-selection. When the `agy` CLI on PATH bundles a newer ACP server than the registry-installed runtime, the adapter launches it through a generated `AGY_ACP_BIN` wrapper, so CLI-first models appear without manual setup. An explicit `AGY_ACP_BIN` always wins.
+- CLI-first selection. When a usable `agy` CLI is on `PATH`, the adapter launches it through a generated `AGY_ACP_BIN` wrapper. The managed runtime is the fallback. An explicit `AGY_ACP_BIN` always wins.
 - Per-model thinking levels, exposed only when the server confirms them.
 - OMP tools through an authenticated loopback MCP bridge.
 - Optional `disabled` native-tool mode for strict OMP-only sessions.
 - Lazy ACP startup and warm session reuse.
 - `/login` plus `/antigravity-acp` account, usage and cleanup commands.
-- API-equivalent cost estimates, not subscription billing.
+- API-equivalent cost estimates from a model-ID rate table, not subscription billing. ACP model records do not include price fields.
 - Long-running OMP tools survive the MCP request window through a relay. The model resumes the same result with `pi_omp_await_result`; the control tool is a separate MCP server and never appears in OMP's tool list.
 - Permission requests are tied to the originating session, turn and tool call. Forged, conflicting or previous-turn identities fail closed, while normal requests still use OMP's human review.
 - The MCP `tools/list` reflects the current OMP tool set. The offline wire test covers add, remove and restore on one warm ACP session.
+- Tool-argument hardening on the MCP bridge. Habitual alias mistakes such as `path` for `file_path` are corrected only when the tool schema makes the mapping unambiguous, and rejected calls return the missing required keys plus the tool's expected signature instead of a bare schema failure.
+- Loopback traffic always bypasses proxied environments. When `HTTP(S)_PROXY` or `ALL_PROXY` is set for the ACP child process, the adapter appends `localhost`, `127.0.0.1` and `::1` to `NO_PROXY`/`no_proxy` so the loopback MCP bridge is never routed through an external proxy.
+- OAuth material is redacted from failure text. Authorization URLs, sensitive query values, `Bearer` tokens and OAuth pairs such as `code_challenge` or `access_token` are masked before messages reach OMP, while ordinary diagnostics like `exit code=1` stay intact.
 
 ## Install: for human
 
-Follow these steps in order. The whole flow takes a few minutes, plus Google's sign-in and the first runtime download.
+Follow these steps in order. The whole flow takes a few minutes, plus Google's sign-in. A runtime download is only needed when no usable `agy` CLI is installed.
 
 ### 1. Check prerequisites
 
 - OMP is installed and `omp --version` works.
 - Node.js 22.19 or newer (`node --version`) and npm are on `PATH`; the marketplace launcher uses them on first load.
 - A supported platform: macOS, Linux or Windows. Live testing has been on macOS.
-- Internet access for the first run. The official Antigravity runtime downloads separately (about 383 MiB on macOS) into `~/.local/opt/agy-acp/`.
+- Internet access when no usable `agy` CLI is installed. The managed fallback downloads separately (about 383 MiB on macOS) into `~/.local/opt/agy-acp/`.
 
 ### 2. Install exactly one adapter
 
@@ -99,16 +102,43 @@ The installation runbook is in [AGENT_INSTALL.md](AGENT_INSTALL.md). Hand that f
 
 ## ACP server channels and selection
 
-Google ships the same ACP server through two channels; the adapter picks between them automatically at every OMP startup.
+Google ships the same ACP server through two channels. The adapter chooses one at every OMP startup.
 
-- **`agy` CLI** — the self-updating command-line product. When its bundled server is newer than the registry runtime, the adapter launches it through a generated `AGY_ACP_BIN` wrapper, so CLI-first models (for example Claude and GPT-OSS) appear without manual setup.
-- **Managed runtime** — the registry-signed release downloaded and verified into `~/.local/opt/agy-acp/`. Used when the CLI is missing or not newer, and installed automatically when neither channel exists.
+- **`agy` CLI.** Preferred whenever `agy` or `agy.exe` is on `PATH` and `agy acp --version` returns a semantic version. The adapter writes `agy-acp-cli.sh` or `agy-acp-cli.cmd` and points `AGY_ACP_BIN` at that wrapper.
+- **Managed runtime.** The registry-signed release in `~/.local/opt/agy-acp/`. It is the fallback when the CLI is missing or unusable.
 
 Selection order:
 
-1. An explicit `AGY_ACP_BIN` always wins. Point it at an `agy acp`-capable executable or wrapper to force a channel.
-2. Otherwise the newer server version wins; ties go to the managed runtime.
-3. With neither present, the managed runtime is downloaded from Google's registry on next use.
+1. An explicit non-wrapper `AGY_ACP_BIN` wins. The adapter's generated wrapper is not a user override.
+2. If `runtimeSource` is `cli` or `managed`, the adapter uses that source exclusively. A missing pinned source fails the first ACP use and is not downloaded.
+3. If `runtimeSource` is `auto`, a usable CLI wins, even when its version is older than the managed runtime.
+4. In `auto`, if the CLI is missing or unusable, the adapter uses the managed runtime. If the managed runtime is missing, it downloads it from Google's registry.
+5. In `auto`, if writing the CLI wrapper or runtime record fails, the adapter falls back to the managed runtime.
+
+The adapter never installs the `agy` CLI. It downloads the managed runtime only in `auto` when no usable CLI is selected. Inference and quota use the same selection.
+
+On the first session start after OMP launches, the adapter attempts one background model refresh. A successful refresh re-registers the provider so newly advertised models and their API-equivalent rates become available. If login or ACP startup fails, the cached catalog remains usable and `/antigravity-acp refresh` still forces a refresh.
+
+Create or edit `~/.omp/agent/antigravity-acp-provider/config.json`:
+
+```json
+{
+  "permissions": "yolo",
+  "runtimeSource": "auto",
+  "nativeTools": "prefer",
+  "debugToolUpdates": false,
+  "usageMode": "off",
+  "diagnostics": false
+}
+```
+
+`permissions` accepts `default`, `auto_edit`, or `yolo`. `runtimeSource` accepts `auto`, `cli`, or `managed`. `nativeTools` accepts `prefer` or `disabled`. `usageMode` accepts `auto` or `off`. `debugToolUpdates` and `diagnostics` are booleans. Missing fields use these defaults: `permissions: "yolo"`, `runtimeSource: "auto"`, `nativeTools: "prefer"`, `debugToolUpdates: false`, `usageMode: "off"`, and `diagnostics: false`. Slash commands write the command-backed fields and keep the legacy setting files in sync. Context budgets remain in `context.json`; cleanup policy remains in `cleanup.json`.
+
+- `auto` uses the CLI first and falls back to the managed runtime. If no usable CLI exists, it downloads the managed runtime.
+- `cli` requires a usable `agy` CLI. If the CLI is missing or unusable, the first ACP use fails and nothing is downloaded.
+- `managed` requires the managed runtime. If it is missing, the first ACP use fails and nothing is downloaded.
+
+A pinned source never falls back to the other channel and never downloads it. An explicit non-wrapper `AGY_ACP_BIN` still wins over this setting. If `PI_CODING_AGENT_DIR` is set, use its actual path for `config.json`. Other `runtimeSource` values fail provider startup.
 
 Session storage follows the server's own `--app_data_dir`. The generated wrapper pins `antigravity-acp` — the managed runtime's own default — so CLI-launched ACP sessions land in `~/.gemini/antigravity-acp/`, where `/antigravity-acp cleanup` and session ownership tracking operate. Personal `agy` CLI chats stay in `~/.gemini/antigravity-cli/` and are never read or deleted by the adapter. `GEMINI_HOME` relocates the managed runtime's tree (upstream behavior); the `agy` CLI stores under `~/.gemini` regardless.
 
@@ -122,7 +152,7 @@ CLI ACP 1.5.3 omits `mcpCapabilities` from its initialization response, but it s
 
 ACP may report live occupancy with `usage_update`. When it does, the adapter forwards that server value. When a runtime (for example CLI ACP 1.5.4) reports only cumulative billable usage, the adapter estimates the full OMP context from the system prompt, retained messages and tool schemas with `estimateTransferTokens`, then sets `usage.contextTokens` and marks `contextTokensSource: "estimate"`. The billable `input`, `cacheRead` and `output` counters are left untouched.
 
-The estimate is a heuristic, not a server measurement. Managed ACP remains preferable when exact occupancy matters. In this source checkout, `scripts/with-managed-context.sh` starts OMP with the installed managed binary while preserving an explicit `AGY_ACP_BIN`. Run `/antigravity-acp refresh` afterward to inspect the models that runtime actually advertises.
+The estimate is a heuristic, not a server measurement. To use managed ACP when exact occupancy matters, set `AGY_ACP_BIN` to the managed binary. CLI-first selection does not switch automatically. In this source checkout, `scripts/with-managed-context.sh` starts OMP with the installed managed binary while preserving an explicit `AGY_ACP_BIN`. Run `/antigravity-acp refresh` afterward to inspect the models that runtime actually advertises.
 
 Keep `compaction.autoContinue` enabled for normal long-running work. The false context rollover was fixed at the occupancy signal, not by disabling automatic continuation.
 
@@ -144,7 +174,9 @@ Use the `/antigravity-acp ` prefix once, followed by a row below. For example, `
 | `usage auto` | Query supplemental usage after each reply. Context occupancy updates remain enabled. |
 | `usage off` | Skip supplemental queries without disabling context occupancy updates. |
 
-Quota results use a separate short-lived ACP session and a 60-second cache. When the adapter selects a CLI automatically, this read-only query uses managed ACP instead, which supports the quota command. An explicit `AGY_ACP_BIN` remains authoritative. If that runtime does not advertise `usage`, the adapter reports the limitation without sending a model prompt. The quota display excludes usage counters for that temporary session.
+Quota results use a 60-second cache. When the adapter selects the CLI, the quota command runs the CLI's print-mode `/usage` command with the same `--app_data_dir` as the CLI ACP wrapper. When it selects managed ACP, the quota command uses a short-lived ACP session. An explicit `AGY_ACP_BIN` remains authoritative. If an ACP runtime does not advertise `usage`, the adapter reports the limitation without sending a model prompt. The quota display excludes usage counters for temporary ACP sessions.
+
+OMP's built-in `omp usage`, interactive `/usage`, and the statusline `usage` segment read the same quota through the provider's registered usage source. The adapter uses the CLI `/usage` command first and queries an installed managed runtime only when the user is signed in. A usage probe never downloads a runtime. Statusline selects the active model's limit group when that group maps to one model. Multi-model groups remain visible in `/usage`. The custom `/antigravity-acp quota` command remains the detailed text view.
 
 ### Advanced maintenance
 
@@ -177,7 +209,7 @@ The OMP input autocompletes this command. Type `/antigravity-acp ` to list the s
 
 ## Steering and queued messages
 
-By default a new user message waits for the active ACP turn to finish (`OMP_ACP_STEER_MODE=queue`) and then continues on the warm session, avoiding a full replay and OMP auto-compaction. Set `OMP_ACP_STEER_MODE=steer` to restore immediate interruption. At tool/permission boundaries the adapter falls back to steer and waits for the ACP terminal response; `OMP_ACP_STEER_GRACE_MS` (default 60000) and `OMP_ACP_STEER_GRACE_MAX_MS` (default 300000) bound that wait.
+By default a new user message waits for the active ACP turn to finish (`OMP_ACP_STEER_MODE=queue`) and then continues on the warm session, avoiding a full replay and OMP auto-compaction. Set `OMP_ACP_STEER_MODE=steer` to restore immediate interruption. At tool/permission boundaries the adapter falls back to steer and waits for the ACP terminal response; `OMP_ACP_STEER_GRACE_MS` (default 60000) and `OMP_ACP_STEER_GRACE_MAX_MS` (default 300000) bound that wait. Explicit user cancellation is never held: the adapter aborts the upstream prompt immediately, so the ACP server receives `session/cancel` at once. Queue steering still holds the active turn, and the graceful drain and checkpoint reuse semantics are unchanged.
 
 ACP runtimes stay warm for 15 minutes by default. Set `OMP_ACP_IDLE_TIMEOUT_MS=0` to keep them until OMP exits, or lower the value to reclaim memory sooner.
 
@@ -207,7 +239,7 @@ A `refusal` stop reason is reported as an explicit provider refusal. An empty `e
 - No guaranteed prompt-cache hits, cache discounts, or identical tokenization.
 - No full native history or hidden reasoning across a cold rebuild; server-side compaction is outside adapter control.
 - No per-tool native allowlist; `native-tools` supports only `prefer` and `disabled`, and global MCP servers remain.
-- No standalone client; the official ACP runtime is required.
+- No standalone client; a usable ACP server, either the `agy` CLI or the managed runtime, is required.
 
 Detailed behavior, advanced settings and limitations: [docs/](docs/) and [CHANGELOG.md](CHANGELOG.md).
 

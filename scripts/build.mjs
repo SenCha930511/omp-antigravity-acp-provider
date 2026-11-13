@@ -8,6 +8,14 @@ const upstream = path.join(root, "extension/vendor/pi-antigravity-acp-provider")
 const assets = path.join(root, "extension/assets");
 await fs.mkdir(path.join(assets, "src/acp"), { recursive: true });
 await fs.copyFile(path.join(upstream, "src/acp/supervisor.mjs"), path.join(assets, "src/acp/supervisor.mjs"));
+const supervisorPath = path.join(assets, "src/acp/supervisor.mjs");
+const supervisor = await fs.readFile(supervisorPath, "utf8");
+const supervisorAnchor = 'const agent = spawn(agentCommand, agentArgs, {\n\tstdio: ["pipe", "pipe", "pipe"],\n\tshell: false,\n\twindowsHide: true,\n\t// Give Antigravity and every tool it starts a group separate from the watchdog.\n\tdetached: process.platform !== "win32",\n\tenv: process.env,\n});';
+const supervisorReplacement = 'const windowsBatch = process.platform === "win32" && /\\.(?:cmd|bat)$/iu.test(agentCommand);\nconst agent = windowsBatch\n\t? spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `call "${agentCommand}"`, ...agentArgs], {\n\t\tstdio: ["pipe", "pipe", "pipe"],\n\t\twindowsHide: true,\n\t\twindowsVerbatimArguments: true,\n\t\tdetached: false,\n\t\tenv: process.env,\n\t})\n\t: spawn(agentCommand, agentArgs, {\n\t\tstdio: ["pipe", "pipe", "pipe"],\n\t\tshell: false,\n\t\twindowsHide: true,\n\t\t// Give Antigravity and every tool it starts a group separate from the watchdog.\n\t\tdetached: process.platform !== "win32",\n\t\tenv: process.env,\n\t});';
+if (supervisor.split(supervisorAnchor).length !== 2) {
+  throw new Error("Pinned upstream supervisor launch seam changed; review compatibility");
+}
+await fs.writeFile(supervisorPath, supervisor.replace(supervisorAnchor, supervisorReplacement));
 await fs.copyFile(path.join(upstream, "runtime-manifest.json"), path.join(assets, "runtime-manifest.json"));
 const exports = [
   ["createAntigravityProvider", "provider.ts"],
@@ -67,12 +75,12 @@ const result = await build({
           {
             name: "quota parser imports",
             anchor: 'import { abortError, AntigravityAcpError, errorMessage } from "./acp/errors.js";',
-            replacement: 'import { abortError, AntigravityAcpError, errorMessage } from "./acp/errors.js";\nimport { parseUsageQuota, quotaExhaustion, type AntigravityQuotaSnapshot } from "./acp/usage-quota.js";\ntype OmpQuotaRequest = { epoch: number; owner: string; controller: AbortController; subscribers: number; snapshot: Promise<AntigravityQuotaSnapshot> };',
+            replacement: 'import { abortError, AntigravityAcpError, errorMessage } from "./acp/errors.js";\nimport { fetchCliQuota, parseUsageQuota, quotaExhaustion, type AntigravityQuotaSnapshot } from "./acp/usage-quota.js";\ntype OmpQuotaRequest = { epoch: number; owner: string; controller: AbortController; subscribers: number; snapshot: Promise<AntigravityQuotaSnapshot> };',
           },
           {
             name: "quota state",
             anchor: "\tprivate permissionMode: PermissionMode;",
-            replacement: "\tprivate permissionMode: PermissionMode;\n\tprivate quotaCache: AntigravityQuotaSnapshot | undefined;\n\tprivate quotaCacheOwner: string | undefined;\n\tprivate readonly quotaInFlights = new Set<OmpQuotaRequest>();",
+            replacement: "\tprivate permissionMode: PermissionMode;\n\tompQuotaCliPath: string | undefined;\n\tprivate quotaCache: AntigravityQuotaSnapshot | undefined;\n\tprivate quotaCacheOwner: string | undefined;\n\tprivate readonly quotaInFlights = new Set<OmpQuotaRequest>();",
           },
           {
             name: "ephemeral quota queries",
@@ -122,6 +130,10 @@ const result = await build({
               "\tprivate async ompFetchQuota(apiKey: string | undefined, signal: AbortSignal): Promise<AntigravityQuotaSnapshot> {",
               "\t\tthis.assertActive();",
               "\t\tconst epoch = this.bindingEpoch;",
+              "\t\tif (this.ompQuotaCliPath) {",
+              "\t\t\tif (signal.aborted) throw abortError();",
+              "\t\t\treturn fetchCliQuota(this.ompQuotaCliPath, signal);",
+              "\t\t}",
               "\t\tif (this.ensureAgent) await ensureAntigravityAcpReady();",
               "\t\tif (signal.aborted) throw abortError();",
               "\t\tthis.assertEpoch(epoch);",
@@ -882,6 +894,25 @@ const result = await build({
         const handleAnchor = "\tprivate async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {\n\t\tif (request.url !== \"/mcp\" || request.method !== \"POST\") {";
         if (contents.split(handleAnchor).length !== 2) throw new Error("Pinned upstream MCP bridge handle seam changed; review compatibility");
         contents = contents.replace(handleAnchor, "\tprivate async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {\n\t\tthis.responses.add(response);\n\t\tresponse.once(\"close\", () => this.responses.delete(response));\n\t\tif (request.url !== \"/mcp\" || request.method !== \"POST\") {");
+        const callAnchor = "\t\t\tconst args = call.params.arguments ?? {};\n\t\t\ttry {\n\t\t\t\tif (!Value.Check(tool.originalSchema, args)) {\n\t\t\t\t\treturn toolError(\"Arguments failed the original Pi tool schema\");\n\t\t\t\t}\n\t\t\t} catch {\n\t\t\t\treturn toolError(\"The original Pi tool schema could not validate these arguments\");\n\t\t\t}\n\t\t\treturn this.options.onCall({ id: crypto.randomUUID(), name: tool.piName, arguments: args });";
+        if (contents.split(callAnchor).length !== 2) throw new Error("Pinned upstream MCP bridge tool call seam changed; review compatibility");
+        contents = contents.replace(callAnchor, [
+          "\t\t\tconst args = call.params.arguments ?? {};",
+          "\t\t\tconst normalized = normalizeToolArguments(tool.originalSchema, args);",
+          "\t\t\tconst missing = inspectToolArguments(tool.originalSchema, normalized.arguments).missing;",
+          "\t\t\tlet ompValidated = true;",
+          "\t\t\ttry {",
+          "\t\t\t\tif (!Value.Check(tool.originalSchema, normalized.arguments)) ompValidated = false;",
+          "\t\t\t} catch {",
+          "\t\t\t\treturn toolError(tool.mcpName + \": the original Pi tool schema could not validate these arguments. Expected signature: \" + renderToolSignature(tool.mcpName, tool.originalSchema) + \". Correct the parameters and retry without repeating the same call.\");",
+          "\t\t\t}",
+          "\t\t\tif (!ompValidated || missing.length > 0) {",
+          "\t\t\t\tconst ompMissing = missing.length > 0 ? \"missing required \" + missing.join(\", \") + \". \" : \"\";",
+          "\t\t\t\treturn toolError(tool.mcpName + \": \" + ompMissing + \"Expected signature: \" + renderToolSignature(tool.mcpName, tool.originalSchema) + \". Correct the parameters and retry without repeating the same call.\");",
+          "\t\t\t}",
+          "\t\t\treturn this.options.onCall({ id: crypto.randomUUID(), name: tool.piName, arguments: normalized.arguments });",
+        ].join("\n"));
+        contents = `import { inspectToolArguments, normalizeToolArguments, renderToolSignature } from ${JSON.stringify(path.join(root, "extension/tool-args.ts"))};\n` + contents;
         return { contents, loader: "ts" };
       });
       builder.onLoad({ filter: /\/src\/acp\/connection\.ts$/ }, async ({ path: file }) => {

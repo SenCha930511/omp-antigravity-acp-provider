@@ -4,12 +4,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { applyApiCostEstimate } from "./pricing.ts";
+import { fetchCliQuota, type AntigravityQuotaSnapshot } from "./usage-accounting.ts";
+import { createQuotaUsageProvider } from "./quota-usage.ts";
+import { ensureLoopbackBypass } from "./proxy-env.ts";
 import {
   assertSelectedAcpCliLaunch,
-  preferNewestAcpRuntime,
+  resolveAcpQuotaSource,
+  selectAcpRuntime,
   resolveAcpPermissionProfile,
   type AcpRuntimePreference,
 } from "./acp-runtime-source.ts";
+import { loadAdapterConfig } from "./adapter-config.ts";
 import { SessionRuntimePool } from "./runtime-pool.ts";
 import { createStructuredFingerprintMemo } from "./structured-fingerprint.ts";
 import { Diagnostics, instrumentRuntime } from "./diagnostics.ts";
@@ -88,13 +93,30 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   const cachePath = path.join(stateDir, "models-cache.json");
   const toolPolicyPath = path.join(stateDir, "omp-tools.json");
   const contextPath = path.join(stateDir, "context.json");
-  let contextSettings = loadContextSettings(contextPath);
-  let toolPolicy = loadToolPolicy(toolPolicyPath);
-  let permissionMode = loadConfig(configPath).permissions;
+  // Preserve restrictive legacy permissions before merged defaults are derived.
+  loadConfig(configPath);
+  const legacyContextSettings = loadContextSettings(contextPath);
+  const legacyToolPolicy = loadToolPolicy(toolPolicyPath);
+  const diagnosticsPath = path.join(stateDir, "diagnostics.json");
+  const legacyDiagnostics = new Diagnostics(diagnosticsPath);
+  const adapterConfig = loadAdapterConfig(configPath, {
+    nativeTools: legacyToolPolicy.nativeTools,
+    debugToolUpdates: legacyToolPolicy.debugToolUpdates,
+    usageMode: legacyContextSettings.defaults.usageMode,
+    diagnostics: legacyDiagnostics.status().enabled,
+  });
+  let contextSettings = {
+    ...legacyContextSettings,
+    defaults: { ...legacyContextSettings.defaults, usageMode: adapterConfig.usageMode },
+  };
+  let toolPolicy = { nativeTools: adapterConfig.nativeTools, debugToolUpdates: adapterConfig.debugToolUpdates };
+  let permissionMode = adapterConfig.permissions;
   const sessionStorePath = path.join(stateDir, "sessions.json");
   const sessionStore = new AcpSessionStore(sessionStorePath);
   const cleanup = new SessionCleanup(stateDir);
-  const diagnostics = new Diagnostics(path.join(stateDir, "diagnostics.json"));
+  const diagnostics = adapterConfig.diagnostics === legacyDiagnostics.status().enabled
+    ? legacyDiagnostics
+    : new Diagnostics(diagnosticsPath, adapterConfig.diagnostics);
   // Count saved records from disk so /antigravity-acp account needs no runtime.
   let savedSessionCache: { stamp: string; count: number } | undefined;
   const savedSessionCount = (): number => {
@@ -121,12 +143,16 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   let selectedRuntimePreference: AcpRuntimePreference | undefined;
   const currentPermissionProfile = () => resolveAcpPermissionProfile(selectedRuntimePreference, permissionMode);
   function prepareRuntime() {
-    runtimePreference ??= preferNewestAcpRuntime(stateDir).then(preference => {
+    runtimePreference ??= selectAcpRuntime(stateDir).then(preference => {
       selectedRuntimePreference = preference;
       return preference;
-    }).catch(() => undefined);
-    readiness ??= runtimePreference.then(() => ensureAntigravityAcpReady()).catch((error: unknown) => {
+    });
+    readiness ??= runtimePreference.then(preference => {
+      if (preference?.source !== "managed" || loadAdapterConfig(configPath).runtimeSource !== "auto") return;
+      return ensureAntigravityAcpReady();
+    }).catch((error: unknown) => {
       readiness = undefined;
+      runtimePreference = undefined;
       throw error;
     });
     return readiness;
@@ -160,13 +186,14 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
 
   function spawnConnection(options: ConstructorParameters<typeof TierConnection>[0]): TierConnection {
     const profile = currentPermissionProfile();
-    const env = {
+    const env = ensureLoopbackBypass({
       ...process.env,
       ...options.env,
-      OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS: profile.autoApproveProcess ? "1" : "",
-    };
+    });
+    if (profile.autoApproveProcess) env.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS = "1";
+    else delete env.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS;
     const launch = options.command || options.entryPath ? undefined
-      : assertSelectedAcpCliLaunch(stateDir, selectedRuntimePreference, env, options.ompPurpose === "quota" ? "quota" : "inference");
+      : assertSelectedAcpCliLaunch(stateDir, selectedRuntimePreference, env);
     return createConnection({ ...options, ...launch, env });
   }
 
@@ -192,6 +219,8 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       });
       return connection;
     }, currentPermissionProfile().wireMode, sessionStore);
+    (runtime as { ompQuotaCliPath?: string }).ompQuotaCliPath =
+      selectedRuntimePreference?.source === "cli" ? selectedRuntimePreference.cliPath : undefined;
     instrumentRuntime(runtime, diagnostics);
     return {
       runtime,
@@ -265,9 +294,11 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       }
     }
   };
+  let refreshModelsOnStartup: (() => Promise<void>) | undefined;
   pi.on("session_start", async (event: unknown, ctx: OmpCommandContext) => {
     routing.clearPending();
     auth.watchOmpCredentials(ctx); await trackOmpSource(event, ctx); notifyAcpCompactions(ctx); cleanup.start();
+    await refreshModelsOnStartup?.();
   });
   pi.on("agent_end", async (event: unknown, ctx: OmpCommandContext) => {
     await trackOmpSource(event, ctx);
@@ -329,6 +360,26 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   );
   let initialModels = catalogStore.loadInitialOrCached(contextSettings);
 
+  async function loadQuotaSnapshot(signal?: AbortSignal): Promise<AntigravityQuotaSnapshot | undefined> {
+    const source = await resolveAcpQuotaSource(stateDir, process.env, os.homedir(), process.platform, signal, selectedRuntimePreference);
+    if (!source) return undefined;
+    if (source.kind === "cli") return fetchCliQuota(source.cliPath, signal);
+    if (!(await authReady())) return undefined;
+    const runtime = new AntigravityRuntime(
+      options => spawnConnection({ ...options, command: source.command, args: source.args, ompCleanup: cleanup }),
+      currentPermissionProfile().wireMode,
+    );
+    try {
+      return await runtime.quota(undefined, signal);
+    } finally {
+      await runtime.close();
+    }
+  }
+  const quotaUsageProvider = createQuotaUsageProvider({
+    loadSnapshot: loadQuotaSnapshot,
+    modelIds: () => catalogStore.currentModels.map(model => model.id),
+  });
+
   pi.registerCommand("antigravity-acp", {
     description: "Inspect ACP status/account/tools/usage/quota/context/cleanup, manage Antigravity login/logout, configure budgets, toggle debug, refresh models or set tool policies",
     handler: createAntigravityCommandHandler({
@@ -377,6 +428,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
         // marker is known to exist or before any logout was observed.
         apiKey: auth.apiKeyFallback ? MARKER : undefined,
         models: initialModels,
+        usage: quotaUsageProvider,
         async fetchDynamicModels() {
           // OMP may call this during startup, even for another provider.
           // Network discovery is reserved for explicit refresh or first ACP use.
@@ -509,4 +561,18 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     },
   });
   adapted.registerProvider();
+
+  let startupRefresh: Promise<void> | undefined;
+  refreshModelsOnStartup = () => {
+    if (startupRefresh) return startupRefresh;
+    // Best effort: a missing login or ACP startup failure must not break the
+    // session. The explicit refresh command remains available.
+    startupRefresh = catalogStore.refresh(contextSettings)
+      .then(models => {
+        initialModels = models;
+        adapted.registerProvider();
+      })
+      .catch(() => { /* Keep the cached catalog. */ });
+    return startupRefresh;
+  };
 }

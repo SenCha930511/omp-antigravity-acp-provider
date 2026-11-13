@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseSessionUsage, parseUsageQuota, quotaExhaustion, usageDelta } from "../extension/usage-accounting.ts";
+import { parseCliUsageQuota, parseSessionUsage, parseUsageQuota, quotaExhaustion, usageDelta } from "../extension/usage-accounting.ts";
 
 test("official cumulative counts include thinking in output without inventing cache hits", () => {
   const usage = parseSessionUsage("### Session Usage\n- **Session total:** 12,163 tokens (prompt: 11,869, completion: 109, thinking: 185)")!;
@@ -66,6 +66,64 @@ test("quota parser rejects an empty group report instead of inventing availabili
     /no quota groups: quota temporarily unavailable/);
   assert.throws(() => parseUsageQuota("### Session Usage"), /no quota groups: unrecognized format \(17 characters\)/);
   assert.throws(() => parseUsageQuota(""), /no quota groups: no text returned/);
+});
+
+test("CLI quota output preserves tab-separated groups and reset timestamps", () => {
+  const now = Date.UTC(2026, 10, 10, 12);
+  assert.deepEqual(parseCliUsageQuota([
+    "Gemini Models\tWeekly Limit Remaining\t40%\t2026-11-14T13:50:05Z",
+    "Gemini Models\tFive Hour Limit Remaining\t96%\t2026-11-12T20:51:50Z",
+    "Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-11-16T05:58:33Z",
+    "Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t23%\t2026-11-14T13:38:33Z",
+  ].join("\n"), now), {
+    at: now,
+    groups: [
+      { displayName: "Gemini Models", buckets: [
+        { window: "weekly", remainingFraction: 0.4, resetTime: "2026-11-14T13:50:05.000Z" },
+        { window: "5h", remainingFraction: 0.96, resetTime: "2026-11-12T20:51:50.000Z" },
+      ] },
+      { displayName: "Claude and GPT models", buckets: [
+        { window: "weekly", remainingFraction: 1, resetTime: "2026-11-16T05:58:33.000Z" },
+      ] },
+      { displayName: "Gemini 4 Argon", buckets: [
+        { window: "weekly", remainingFraction: 0.23, resetTime: "2026-11-14T13:38:33.000Z" },
+      ] },
+    ],
+  });
+});
+
+test("CLI quota parser rejects malformed percentages, reset times, and empty output", () => {
+  assert.throws(() => parseCliUsageQuota("Gemini Models\tWeekly\t120%\t2026-11-14T13:50:05Z"), /invalid percentage/);
+  assert.throws(() => parseCliUsageQuota("Gemini Models\tWeekly\t40%\tnot-a-date"), /invalid reset time/);
+  assert.throws(() => parseCliUsageQuota(""), /no quota groups: no text returned/);
+  assert.throws(() => parseCliUsageQuota("no quota summary is available"), /no quota groups: unrecognized format/);
+});
+
+test("CLI reset timestamps require a valid calendar and explicit timezone", () => {
+  for (const reset of ["2026-02-30T00:00:00Z", "2026-11-14T13:50:05", "2026-13-01T00:00:00Z", "not-a-date"]) {
+    assert.throws(() => parseCliUsageQuota(`Gemini Models\tWeekly\t40%\t${reset}`), /invalid reset time/);
+  }
+  assert.deepEqual(parseCliUsageQuota("Gemini Models\tWeekly\t40%\t2024-02-29T10:00:00+01:30").groups[0]!.buckets, [
+    { window: "weekly", remainingFraction: 0.4, resetTime: "2024-02-29T08:30:00.000Z" },
+  ]);
+});
+
+test("CLI reset timestamps accept subsecond precision beyond milliseconds", () => {
+  for (const [fraction, milliseconds] of [["654321", "654"], ["123456789", "123"]]) {
+    const snapshot = parseCliUsageQuota(`Gemini Models\tWeekly Limit Remaining\t50%\t2024-02-29T09:45:10.${fraction}+01:30`);
+    assert.deepEqual(snapshot.groups[0]!.buckets, [{
+      window: "weekly",
+      remainingFraction: 0.5,
+      resetTime: `2024-02-29T08:15:10.${milliseconds}Z`,
+    }]);
+  }
+});
+
+test("ACP quota percentages must be finite and within zero to one", () => {
+  for (const percent of ["120", "9".repeat(400)]) {
+    const input = `### Quota Limits\n- **Gemini Models**\n  - **weekly:** ${percent}% remaining`;
+    assert.throws(() => parseUsageQuota(input), /invalid percentage/);
+  }
 });
 
 test("quota exhaustion accepts relative and absolute reset times only on the official notice", () => {

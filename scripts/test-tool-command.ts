@@ -28,6 +28,7 @@ try {
   assert.equal(budget.maxSessions, 4); assert.equal(budget.maxBytes, 16 * 1024 * 1024); notices.pop();
   for (const setting of ["on", "reset", "off"]) { await command.handler(`diagnostics ${setting}`, context); notices.pop(); }
   assert.equal(JSON.parse(await fs.readFile(path.join(temporary, "diagnostics.json"), "utf8")).enabled, false);
+  assert.equal(JSON.parse(await fs.readFile(path.join(temporary, "config.json"), "utf8")).diagnostics, false);
   await assert.rejects(command.handler("diagnostics invalid", context), /Usage:/);
   assert.equal(JSON.parse(await fs.readFile(path.join(temporary, "cleanup.json"), "utf8")).idleDays, 3);
   for (const invalid of ["typo", "timeout 0", "timeout NaN", "off 7", "timeout 7 extra"]) {
@@ -45,6 +46,9 @@ try {
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(temporary, "omp-tools.json"), "utf8")), { nativeTools: "disabled", debugToolUpdates: true });
   await command.handler("debug off", context);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(temporary, "omp-tools.json"), "utf8")), { nativeTools: "disabled", debugToolUpdates: false });
+  const toolConfig = JSON.parse(await fs.readFile(path.join(temporary, "config.json"), "utf8"));
+  assert.equal(toolConfig.nativeTools, "disabled");
+  assert.equal(toolConfig.debugToolUpdates, false);
   await assert.rejects(command.handler("debug typo", context), /Usage:/);
   assert.ok(notices.length === 5);
   await command.handler("context set default contextWindow 524288", context);
@@ -59,6 +63,7 @@ try {
   await command.handler("usage auto", context);
   contextPolicy = JSON.parse(await fs.readFile(path.join(temporary, "context.json"), "utf8"));
   assert.equal(contextPolicy.defaults.usageMode, "auto");
+  assert.equal(JSON.parse(await fs.readFile(path.join(temporary, "config.json"), "utf8")).usageMode, "auto");
   assert.equal(contextPolicy.defaults.maxTransferBytes, 33554432);
   await assert.rejects(command.handler("context set default inputTokenBudget 9999999", context), /must fit/);
   await assert.rejects(command.handler("usage typo", context), /Usage:/);

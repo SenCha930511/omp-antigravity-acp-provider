@@ -180,3 +180,37 @@ test("deferredAbortSignal holds the transport abort while the turn stays alive",
   passthrough.dispose();
   assert.equal(passthrough.signal.aborted, false, "dispose must clear the pending grace timer");
 });
+
+test("explicit cancellation aborts the deferred signal immediately", () => {
+  const controller = new AbortController();
+  const deferred = deferredAbortSignal(controller.signal, { idleMs: 60_000, maxMs: 300_000 }, undefined, undefined,
+    () => !isSteerAbort(controller.signal));
+  controller.abort("user cancelled");
+  assert.equal(deferred.signal.aborted, true, "explicit cancellation must not wait for the grace");
+  assert.equal(deferred.signal.reason, "user cancelled");
+  deferred.dispose();
+});
+
+test("queue steering still holds even when the immediate predicate is true", async () => {
+  const controller = new AbortController();
+  let immediateCalls = 0;
+  const deferred = deferredAbortSignal(controller.signal, { idleMs: 20, maxMs: 0 }, undefined, () => true,
+    () => { immediateCalls++; return true; });
+  controller.abort();
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(deferred.signal.aborted, false, "queue mode must keep the active transport");
+  assert.equal(immediateCalls, 0, "holdOnAbort must be consulted before immediateOnAbort");
+  deferred.dispose();
+});
+
+test("reason-less steering still waits for the grace when not immediate", async () => {
+  const controller = new AbortController();
+  const deferred = deferredAbortSignal(controller.signal, { idleMs: 20, maxMs: 0 }, undefined, undefined,
+    () => !isSteerAbort(controller.signal));
+  controller.abort();
+  await tick();
+  assert.equal(deferred.signal.aborted, false, "steering must hold the transport through the grace");
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(deferred.signal.aborted, true, "silence past the grace must still abort the transport");
+  deferred.dispose();
+});

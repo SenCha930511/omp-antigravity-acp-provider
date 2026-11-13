@@ -1,4 +1,5 @@
-import { describeCredentialStorage, inspectAntigravityAuth, savePermissionMode } from "./runtime.mjs";
+import { describeCredentialStorage, inspectAntigravityAuth } from "./runtime.mjs";
+import { saveAdapterPermissionMode, updateAdapterConfig, type AdapterPermissionMode } from "./adapter-config.ts";
 import { antigravityAccountEmail, authReady, formatLogoutSummary, keychain, ompCredentialSummary, type OmpAuthCoordinator, type OmpCommandContext } from "./auth-sync.ts";
 import { parseNativeToolMode, type NativeToolMode } from "./tool-routing.ts";
 import { saveToolPolicy, type ToolPolicy } from "./tool-policy.ts";
@@ -376,7 +377,10 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     if (command === "diagnostics") {
       if (parts.length > 2 || (value !== undefined && !["on", "off", "reset"].includes(value))) throw new Error("Usage: /antigravity-acp diagnostics [on|off|reset]");
       if (value === "reset") deps.diagnostics?.reset();
-      else if (value) deps.diagnostics?.configure(value === "on");
+      else if (value) {
+        updateAdapterConfig(deps.configPath, { diagnostics: value === "on" });
+        deps.diagnostics?.configure(value === "on");
+      }
       ctx.ui.notify(formatDiagnostics(deps.diagnostics?.status()), "info");
       return;
     }
@@ -408,6 +412,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         const next = updateContextSettings(currentSettings, target, key, key === "usageMode" ? raw : Number(raw));
         for (const model of deps.catalog.currentModels) resolveContextOptions(model, next);
         saveContextSettings(deps.contextPath, next);
+        if (key === "usageMode") updateAdapterConfig(deps.configPath, { usageMode: raw as "auto" | "off" });
         deps.setContextSettings(next);
         if (key === "usageMode") {
           for (const connection of deps.connections) connection.configureUsage(raw as "auto" | "off");
@@ -446,6 +451,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       if (parts.length !== 2 || (value !== "auto" && value !== "off")) throw new Error("Usage: /antigravity-acp usage [auto|off]");
       const next = updateContextSettings(deps.getContextSettings(), "default", "usageMode", value);
       saveContextSettings(deps.contextPath, next);
+      updateAdapterConfig(deps.configPath, { usageMode: value });
       deps.setContextSettings(next);
       for (const connection of deps.connections) connection.configureUsage(value);
       ctx.ui.notify(`Supplemental ACP usage queries: ${value}${process.env.OMP_ACP_USAGE === "off" ? " (environment override keeps queries off)" : ""}. Context occupancy updates remain enabled.`, "info");
@@ -457,6 +463,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       const enabled = value === "on";
       const next = { ...deps.getToolPolicy(), debugToolUpdates: enabled };
       saveToolPolicy(deps.toolPolicyPath, next);
+      updateAdapterConfig(deps.configPath, { debugToolUpdates: enabled });
       deps.setToolPolicy(next);
       for (const connection of deps.connections) connection.debugToolUpdates = enabled;
       ctx.ui.notify(`ACP tool-status debug display: ${value}. Normal OMP tool results and thought summaries are preserved.`, "info");
@@ -468,6 +475,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       const mode: NativeToolMode = parseNativeToolMode(value);
       const next = { ...deps.getToolPolicy(), nativeTools: mode };
       saveToolPolicy(deps.toolPolicyPath, next);
+      updateAdapterConfig(deps.configPath, { nativeTools: mode });
       await deps.closeAllRuntimes();
       deps.setToolPolicy(next);
       ctx.ui.notify(`Native tools: ${mode}. ACP connections will be recreated on the next request with the new policy.`, "info");
@@ -613,7 +621,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       }
       const mode = value.replace("-", "_");
       if (mode !== deps.getPermissionMode()) {
-        savePermissionMode(mode, deps.configPath);
+        saveAdapterPermissionMode(mode as AdapterPermissionMode, deps.configPath);
         deps.setPermissionModeState(mode);
         await deps.closeAllRuntimes();
       }

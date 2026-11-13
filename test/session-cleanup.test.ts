@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import afs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
@@ -243,6 +244,44 @@ test("confirmed cleanup is batched and lifecycle lock failures are retried witho
   assert.equal(f.cleaner.status().pendingLifecycleUpdates, 1); fs.rmdirSync(file + ".lock");
   await f.cleaner.collect(); assert.equal(f.cleaner.status().pendingLifecycleUpdates, 0);
   await f.cleaner.confirm("retry", randomUUID()); await f.cleaner.release(token); assert.equal(f.exists(id), false);
+});
+
+test("a cleanup commit preserves notes appended during its final write", async t => {
+  const f = fixture(t);
+  const id = f.session();
+  const started = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const originalWriteFile = afs.writeFile;
+  afs.writeFile = async (...args: Parameters<typeof afs.writeFile>) => {
+    const file = args[0];
+    if (typeof file === "string" && file.startsWith(path.join(f.root, "state", "cleanup-sessions-")) && file.endsWith(".tmp")) {
+      started.resolve();
+      await resume.promise;
+    }
+    return originalWriteFile(...args);
+  };
+  try {
+    const acquisition = f.cleaner.acquire(id, true, 987654);
+    await started.promise;
+    f.cleaner.noteStoreRetired("sid:replacement", id);
+    f.cleaner.noteStoreDiscarded(id);
+    const pendingFlush = f.cleaner.flushStoreNotes();
+    resume.resolve();
+    await acquisition;
+    await pendingFlush;
+    const filename = fs.readdirSync(path.join(f.root, "state"))
+      .find(name => name.startsWith("cleanup-sessions-") && name.endsWith(".json"));
+    assert.ok(filename);
+    const registry = JSON.parse(await afs.readFile(path.join(f.root, "state", filename), "utf8"));
+    const record = registry.sessions.find(entry => entry.id === id);
+    assert.equal(record?.replaced, true, "the later discard note must be persisted by the queued flush");
+    assert.equal(record?.confirmedAt, 1_000_000);
+    assert.match(record?.retiredFor ?? "", /^[a-f0-9]{64}$/u, "the later retirement note must not be deleted by the first commit");
+    await f.cleaner.stop();
+  } finally {
+    resume.resolve();
+    afs.writeFile = originalWriteFile;
+  }
 });
 
 test("malformed mappings block deletion and asynchronous directory inspection yields to timers", async t => {

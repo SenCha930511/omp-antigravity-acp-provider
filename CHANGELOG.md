@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.44 — 2026-11-13
+
+- Harden MCP tool calls and failure text. Habitual alias arguments (`path` for `file_path`) are renamed only when the tool schema makes the mapping unambiguous, missing required keys and the expected tool signature are reported in one actionable error instead of a bare schema failure, loopback addresses are always appended to `NO_PROXY`/`no_proxy` when a proxied environment is detected so the loopback MCP bridge never routes through an external proxy, and OAuth material (authorization URLs, sensitive query values, bearer tokens, `code_challenge`/`access_token` pairs) is redacted from classified failure messages while diagnostics like `exit code=1` survive.
+- Send ACP `session/cancel` immediately on explicit user cancellation instead of waiting for the steering grace. Queue steering still holds the active turn, and the graceful drain and checkpoint reuse semantics are unchanged.
+- Add API-equivalent rates for newly advertised Gemini 4 Hydrogen, Claude Opus 5.5, Claude Sonnet 5.5 and GPT-OSS 120B models. ACP does not advertise pricing metadata, so the adapter uses a model-ID rate table and applies it to both catalog cost display and usage estimates.
+- Attempt one background model refresh on the first OMP session start after the plugin loads. The cached catalog remains usable when login or ACP startup fails, and `/antigravity-acp refresh` still forces an immediate refresh.
+- Prefer a usable `agy` CLI over the managed runtime in `auto` mode, even when the CLI is older, and use the CLI's `/usage` command for quota. `runtimeSource` can pin `cli` or `managed`, and a pinned source fails instead of downloading the other channel.
+- Harden release and CI checks: a new `check:versions` script verifies all six release version declarations agree, the pull-request workflow runs it with its own tests, and OMP session-switch tests wait for the cleanup registry JSON to initialize so partial lock directories cannot fail Linux runs.
+
 ## 0.1.43 — 2026-11-11
 
 - Add `/antigravity-acp quota` live quota reporting through a separate short-lived ACP session. Concurrent reads share one request, snapshots are cached for 60 seconds, managed ACP is preferred when the CLI lacks `/usage`, and temporary-session usage is excluded from adapter accounting. Quota exhaustion is classified as non-retryable with an optional reset time.
