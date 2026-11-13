@@ -294,11 +294,11 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       }
     }
   };
-  let refreshModelsOnStartup: (() => void) | undefined;
+  let refreshModelsOnStartup: (() => Promise<void>) | undefined;
   pi.on("session_start", async (event: unknown, ctx: OmpCommandContext) => {
     routing.clearPending();
     auth.watchOmpCredentials(ctx); await trackOmpSource(event, ctx); notifyAcpCompactions(ctx); cleanup.start();
-    refreshModelsOnStartup?.();
+    await refreshModelsOnStartup?.();
   });
   pi.on("agent_end", async (event: unknown, ctx: OmpCommandContext) => {
     await trackOmpSource(event, ctx);
@@ -562,17 +562,17 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   });
   adapted.registerProvider();
 
-  let startupRefreshStarted = false;
+  let startupRefresh: Promise<void> | undefined;
   refreshModelsOnStartup = () => {
-    if (startupRefreshStarted) return;
-    startupRefreshStarted = true;
+    if (startupRefresh) return startupRefresh;
     // Best effort: a missing login or ACP startup failure must not break the
     // session. The explicit refresh command remains available.
-    void catalogStore.refresh(contextSettings)
+    startupRefresh = catalogStore.refresh(contextSettings)
       .then(models => {
         initialModels = models;
         adapted.registerProvider();
       })
       .catch(() => { /* Keep the cached catalog. */ });
+    return startupRefresh;
   };
 }
