@@ -122,6 +122,7 @@ function sanitizeNode(value: object, depth: number, budget: ProjectionBudget): P
 	const entries = plainEntries(value, budget);
 	if (!entries) return { reason: "unsupported_keyword" };
 	const output: Record<string, unknown> = {};
+	let typeUnion: string[] | undefined;
 	for (const [key, candidate] of entries) {
 		if (key.startsWith("~")) {
 			if (!HIDDEN_KEYS.has(key)) return { reason: "unsupported_keyword" };
@@ -201,11 +202,46 @@ function sanitizeNode(value: object, depth: number, budget: ProjectionBudget): P
 		else if (key === "required") valid = list !== undefined && list.every((item) => typeof item === "string");
 		else return { reason: "unsupported_keyword" };
 		if (!valid) return { reason: "invalid_keyword_value" };
+		if (key === "type" && list !== undefined) {
+			// Deduplicate the validated names before emission: a singleton or a
+			// nullable pair projects to one scalar string, while genuine unions
+			// are composed after every keyword is known so existing combinators
+			// stay intact regardless of property order.
+			const names: string[] = [];
+			for (const item of list) {
+				if (typeof item === "string" && !names.includes(item)) names.push(item);
+			}
+			const concrete = names.filter((name) => name !== "null");
+			if (names.length === 1) {
+				const name = names[0];
+				spend(budget, 0, key.length + 3 + scalarChars(name));
+				output.type = name;
+			} else if (names.length === 2 && concrete.length === 1) {
+				const name = concrete[0];
+				spend(budget, 0, key.length + 3 + scalarChars(name));
+				output.type = name;
+			} else {
+				typeUnion = names;
+			}
+			continue;
+		}
 		const scalars = (list ?? [candidate]) as Array<null | string | number | boolean>;
 		let chars = key.length + 3;
 		for (const item of scalars) chars += scalarChars(item);
 		spend(budget, 0, chars);
 		output[key] = list ?? candidate;
+	}
+	if (typeUnion) {
+		const members = typeUnion.map((name) => ({ type: name }));
+		const clause = { anyOf: members };
+		if ("anyOf" in output) {
+			const existing = output.allOf;
+			output.allOf = Array.isArray(existing) ? [...existing, clause] : [clause];
+			spend(budget, members.length, JSON.stringify(clause).length + (Array.isArray(existing) ? 1 : 10));
+		} else {
+			output.anyOf = members;
+			spend(budget, members.length, JSON.stringify(clause).length);
+		}
 	}
 	// A singleton enum also supports MCP consumers which ignore const.
 	if ("const" in output && !("enum" in output)) {
