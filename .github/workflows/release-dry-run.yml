@@ -7,6 +7,11 @@ on:
         description: Existing v* tag to verify without publishing
         required: true
         type: string
+      verify_marketplace:
+        description: Verify marketplace installation against an already-published tag
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -22,5 +27,6 @@ jobs:
     with:
       tag: ${{ inputs.tag }}
       artifact_name: npm-tarball-dry-run
+      verify_marketplace: ${{ inputs.verify_marketplace }}
     permissions:
       contents: read
