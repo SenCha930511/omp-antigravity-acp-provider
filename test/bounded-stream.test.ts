@@ -67,3 +67,27 @@ test("cancelling the readable cancels the underlying reader", async () => {
   await stream.readable.cancel("stop");
   assert.equal(cancelled, true);
 });
+
+test("consumes a large coalesced frame chunk with a linear queue cursor", async () => {
+  const count = 4096;
+  const payload = `${Array.from({ length: count }, (_, index) =>
+    JSON.stringify({ jsonrpc: "2.0", method: `frame-${index}` })).join("\n")}\n`;
+  const input = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(payload));
+      controller.close();
+    },
+  });
+  const stream = boundedNdjsonStream(new WritableStream(), input);
+  const reader = stream.readable.getReader();
+  try {
+    for (let index = 0; index < count; index++) {
+      const next = await reader.read();
+      assert.equal(next.done, false);
+      assert.equal(next.value.method, `frame-${index}`);
+    }
+    assert.equal((await reader.read()).done, true);
+  } finally {
+    await reader.cancel();
+  }
+});

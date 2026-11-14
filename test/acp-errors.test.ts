@@ -100,3 +100,9 @@ test("OAuth token refresh EOF is a transport failure with proxy guidance", () =>
   assert.equal(failure.code, "transport");
   assert.match(failure.message, /HTTP_PROXY/);
 });
+
+test("wrapped protocol OAuth EOF is still a transport failure", () => {
+  const failure = classifyAcpFailure(new AntigravityAcpError("protocol", "Antigravity ACP error: oauth2.googleapis.com/token: EOF"));
+  assert.equal(failure.code, "transport");
+  assert.match(failure.message, /HTTP_PROXY/);
+});

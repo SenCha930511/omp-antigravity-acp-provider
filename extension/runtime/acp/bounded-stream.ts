@@ -32,6 +32,7 @@ export function boundedNdjsonStream(
 	let closed = false;
 	let inputDone = false;
 	const queuedFrames: Uint8Array<ArrayBufferLike>[] = [];
+	let queuedIndex = 0;
 	let released = false;
 	const releaseReader = () => {
 		if (!reader || released) return;
@@ -46,14 +47,16 @@ export function boundedNdjsonStream(
 			if (closed) return;
 			try {
 				for (;;) {
-					while (queuedFrames.length > 0) {
-						const frame = queuedFrames.shift()!;
+					while (queuedIndex < queuedFrames.length) {
+						const frame = queuedFrames[queuedIndex++]!;
 						if (frame.byteLength > maxFrameBytes) {
 							throw new Error(`ACP frame exceeds ${maxFrameBytes} bytes`);
 						}
 						enqueueFrame(frame, decoder, controller, options.onCompatibilityNoise);
 						if (controller.desiredSize !== null && controller.desiredSize <= 0) return;
 					}
+					queuedFrames.length = 0;
+					queuedIndex = 0;
 					if (inputDone) {
 						closed = true;
 						controller.close();
@@ -123,6 +126,7 @@ export function boundedNdjsonStream(
 				if (closed) return;
 				closed = true;
 				queuedFrames.length = 0;
+				queuedIndex = 0;
 				const error = cause instanceof Error ? cause : new Error(String(cause));
 				options.onProtocolError?.(error);
 				// ACP SDK 0.16.1 starts its receive loop without observing the
@@ -136,6 +140,7 @@ export function boundedNdjsonStream(
 		async cancel(reason) {
 			closed = true;
 			queuedFrames.length = 0;
+			queuedIndex = 0;
 			try { await reader?.cancel(reason); } catch { /* The input is already gone. */ }
 			releaseReader();
 		},

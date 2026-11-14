@@ -134,6 +134,10 @@ export function classifyAcpFailure(error: unknown): Error {
     if (error.code === "quota") return new AcpFailure("quota", redactSensitiveText(appendHint(error.message, QUOTA_RULE)), cause);
     if (error.code === "timeout") return new AcpFailure("timeout", redactSensitiveText(appendHint(error.message, TIMEOUT_RULE)), cause);
     if (error.code === "spawn" || error.code === "process_exit") return new AcpFailure("transport", redactSensitiveText(appendHint(error.message, TRANSPORT_RULE)), cause);
+    if ((error.code === "protocol" || error.code === "invalid_input")
+      && OAUTH_NETWORK_REFRESH.test(error.message) && !/invalid_grant/i.test(error.message)) {
+      return new AcpFailure("transport", redactSensitiveText(appendHint(error.message, TRANSPORT_RULE)), cause);
+    }
     if (error.code === "protocol" || error.code === "invalid_input") return new AcpFailure("protocol", redactSensitiveText(appendHint(error.message, PROTOCOL_RULE)), cause);
     if (error.code === "model") return new AcpFailure("model", redactSensitiveText(error.message), cause);
   }
