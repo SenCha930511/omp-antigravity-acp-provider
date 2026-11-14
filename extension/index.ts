@@ -243,7 +243,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 0 || idleTimeoutMs > 2_147_483_647 || (idleTimeoutMs > 0 && idleTimeoutMs < 1000)) {
     throw new Error("OMP_ACP_IDLE_TIMEOUT_MS must be 0 (disabled) or an integer between 1000 and 2147483647");
   }
-  const maxIdleEntries = Number(process.env.OMP_ACP_MAX_IDLE_RUNTIMES ?? 2);
+  const maxIdleEntries = Number(process.env.OMP_ACP_MAX_IDLE_RUNTIMES ?? 1);
   if (!Number.isSafeInteger(maxIdleEntries) || maxIdleEntries < 0) throw new Error("OMP_ACP_MAX_IDLE_RUNTIMES must be a nonnegative integer (0 disables the cap)");
   const toolProjectionMemo = createStructuredFingerprintMemo();
   let toolRevision = 0;
@@ -324,7 +324,16 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   // adapter opt-in there; production uses the default factory and the env flag.
   const warmupEnabled = warmupSetting()
     && (createConnection === defaultConnectionFactory || options.warmup === true);
-  let warmupStandby: { connection: TierConnection; signature: WarmupSignature } | undefined;
+  interface WarmupStandby {
+    connection: TierConnection;
+    signature: WarmupSignature;
+    idleTimer?: NodeJS.Timeout;
+  }
+  const standbyTtlMs = Number(process.env.OMP_ACP_STANDBY_TTL_MS ?? 300_000);
+  if (!Number.isSafeInteger(standbyTtlMs) || standbyTtlMs < 0 || standbyTtlMs > 2_147_483_647) {
+    throw new Error("OMP_ACP_STANDBY_TTL_MS must be 0 or an integer between 1 and 2147483647");
+  }
+  let warmupStandby: WarmupStandby | undefined;
   let warmupTask: Promise<void> | undefined;
   let warmupTaskKey: string | undefined;
   let warmupStarting: TierConnection | undefined;
@@ -374,6 +383,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     if (starting) void closeWarmupConnection(starting);
     const ready = warmupStandby;
     warmupStandby = undefined;
+    if (ready?.idleTimer) clearTimeout(ready.idleTimer);
     if (ready) void closeWarmupConnection(ready.connection);
   }
 
@@ -418,12 +428,27 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
         await closeWarmupConnection(connection);
         return;
       }
-      warmupStandby = { connection, signature: prepared.signature };
+      const entry: WarmupStandby = { connection, signature: prepared.signature };
+      warmupStandby = entry;
+      if (standbyTtlMs > 0) {
+        entry.idleTimer = setTimeout(() => {
+          if (warmupStandby !== entry) return;
+          warmupStandby = undefined;
+          void closeWarmupConnection(entry.connection);
+        }, standbyTtlMs);
+        entry.idleTimer.unref?.();
+      }
+      void connection.process?.exited.finally(() => {
+        if (entry.idleTimer) clearTimeout(entry.idleTimer);
+        entry.idleTimer = undefined;
+        if (warmupStandby === entry) warmupStandby = undefined;
+      });
     } catch { /* Warmup is best effort; the cold path remains available. */ }
   }
 
   function startWarmup(): void {
     if (!warmupEnabled) return;
+    if (connections.size > 0 || runtimes.values().length > 0) return;
     const key = currentWarmupKey();
     if (warmupStandby && warmupKeyOf(warmupStandby.signature) === key) return;
     if (warmupTask && warmupTaskKey === key) return;
@@ -453,10 +478,12 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     if (!ready || handlers === undefined) return undefined;
     if (!sameWarmupSignature(ready.signature, signature) || ready.connection.process?.alive === false
       || typeof ready.connection.rebindHandlers !== "function") {
+      if (ready.idleTimer) clearTimeout(ready.idleTimer);
       warmupStandby = undefined;
       void closeWarmupConnection(ready.connection);
       return undefined;
     }
+    if (ready.idleTimer) clearTimeout(ready.idleTimer);
     warmupStandby = undefined;
     ready.connection.rebindHandlers(handlers);
     return ready.connection;
@@ -534,6 +561,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   const sessionIdOf = (ctx: OmpCommandContext | undefined): string | undefined => ctx?.sessionManager?.getSessionId?.();
   pi.on("session_shutdown", async (_event: unknown, ctx: OmpCommandContext) => {
     const failures: unknown[] = [];
+    auth.releaseContext(ctx);
     const sessionId = sessionIdOf(ctx);
     if (sessionId) {
       const routingId = routing.forget(sessionId, ctx?.sessionManager?.getSessionFile?.());
@@ -565,6 +593,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   const auth = new OmpAuthCoordinator({
     pi,
     connections,
+    stateDir,
     isPoolBusy: () => runtimes.values().some(bundle => bundle.isBusy()),
     logoutAllRuntimes: async () => {
       await Promise.all(runtimes.values().map(bundle => bundle.runtime.logout()));
@@ -685,6 +714,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   };
   pi.on("model_select", (event: unknown) => {
     if (isAntigravitySelection(event)) requestWarmup();
+    else invalidateWarmup();
   });
 
   async function loadQuotaSnapshot(signal?: AbortSignal): Promise<AntigravityQuotaSnapshot | undefined> {
@@ -902,7 +932,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
                 auth.noteLoginSucceeded(loginAttempt);
                 // Record the signed-in account on the marker credential so OMP's
                 // account list can label it; the email is identity data, not a secret.
-                const email = antigravityAccountEmail();
+                const email = await antigravityAccountEmail();
                 return email ? { ...result, email } : result;
               } finally {
                 lease.release();

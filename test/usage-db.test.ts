@@ -134,8 +134,28 @@ test("prefers bun:sqlite read-only and sets a bounded busy timeout", () => {
   assert.ok(opener);
   const db = opener("/tmp/session.db");
   assert.deepEqual(opened, [{ path: "/tmp/session.db", options: { readonly: true } }]);
-  assert.deepEqual(executed, ["PRAGMA busy_timeout = 100;"]);
+  assert.deepEqual(executed, ["PRAGMA busy_timeout = 100; PRAGMA cache_size = -256; PRAGMA mmap_size = 0;"]);
   db.close();
+});
+
+test("reads model steps across more than one bounded batch", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-usage-db-batches-"));
+  const file = path.join(dir, "session.db");
+  try {
+    const db = new DatabaseSync(file);
+    db.exec("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB)");
+    const insert = db.prepare("INSERT INTO steps (idx, step_type, status, metadata) VALUES (?, ?, ?, ?)");
+    for (let idx = 1; idx <= 300; idx++) {
+      insert.run(idx, 15, 3, metadata({ input: 1, output: 0, cachedWrite: 0, cachedRead: 0, thought: 0 }));
+    }
+    db.close();
+    const batch = readModelStepsAfter(file, 0);
+    assert.equal(batch?.calls, 300);
+    assert.equal(batch?.maxIdx, 300);
+    assert.equal(batch?.usage.inputTokens, 300);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("falls back to node:sqlite when the Bun module cannot load", () => {

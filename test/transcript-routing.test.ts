@@ -11,6 +11,18 @@ test("routing maps an exactly matching stream to its transcript", () => {
   assert.equal(routing.take("transcript-main"), "transcript-main");
 });
 
+test("forget clears a source even when the owner has a sibling route", () => {
+  const routing = new TranscriptRouting(), owner = scopeOwner();
+  routing.noteStream("transcript-main", owner);
+  routing.take("transcript-main", "main.jsonl");
+  routing.noteStream("route-sibling", owner);
+  routing.take("route-sibling", "sibling.jsonl");
+  routing.forget("transcript-main", "main.jsonl");
+  routing.noteStream("route-new", scopeOwner(), owner);
+  assert.equal(routing.take("transcript-main", "main.jsonl"), "transcript-main",
+    "a forgotten source must not remain replacement evidence");
+});
+
 test("a new stream is observed only when its exact ID is reported", () => {
   const routing = new TranscriptRouting();
   routing.noteStream("route-old");

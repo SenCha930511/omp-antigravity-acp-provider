@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
-import { Open, type File as ZipFile } from "unzipper";
+import type { File as ZipFile } from "unzipper";
 
 import { loadConfig, type RuntimeUpdateMode } from "./config.ts";
 import { resolveAntigravityAcpDirectory, resolveAntigravityAcpLaunch, type AntigravityLaunch } from "./acp/antigravity.ts";
@@ -447,6 +447,7 @@ async function extractRuntimeArchive(
 	destination: string,
 	release: ResolvedRuntimeRelease,
 ): Promise<void> {
+	const { Open } = await import("./zip-archive.ts");
 	const archive = await Open.file(archivePath);
 	validateRuntimeArchiveEntries(archive.files, release);
 	const expected = new Map<string, number>([

@@ -44,6 +44,7 @@ function authCoordinatorFixture(overrides: {
   logoutAllRuntimes?: () => Promise<void>;
   closeAllRuntimes?: () => Promise<void>;
   isPoolBusy?: () => boolean;
+  stateDir?: string;
   deferGeneration?: boolean;
   watchableCredentials?: boolean;
 } = {}): AuthFixture {
@@ -78,6 +79,7 @@ function authCoordinatorFixture(overrides: {
       },
     },
     connections: new Set(),
+    stateDir: overrides.stateDir,
     isPoolBusy: overrides.isPoolBusy ?? (() => false),
     logoutAllRuntimes: overrides.logoutAllRuntimes ?? (async () => { logouts.push("logout"); }),
     closeAllRuntimes: overrides.closeAllRuntimes ?? (async () => {}),
@@ -1253,5 +1255,25 @@ test("a refused fresh login keeps an unrelated suppression instead of clearing i
     keychain.remove = originalRemove;
     logoutFollow.delayMs = originalDelayMs;
     logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("a live login lock from another process blocks a second login", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-lock-"));
+  try {
+    await fs.writeFile(path.join(dir, "login-in-progress.json"), JSON.stringify({
+      pid: process.ppid,
+      token: "other-process",
+      startedAt: Date.now(),
+    }));
+    let closes = 0;
+    const fixture = authCoordinatorFixture({
+      stateDir: dir,
+      closeAllRuntimes: async () => { closes++; },
+    });
+    await assert.rejects(fixture.coordinator.beginFreshGoogleLogin(), /Another OMP session is already signing in/);
+    assert.equal(closes, 0, "the blocked login must not close runtimes");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });

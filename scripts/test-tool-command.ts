@@ -16,6 +16,7 @@ try {
   }, temporary);
   const notices: string[] = [];
   const context = { ui: { notify: (text: string) => notices.push(text) }, sessionManager: { getSessionId: () => "fixture" } };
+  assert.equal(loadToolPolicy(path.join(temporary, "omp-tools.json")).nativeTools, "disabled");
   await command.handler("cleanup", context);
   assert.match(notices.pop()!, /Mode:\s+conservative/);
   for (const mode of ["off", "conservative", "timeout 3"]) {

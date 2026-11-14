@@ -67,13 +67,17 @@ function nativeUsageSqliteRuntime(): UsageSqliteRuntime {
 function bunOpener(Database: BunDatabaseConstructor): UsageDatabaseOpener {
   return dbPath => {
     const db = new Database(dbPath, { readonly: true });
-    try { db.exec?.("PRAGMA busy_timeout = 100;"); } catch { /* Best-effort lock timeout. */ }
+    try { db.exec?.("PRAGMA busy_timeout = 100; PRAGMA cache_size = -256; PRAGMA mmap_size = 0;"); } catch { /* Best-effort lock timeout and cache cap. */ }
     return db;
   };
 }
 
 function nodeOpener(Database: NodeDatabaseConstructor): UsageDatabaseOpener {
-  return dbPath => new Database(dbPath, { readOnly: true, timeout: 100 });
+  return dbPath => {
+    const db = new Database(dbPath, { readOnly: true, timeout: 100 });
+    try { db.exec?.("PRAGMA cache_size = -256; PRAGMA mmap_size = 0;"); } catch { /* Best-effort cache cap. */ }
+    return db;
+  };
 }
 
 export function selectUsageDatabaseOpener(runtime: UsageSqliteRuntime): UsageDatabaseOpener | undefined {
@@ -236,29 +240,45 @@ export function readModelStepsAfter(dbPath: string, afterIdx: number): StepUsage
   try {
     const db = openDb(dbPath);
     try {
-      const rows = db.prepare("SELECT idx, metadata FROM steps WHERE step_type = 15 AND status = 3 AND idx > ? ORDER BY idx ASC").all(afterIdx);
+      const batchSize = 256;
+      const stmt = db.prepare("SELECT idx, metadata FROM steps WHERE step_type = 15 AND status = 3 AND idx > ? ORDER BY idx ASC LIMIT ? OFFSET ?");
+      let cursor = afterIdx;
+      let offset = 0;
       let maxIdx = afterIdx;
       let calls = 0;
       const usage: StepUsage = { inputTokens: 0, outputTokens: 0, cachedWriteTokens: 0, cachedReadTokens: 0, thoughtTokens: 0 };
-      for (const row of rows) {
-        const rawIdx = row.idx;
-        const idx = typeof rawIdx === "number" && Number.isFinite(rawIdx) ? rawIdx : typeof rawIdx === "bigint" ? Number(rawIdx) : undefined;
-        const rawMetadata = row.metadata;
-        const metadata = rawMetadata instanceof Uint8Array
-          ? rawMetadata
-          : ArrayBuffer.isView(rawMetadata)
-            ? new Uint8Array(rawMetadata.buffer, rawMetadata.byteOffset, rawMetadata.byteLength)
-            : undefined;
-        if (idx === undefined || metadata === undefined) continue;
-        const decoded = decodeModelUsageStats(metadata);
-        if (decoded === undefined) continue;
-        if (idx > maxIdx) maxIdx = idx;
-        calls++;
-        usage.inputTokens += decoded.inputTokens;
-        usage.outputTokens += decoded.outputTokens;
-        usage.cachedWriteTokens += decoded.cachedWriteTokens;
-        usage.cachedReadTokens += decoded.cachedReadTokens;
-        usage.thoughtTokens += decoded.thoughtTokens;
+      for (;;) {
+        const rows = stmt.all(cursor, batchSize, offset);
+        if (rows.length === 0) break;
+        let lastRowIdx = cursor;
+        for (const row of rows) {
+          const rawIdx = row.idx;
+          const idx = typeof rawIdx === "number" && Number.isFinite(rawIdx) ? rawIdx : typeof rawIdx === "bigint" ? Number(rawIdx) : undefined;
+          if (idx !== undefined && idx > lastRowIdx) lastRowIdx = idx;
+          const rawMetadata = row.metadata;
+          const metadata = rawMetadata instanceof Uint8Array
+            ? rawMetadata
+            : ArrayBuffer.isView(rawMetadata)
+              ? new Uint8Array(rawMetadata.buffer, rawMetadata.byteOffset, rawMetadata.byteLength)
+              : undefined;
+          if (idx === undefined || metadata === undefined) continue;
+          const decoded = decodeModelUsageStats(metadata);
+          if (decoded === undefined) continue;
+          if (idx > maxIdx) maxIdx = idx;
+          calls++;
+          usage.inputTokens += decoded.inputTokens;
+          usage.outputTokens += decoded.outputTokens;
+          usage.cachedWriteTokens += decoded.cachedWriteTokens;
+          usage.cachedReadTokens += decoded.cachedReadTokens;
+          usage.thoughtTokens += decoded.thoughtTokens;
+        }
+        if (rows.length < batchSize) break;
+        if (lastRowIdx > cursor) {
+          cursor = lastRowIdx;
+          offset = 0;
+        } else {
+          offset += rows.length;
+        }
       }
       if (calls === 0) return undefined;
       return {

@@ -83,6 +83,9 @@ try {
   assert.deepEqual(unexpected, [], `unexpected packed paths: ${JSON.stringify(unexpected)}`);
   await access(path.join(installed, "extension/assets/src/acp/supervisor.mjs"));
   await access(path.join(installed, "extension/assets/runtime-manifest.json"));
+  await access(path.join(installed, "extension/assets/zip-archive.mjs"));
+  const archive = await import(pathToFileURL(path.join(installed, "extension/assets/zip-archive.mjs")).href);
+  assert.equal(typeof archive.Open?.file, "function");
   assert.deepEqual((await readdir(path.join(install, "node_modules"))).filter(name => !name.startsWith(".")), ["omp-antigravity-acp-provider"]);
   unpackedSize ??= await measureUnpackedSize(installed);
   assert.ok(unpackedSize < 8 * 1024 * 1024, "Standalone adapter must stay below the tested 8 MiB package budget");

@@ -151,8 +151,8 @@ const SUBCOMMANDS: SubcommandSpec[] = [
   {
     name: "native-tools",
     description: "Native ACP tool exposure",
-    usage: "prefer|disabled",
-    values: [["prefer", "Let OMP tools shadow ACP natives (default)"], ["disabled", "Disable ACP-native tools for strict OMP-tool sessions"]],
+    usage: "disabled|prefer",
+    values: [["disabled", "Disable ACP-native tools for strict OMP-tool sessions (default)"], ["prefer", "Let OMP tools shadow ACP natives"]],
   },
   {
     name: "permissions",
@@ -395,7 +395,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     }
 
     if (command === "native-tools") {
-      if (parts.length !== 2) throw new Error("Usage: /antigravity-acp native-tools prefer|disabled");
+      if (parts.length !== 2) throw new Error("Usage: /antigravity-acp native-tools disabled|prefer");
       const mode: NativeToolMode = parseNativeToolMode(value);
       const next = { ...deps.getToolPolicy(), nativeTools: mode };
       saveToolPolicy(deps.toolPolicyPath, next);
@@ -437,7 +437,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         throw error;
       }
       const auth = await inspectAcpAuth();
-      const email = antigravityAccountEmail();
+      const email = await antigravityAccountEmail();
       ctx.ui.notify(`Antigravity Google login finished${email ? ` as ${email}` : ""} — fresh sign-in; ACP auth: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}.`, "info");
       return;
     }
@@ -461,7 +461,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       const snapshot = await bundle?.runtime.snapshot();
       const permissionMode = deps.getPermissionMode();
       const omp = ompCredentialSummary(ctx);
-      const accountEmail = antigravityAccountEmail();
+      const accountEmail = await antigravityAccountEmail();
       const googleAccount = accountEmail
         ?? (auth.keyring === true ? "signed in · system keyring entry; email unavailable"
           : (await keychain.present()) === true ? "signed in · keychain token; email unavailable"

@@ -53,6 +53,18 @@ export function compactionSummary(value: unknown): string | undefined {
   if (value === null) return "";
   return contentText(value);
 }
+const MAX_COMPACTION_SUMMARY_CHARS = 4096;
+
+function boundedCompactionSummary(value: string): string {
+  return value.length > MAX_COMPACTION_SUMMARY_CHARS ? value.slice(0, MAX_COMPACTION_SUMMARY_CHARS) : value;
+}
+
+function appendCompactionSummary(previous: string, text: string): string {
+  const remaining = MAX_COMPACTION_SUMMARY_CHARS - previous.length;
+  if (remaining <= 0) return previous;
+  return previous + (text.length > remaining ? text.slice(0, remaining) : text);
+}
+
 
 export function applyCompactionUpdate(
   previous: AcpCompactionRecord | undefined,
@@ -69,7 +81,7 @@ export function applyCompactionUpdate(
     sessionId,
     compactionId: update.compactionId,
     status: update.status,
-    summary: summary === undefined ? previous?.summary ?? "" : summary,
+    summary: summary === undefined ? previous?.summary ?? "" : boundedCompactionSummary(summary),
     ...(errorProvided ? (error !== undefined ? { error } : {}) : previous?.error !== undefined ? { error: previous.error } : {}),
     updatedAt: now,
     notified: previous?.notified ?? false,
@@ -89,7 +101,7 @@ export function applyCompactionChunk(
     sessionId,
     compactionId: chunk.compactionId,
     status: previous?.status ?? "in_progress",
-    summary: (previous?.summary ?? "") + text,
+    summary: appendCompactionSummary(previous?.summary ?? "", text),
     ...(previous?.error !== undefined ? { error: previous.error } : {}),
     updatedAt: now,
     notified: previous?.notified ?? false,

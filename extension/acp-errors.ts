@@ -34,7 +34,7 @@ const AUTH_RULE: FailureRule = {
   code: "auth",
   match: /authentication required|not logged in|not signed in|unauthenticated|sign in|invalid_grant|401 unauthorized/i,
   ensure: /run `agy`|terminal/i,
-  append: "run `agy` once in a terminal to sign in",
+  append: "run `agy` once in a terminal to sign in, or verify HTTP_PROXY/HTTPS_PROXY if token refresh timed out",
 };
 const QUOTA_RULE: FailureRule = {
   code: "quota",
@@ -75,9 +75,10 @@ const SERVER_RULE: FailureRule = {
 const TRANSPORT_RULE: FailureRule = {
   code: "transport",
   match: /network|connection|fetch failed|socket|stream ended|closed|ENOTFOUND|EAI_AGAIN|broken pipe|EPIPE|failed to bind|process exited/i,
-  ensure: /connection|network|socket|stream|bind|process/i,
-  append: "connection error",
+  ensure: /connection|network|socket|stream|bind|process|proxy/i,
+  append: "connection/network error — check network or HTTP_PROXY/HTTPS_PROXY",
 };
+const OAUTH_NETWORK_REFRESH = /(?:token refresh failed due to network|oauth2\.googleapis\.com\/token[^:]*:\s*(?:EOF|unexpected EOF|context deadline exceeded|timeout|ENOTFOUND|EAI_AGAIN|connection|network))/i;
 const RULES: FailureRule[] = [
   AUTH_RULE,
   QUOTA_RULE,
@@ -133,11 +134,18 @@ export function classifyAcpFailure(error: unknown): Error {
     if (error.code === "quota") return new AcpFailure("quota", redactSensitiveText(appendHint(error.message, QUOTA_RULE)), cause);
     if (error.code === "timeout") return new AcpFailure("timeout", redactSensitiveText(appendHint(error.message, TIMEOUT_RULE)), cause);
     if (error.code === "spawn" || error.code === "process_exit") return new AcpFailure("transport", redactSensitiveText(appendHint(error.message, TRANSPORT_RULE)), cause);
+    if ((error.code === "protocol" || error.code === "invalid_input")
+      && OAUTH_NETWORK_REFRESH.test(error.message) && !/invalid_grant/i.test(error.message)) {
+      return new AcpFailure("transport", redactSensitiveText(appendHint(error.message, TRANSPORT_RULE)), cause);
+    }
     if (error.code === "protocol" || error.code === "invalid_input") return new AcpFailure("protocol", redactSensitiveText(appendHint(error.message, PROTOCOL_RULE)), cause);
     if (error.code === "model") return new AcpFailure("model", redactSensitiveText(error.message), cause);
   }
   const message = error instanceof Error ? error.message : String(error);
   if (!message.trim()) return needsSanitization(error) ? sanitizedError(error) : error instanceof Error ? error : new Error(message);
+  if (OAUTH_NETWORK_REFRESH.test(message) && !/invalid_grant/i.test(message)) {
+    return new AcpFailure("transport", redactSensitiveText(appendHint(message, TRANSPORT_RULE)), { cause: sanitizedCause(error) });
+  }
   for (const rule of RULES) {
     if (rule.match.test(message)) {
       return new AcpFailure(rule.code, redactSensitiveText(appendHint(message, rule)), { cause: sanitizedCause(error) });

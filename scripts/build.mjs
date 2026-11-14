@@ -26,14 +26,47 @@ const result = await build({
     'const require = __ompCreateRequire(import.meta.url);',
   ].join("\n") },
   external: ["@aws-sdk/client-s3"],
+  plugins: [{
+    name: "trim-zod-locales",
+    setup(builder) {
+      builder.onLoad({ filter: /[\\/]node_modules[\\/]zod[\\/]v4[\\/]locales[\\/]index\.js$/ }, () => ({
+        contents: 'export { default as en } from "./en.js";\n',
+        loader: "js",
+      }));
+    },
+  }, {
+    name: "lazy-unzipper",
+    setup(builder) {
+      builder.onResolve({ filter: /^\.\/zip-archive\.ts$/ }, ({ importer }) => {
+        if (importer !== path.join(runtime, "managed.ts")) return;
+        return { path: "./assets/zip-archive.mjs", external: true };
+      });
+    },
+  }],
   outfile: path.join(root, "extension/runtime.mjs"),
+  logLevel: "info",
+});
+
+const zipResult = await build({
+  entryPoints: [path.join(runtime, "zip-archive.ts")],
+  bundle: true,
+  metafile: true,
+  platform: "node",
+  format: "esm",
+  target: "node22",
+  banner: { js: [
+    'import { createRequire as __ompCreateRequire } from "node:module";',
+    'const require = __ompCreateRequire(import.meta.url);',
+  ].join("\n") },
+  external: ["@aws-sdk/client-s3"],
+  outfile: path.join(assets, "zip-archive.mjs"),
   logLevel: "info",
 });
 
 // The npm tarball ships a bundle. Include the full notices of packages whose
 // code is bundled, in addition to their individually installed npm licenses.
 const packages = new Map();
-for (const input of Object.keys(result.metafile.inputs)) {
+for (const input of [...Object.keys(result.metafile.inputs), ...Object.keys(zipResult.metafile.inputs)]) {
   if (!input.includes("node_modules")) continue;
   let directory = path.dirname(path.resolve(root, input));
   while (directory !== path.dirname(directory)) {
