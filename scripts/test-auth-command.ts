@@ -22,6 +22,7 @@ const originalPresent = keychain.present;
 const originalRemove = keychain.remove;
 const originalSecretPresent = secretService.present;
 const originalSecretRemove = secretService.remove;
+const originalSecretApplicable = secretService.applicable;
 const originalLoginGoogle = AntigravityRuntime.prototype.loginGoogle;
 const originalPoolValues = SessionRuntimePool.prototype.values;
 const originalDelayMs = logoutFollow.delayMs;
@@ -37,6 +38,7 @@ try {
   // Linux Secret Service probe away from the real user keyring.
   secretService.present = async () => undefined;
   secretService.remove = async () => undefined;
+  secretService.applicable = false;
   let keychainEntry = true;
   let flushOnce = false;
   keychain.present = async () => { keychainCalls.push("present"); return keychainEntry; };
@@ -259,6 +261,7 @@ try {
   // confirmation names it without exposing any token.
   keychainEntry = true;
   let keyringEntry = true, keyringRemovals = 0;
+  secretService.applicable = true;
   secretService.present = async () => keyringEntry;
   secretService.remove = async () => { keyringRemovals++; keyringEntry = false; return true; };
   logoutFollow.removalRetryMs = 0;
@@ -280,6 +283,7 @@ try {
   keychain.remove = originalRemove;
   secretService.present = originalSecretPresent;
   secretService.remove = originalSecretRemove;
+  secretService.applicable = originalSecretApplicable;
   AntigravityRuntime.prototype.loginGoogle = originalLoginGoogle;
   SessionRuntimePool.prototype.values = originalPoolValues;
   logoutFollow.delayMs = originalDelayMs;
