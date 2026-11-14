@@ -360,6 +360,39 @@ test("another provider's same-named model never warms this adapter", async t => 
   }
 });
 
+test("switching away closes standby and an active pool skips redundant warmup", async t => {
+  const handle = await startAdapter(t);
+  try {
+    const warm = await warmStandby(t, handle);
+    handle.hooks.get("model_select")?.({ provider: "openai" }, {});
+    await waitFor(t, () => warm.closed, "standby close on provider switch");
+
+    handle.hooks.get("model_select")?.({ provider: "antigravity-acp" }, {});
+    await waitFor(t, () => handle.created.length === 2 && handle.created[1]!.initializeCalls === 1, "second warmup");
+    const second = handle.created[1]!;
+    await second.initialized();
+    await settle(t);
+
+    await streamOnce(handle);
+    handle.hooks.get("model_select")?.({ provider: "antigravity-acp" }, {});
+    await settle(t);
+    assert.equal(handle.created.length, 2, "an active pool must not spawn a redundant standby");
+  } finally {
+    await handle.restore();
+  }
+});
+
+test("an idle standby expires after its TTL", async t => {
+  const handle = await startAdapter(t, { env: { OMP_ACP_STANDBY_TTL_MS: "1000" } });
+  try {
+    const warm = await warmStandby(t, handle);
+    await settle(t);
+    assert.equal(warm.closed, true, "an idle standby must be closed after the TTL");
+  } finally {
+    await handle.restore();
+  }
+});
+
 test("invalid context budgets do not block provider registration", async t => {
   const handle = await startAdapter(t, { contextJson: { defaults: { maxTokens: 999_999 } } });
   try {
@@ -528,6 +561,8 @@ test("quota discovery never consumes a standby", async t => {
     assert.ok(report && report.limits.length > 0, "the fixture quota reply must parse");
     const quota = handle.created.find(connection => connection.options.ompPurpose === "quota");
     assert.ok(quota, "quota must run on its own connection");
+    assert.equal(quota.options.cwd, path.join(os.tmpdir(), "omp-antigravity-acp-quota"),
+      "quota must run outside the project workspace");
     assert.notEqual(quota, warm);
     assert.equal(warm.rebound, 0, "quota must not take the standby handlers");
     assert.equal(warm.closed, false, "quota must leave the standby warm");

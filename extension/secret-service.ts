@@ -44,6 +44,29 @@ function serviceUnavailable(failure: ExecFailure): boolean {
     || (typeof failure.stderr === "string" && UNAVAILABLE_STDERR.test(failure.stderr));
 }
 
+function validEmail(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(trimmed) ? trimmed : undefined;
+}
+
+function extractEmailFromKeyringPayload(stdout: string): string | undefined {
+  const trimmed = stdout.trim();
+  if (!trimmed.startsWith("{")) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed) as { id_token_email?: unknown; id_token?: unknown } | null;
+    const direct = validEmail(parsed?.id_token_email);
+    if (direct) return direct;
+    const idToken = parsed?.id_token;
+    if (typeof idToken === "string" && idToken.includes(".")) {
+      const claims = JSON.parse(Buffer.from(idToken.split(".")[1]!, "base64url").toString("utf8")) as { email?: unknown };
+      return validEmail(claims?.email);
+    }
+  } catch { /* Non-JSON or malformed payload; ignore without surfacing secrets. */ }
+  return undefined;
+}
+
+
 // Linux Secret Service operations behind one mutable object so offline command
 // tests can substitute them without touching the user's real keyring.
 // present/remove resolve to true (present / removed), false (confirmed absent),
@@ -80,6 +103,11 @@ export function createSecretService(run: (args: string[]) => Promise<string>, pl
   return {
     applicable: platform === "linux",
     present: (): Promise<boolean | undefined> => platform === "linux" ? present() : Promise.resolve(undefined),
+    accountEmail: async (): Promise<string | undefined> => {
+      if (platform !== "linux") return undefined;
+      try { return extractEmailFromKeyringPayload(await run(LOOKUP)); }
+      catch { return undefined; }
+    },
     remove: (): Promise<boolean | undefined> => platform === "linux" ? remove() : Promise.resolve(undefined),
   };
 }

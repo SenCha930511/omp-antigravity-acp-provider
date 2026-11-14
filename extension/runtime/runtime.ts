@@ -29,6 +29,9 @@ import {
 } from "@earendil-works/pi-ai";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
 	clearAntigravityCredentials,
@@ -66,6 +69,13 @@ import { resolveSessionRoute, type SessionRoute } from "./routing.ts";
 import { PiEventWriter } from "./stream/pi-events.ts";
 import { usageFromPrompt, type PromptUsageResult } from "../usage.ts";
 import { RuntimeMetrics } from "./status.ts";
+
+const QUOTA_WORKDIR = join(tmpdir(), "omp-antigravity-acp-quota");
+
+function quotaWorkingDirectory(): string {
+	try { mkdirSync(QUOTA_WORKDIR, { recursive: true, mode: 0o700 }); } catch { /* The ACP server reports an unusable cwd. */ }
+	return QUOTA_WORKDIR;
+}
 
 const ompMessageFingerprintMemo = createHistoryFingerprintMemo();
 
@@ -510,7 +520,8 @@ export class AntigravityRuntime {
 		this.assertEpoch(epoch);
 		let sessionId: string | undefined;
 		let text = "";
-		const quotaOptions = { cwd: process.cwd(), ompPurpose: "quota" as const };
+		const quotaCwd = quotaWorkingDirectory();
+		const quotaOptions = { cwd: quotaCwd, ompPurpose: "quota" as const };
 		const connection = this.createConnection({
 			...quotaOptions,
 			promptIdleTimeoutMs: 30_000,
@@ -526,7 +537,7 @@ export class AntigravityRuntime {
 			this.assertEpoch(epoch);
 			await authenticateForCredential(connection, initialize, apiKey, signal);
 			this.assertEpoch(epoch);
-			const session = await connection.newSession(process.cwd(), signal);
+			const session = await connection.newSession(quotaCwd, signal);
 			sessionId = session.sessionId;
 			this.assertEpoch(epoch);
 			const currentModel = sessionModels(session)?.currentModelId;

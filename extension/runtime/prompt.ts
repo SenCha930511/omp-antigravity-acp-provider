@@ -358,6 +358,7 @@ function planHistorySteps(
   framing: HistoryFraming = MAIN_HISTORY_FRAMING,
 ): { prompt: TransferBlock[]; seedSteps: TransferBlock[][] } {
   const metrics = prepareHistoryMetrics(items);
+  const verifyPlan = process.env.OMP_ACP_PLAN_VERIFY === "1";
   const instructionBytes = instructionsBlock ? promptTextBytes([instructionsBlock]) : 0;
   const tailBytes = promptTextBytes(tailBlocks);
   const seedTail: TransferBlock[] = [{ type: "text", text: SEED_ACK_TEXT }];
@@ -387,10 +388,12 @@ function planHistorySteps(
         cursor++;
         continue;
       }
-      const rejected = assembleStep(chunkInstructions, items.slice(start, cursor + 1), seedTail, framing);
-      const actual = promptTextBytes(rejected);
-      if (actual !== predicted || actual <= ACP_STEP_TEXT_BYTES) {
-        throw new Error(`History chunk planner predicted ${predicted} bytes for a rejected candidate but rendered ${actual}`);
+      if (verifyPlan) {
+        const rejected = assembleStep(chunkInstructions, items.slice(start, cursor + 1), seedTail, framing);
+        const actual = promptTextBytes(rejected);
+        if (actual !== predicted || actual <= ACP_STEP_TEXT_BYTES) {
+          throw new Error(`History chunk planner predicted ${predicted} bytes for a rejected candidate but rendered ${actual}`);
+        }
       }
       break;
     }
@@ -406,20 +409,28 @@ function planHistorySteps(
     const predicted = (stepInstructions ? instructionBytes : 0)
       + historyRangeTextBytes(metrics, span.start, span.end, framing.envelopeBytes) + seedTailBytes;
     const step = assembleStep(stepInstructions, items.slice(span.start, span.end), seedTail, framing);
-    const actual = promptTextBytes(step);
-    if (actual !== predicted) throw new Error(`History chunk planner predicted ${predicted} bytes but rendered ${actual}`);
-    checkStepTextBytes(actual);
+    if (verifyPlan) {
+      const actual = promptTextBytes(step);
+      if (actual !== predicted) throw new Error(`History chunk planner predicted ${predicted} bytes but rendered ${actual}`);
+      checkStepTextBytes(actual);
+    } else {
+      checkStepTextBytes(predicted);
+    }
     return step;
   });
   const effectiveFinalInstructions = finalInstructions ?? pendingInstructions;
   const prompt = assembleStep(effectiveFinalInstructions, items.slice(cursor), tailBlocks, framing);
-  const actualPromptBytes = promptTextBytes(prompt);
   const predictedPromptBytes = (effectiveFinalInstructions ? instructionBytes : 0)
     + historyRangeTextBytes(metrics, cursor, items.length, framing.envelopeBytes) + tailBytes;
-  if (actualPromptBytes !== predictedPromptBytes) {
-    throw new Error(`History chunk planner predicted ${predictedPromptBytes} bytes for the final prompt but rendered ${actualPromptBytes}`);
+  if (verifyPlan) {
+    const actualPromptBytes = promptTextBytes(prompt);
+    if (actualPromptBytes !== predictedPromptBytes) {
+      throw new Error(`History chunk planner predicted ${predictedPromptBytes} bytes for the final prompt but rendered ${actualPromptBytes}`);
+    }
+    checkStepTextBytes(actualPromptBytes);
+  } else {
+    checkStepTextBytes(predictedPromptBytes);
   }
-  checkStepTextBytes(actualPromptBytes);
   return { prompt, seedSteps };
 }
 
@@ -444,12 +455,18 @@ function requestFinalHeader(inProgress: boolean, kind: PromptKind = "main"): str
     (kind === "ephemeral" ? EPHEMERAL_NO_TOOLS_TEXT + "\n\n" : "");
 }
 
-function takeTextChunk(text: string, maxBytes: number): string {
-  if (maxBytes <= 0) return "";
-  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+function takeTextChunkSpan(text: string, maxBytes: number, startOffset = 0): { end: number; bytes: number } {
+  if (maxBytes <= 0 || startOffset >= text.length) return { end: startOffset, bytes: 0 };
+  const remainingChars = text.length - startOffset;
+  if (remainingChars * 3 <= maxBytes) {
+    const tail = startOffset === 0 ? text : text.slice(startOffset);
+    return { end: text.length, bytes: Buffer.byteLength(tail, "utf8") };
+  }
   let bytes = 0;
-  let end = 0;
-  for (let index = 0; index < text.length;) {
+  let end = startOffset;
+  let lastNewlineEnd = -1;
+  let lastNewlineBytes = 0;
+  for (let index = startOffset; index < text.length;) {
     const codePoint = text.codePointAt(index)!;
     const units = codePoint > 0xffff ? 2 : 1;
     const size = codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
@@ -457,16 +474,26 @@ function takeTextChunk(text: string, maxBytes: number): string {
     bytes += size;
     end += units;
     index += units;
+    if (codePoint === 0x0a) {
+      lastNewlineEnd = end;
+      lastNewlineBytes = bytes;
+    }
   }
-  if (end === 0) return [...text][0] ?? "";
-  const chunk = text.slice(0, end);
-  // Prefer a line boundary when it keeps most of the available budget. This
-  // preserves readable code/diff chunks without ever changing their bytes.
-  const newline = chunk.lastIndexOf("\n");
-  if (newline > 0 && Buffer.byteLength(chunk.slice(0, newline + 1), "utf8") >= maxBytes * 0.5) {
-    return chunk.slice(0, newline + 1);
+  if (end === startOffset) {
+    const codePoint = text.codePointAt(startOffset)!;
+    const units = codePoint > 0xffff ? 2 : 1;
+    const size = codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+    return { end: startOffset + units, bytes: size };
   }
-  return chunk;
+  if (end < text.length && lastNewlineEnd > startOffset + 1 && lastNewlineBytes >= maxBytes * 0.5) {
+    return { end: lastNewlineEnd, bytes: lastNewlineBytes };
+  }
+  return { end, bytes };
+}
+
+function takeTextChunk(text: string, maxBytes: number): string {
+  const span = takeTextChunkSpan(text, maxBytes);
+  return span.end === text.length ? text : text.slice(0, span.end);
 }
 
 function splitOversizedRequest(
@@ -499,28 +526,29 @@ function splitOversizedRequest(
     currentBytes = 0;
   };
   const appendText = (source: TransferBlock, text: string) => {
-    let rest = text;
+    let offset = 0;
     const resource = source.type === "resource" && source.resource ? source.resource : undefined;
     const overhead = resource
       ? Buffer.byteLength(`Embedded resource (${resource.uri}):\n`, "utf8") + 2
       : 2;
-    while (rest) {
+    while (offset < text.length) {
       const capacity = maxSeedContent - currentBytes - overhead;
       if (capacity <= 0) {
         flush();
         continue;
       }
-      const chunk = takeTextChunk(rest, capacity);
-      if (!chunk) {
+      const span = takeTextChunkSpan(text, capacity, offset);
+      if (span.end <= offset) {
         flush();
         continue;
       }
+      const chunk = offset === 0 && span.end === text.length ? text : text.slice(offset, span.end);
       current.push(resource
         ? { ...source, resource: { ...resource, text: chunk } }
         : { ...source, text: chunk });
-      currentBytes += Buffer.byteLength(chunk, "utf8") + overhead;
-      rest = rest.slice(chunk.length);
-      if (rest) flush();
+      currentBytes += span.bytes + overhead;
+      offset = span.end;
+      if (offset < text.length) flush();
     }
   };
   for (const block of blocks) {
@@ -600,10 +628,11 @@ function historyRecordItems(
       // future cold replay fail. Split its text into bounded records; the
       // history envelope still marks every part as reference data.
       const chunks: RecordItem[] = [];
-      let rest = record.content;
-      while (rest) {
-        let limit = Math.min(Buffer.byteLength(rest, "utf8"), HISTORY_RECORD_CHUNK_BYTES);
-        let chunk = takeTextChunk(rest, limit);
+      const fullText = record.content;
+      let offset = 0;
+      while (offset < fullText.length) {
+        let span = takeTextChunkSpan(fullText, HISTORY_RECORD_CHUNK_BYTES, offset);
+        let chunk = offset === 0 && span.end === fullText.length ? fullText : fullText.slice(offset, span.end);
         let candidate: HistoryRecord;
         let json: string;
         for (;;) {
@@ -613,14 +642,14 @@ function historyRecordItems(
             break;
           } catch (splitError) {
             const splitMessage = splitError instanceof Error ? splitError.message : "";
-            const size = Buffer.byteLength(chunk, "utf8");
-            if (!splitMessage.includes("Maximum context length exceeded") || size <= 1) throw splitError;
-            limit = Math.max(1, Math.floor(size * 0.8));
-            chunk = takeTextChunk(rest, limit);
+            if (!splitMessage.includes("Maximum context length exceeded") || span.bytes <= 1) throw splitError;
+            const limit = Math.max(1, Math.floor(span.bytes * 0.8));
+            span = takeTextChunkSpan(fullText, limit, offset);
+            chunk = fullText.slice(offset, span.end);
           }
         }
         chunks.push(make(candidate, [], [], json));
-        rest = rest.slice(chunk.length);
+        offset = span.end;
       }
       return chunks;
     }
@@ -643,26 +672,28 @@ function historyRecordItems(
       };
       for (const block of record.content) {
         if (block.type === "text") {
-          let rest = block.text ?? "";
-          if (!rest) {
+          const text = block.text ?? "";
+          if (!text) {
             current.push(block);
             continue;
           }
-          while (rest) {
+          let offset = 0;
+          while (offset < text.length) {
             const capacity = HISTORY_RECORD_CHUNK_BYTES - currentBytes;
             if (capacity <= 0) {
               flush();
               continue;
             }
-            const chunk = takeTextChunk(rest, capacity);
-            if (!chunk) {
+            const span = takeTextChunkSpan(text, capacity, offset);
+            if (span.end <= offset) {
               flush();
               continue;
             }
+            const chunk = offset === 0 && span.end === text.length ? text : text.slice(offset, span.end);
             current.push({ ...block, text: chunk });
-            currentBytes += Buffer.byteLength(chunk, "utf8");
-            rest = rest.slice(chunk.length);
-            if (rest) flush();
+            currentBytes += span.bytes;
+            offset = span.end;
+            if (offset < text.length) flush();
           }
         } else {
           current.push(block);

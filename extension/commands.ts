@@ -437,7 +437,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         throw error;
       }
       const auth = await inspectAcpAuth();
-      const email = antigravityAccountEmail();
+      const email = await antigravityAccountEmail();
       ctx.ui.notify(`Antigravity Google login finished${email ? ` as ${email}` : ""} — fresh sign-in; ACP auth: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}.`, "info");
       return;
     }
@@ -461,7 +461,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       const snapshot = await bundle?.runtime.snapshot();
       const permissionMode = deps.getPermissionMode();
       const omp = ompCredentialSummary(ctx);
-      const accountEmail = antigravityAccountEmail();
+      const accountEmail = await antigravityAccountEmail();
       const googleAccount = accountEmail
         ?? (auth.keyring === true ? "signed in · system keyring entry; email unavailable"
           : (await keychain.present()) === true ? "signed in · keychain token; email unavailable"

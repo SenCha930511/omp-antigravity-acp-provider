@@ -39,6 +39,18 @@ test("ACP compaction chunks and upserts become one terminal notification", () =>
   assert.equal(notices[0].status, "completed");
   assert.equal(notices[0].summary, "Earlier decisions: keep the API contract.");
   assert.deepEqual(connection.takeCompactionNotices(), [], "a completed compaction is notified once");
+  assert.equal(connection.compactions.size, 0, "a claimed terminal record must be released");
+});
+
+test("compaction summaries are bounded", () => {
+  const connection = bareConnection();
+  connection.recordCompaction("session", {
+    sessionUpdate: "compaction_summary_chunk",
+    compactionId: "compact-long",
+    content: { type: "text", text: "x".repeat(5000) },
+  });
+  const summary = connection.compactions.get("session")?.get("compact-long")?.summary;
+  assert.equal(summary?.length, 4096);
 });
 
 test("compaction notices are claimed only by their owning ACP session", () => {

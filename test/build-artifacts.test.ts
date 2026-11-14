@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { pathToFileURL } from "node:url";
 import path from "node:path";
 
 const bundle = path.resolve("extension/runtime.mjs");
@@ -33,4 +34,19 @@ test("built supervisor launches adapter-generated Windows wrappers", { skip: !bu
   const text = fs.readFileSync(path.resolve("extension/assets/src/acp/supervisor.mjs"), "utf8");
   assert.ok(text.includes('const windowsBatch = process.platform === "win32" && /\\.(?:cmd|bat)$/iu.test(agentCommand);'));
   assert.ok(text.includes("windowsVerbatimArguments: true"));
+});
+
+test("built bundle drops non-English zod locales", { skip: !built }, () => {
+  const text = fs.readFileSync(bundle, "utf8");
+  assert.doesNotMatch(text, /zh-CN/);
+  assert.doesNotMatch(text, /ja-JP/);
+});
+
+test("built bundle lazy-loads the zip archive chunk", { skip: !built }, async () => {
+  const text = fs.readFileSync(bundle, "utf8");
+  assert.match(text, /await import\("\.\/assets\/zip-archive\.mjs"\)/);
+  const chunk = path.resolve("extension/assets/zip-archive.mjs");
+  assert.equal(fs.existsSync(chunk), true);
+  const archive = await import(pathToFileURL(chunk).href);
+  assert.equal(typeof archive.Open?.file, "function");
 });

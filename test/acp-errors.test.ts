@@ -94,3 +94,9 @@ test("redactTail keeps the newest output and still masks secrets", () => {
   assert.match(tail, /crash access_token=<redacted>$/u);
   assert.doesNotMatch(tail, /BEGIN/u);
 });
+
+test("OAuth token refresh EOF is a transport failure with proxy guidance", () => {
+  const failure = classify("oauth2.googleapis.com/token: EOF");
+  assert.equal(failure.code, "transport");
+  assert.match(failure.message, /HTTP_PROXY/);
+});

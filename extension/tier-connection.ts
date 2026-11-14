@@ -332,7 +332,7 @@ export class TierConnection extends AntigravityAcpConnection {
     const notices: AcpCompactionNotice[] = [];
     for (const [sessionId, records] of this.compactions) {
       if (acpSessionId !== undefined && sessionId !== acpSessionId) continue;
-      for (const record of records.values()) {
+      for (const [compactionId, record] of records) {
         if (record.notified || !isTerminalCompaction(record.status)) continue;
         record.notified = true;
         notices.push({
@@ -342,7 +342,9 @@ export class TierConnection extends AntigravityAcpConnection {
           summary: record.summary,
           ...(record.error !== undefined ? { error: record.error } : {}),
         });
+        records.delete(compactionId);
       }
+      if (records.size === 0) this.compactions.delete(sessionId);
     }
     return notices;
   }
@@ -375,6 +377,35 @@ export class TierConnection extends AntigravityAcpConnection {
     return routed._meta;
   }
 
+  private async retryStartupAuthRace<T>(signal: AbortSignal | undefined, call: () => Promise<T>): Promise<T> {
+    const started = performance.now();
+    try {
+      return await call();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isRace = !signal?.aborted
+        && this.process.alive
+        && performance.now() - started < 2_000
+        && /authentication required|auth_required|not logged in|not signed in/i.test(message)
+        && !/invalid_grant|api.?key/i.test(message);
+      if (!isRace) throw error;
+      await new Promise<void>(resolve => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, 250);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        timer.unref?.();
+      });
+      if (signal?.aborted || !this.process.alive) throw error;
+      return await call();
+    }
+  }
+
   override async newSession(
     cwd: string,
     signal?: AbortSignal,
@@ -382,7 +413,7 @@ export class TierConnection extends AntigravityAcpConnection {
     meta?: SessionMeta,
   ): Promise<AcpNewSessionResponse> {
     const routed = await this.sessionMeta({ cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) });
-    const session = await super.newSession(cwd, signal, mcpServers, routed);
+    const session = await this.retryStartupAuthRace(signal, () => super.newSession(cwd, signal, mcpServers, routed));
     if (this.cleanup) {
       try { this.cleanupLeases.set(session.sessionId, await this.cleanup.acquire(session.sessionId, true, this.process.pid!)); }
       catch { this.pendingOwned.add(session.sessionId); console.warn("[ACP cleanup] Registration deferred; preserving session files and retrying."); }
@@ -409,7 +440,7 @@ export class TierConnection extends AntigravityAcpConnection {
   ): Promise<SessionState> {
     await this.protectSession(sessionId);
     const routed = await this.sessionMeta({ sessionId, cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) });
-    const session = await super.resumeSession(sessionId, cwd, mcpServers, signal, routed);
+    const session = await this.retryStartupAuthRace(signal, () => super.resumeSession(sessionId, cwd, mcpServers, signal, routed));
     if ("availableCommands" in session && Array.isArray(session.availableCommands)) {
       this.updateUsageCommands(sessionId, session.availableCommands);
     }
@@ -424,7 +455,7 @@ export class TierConnection extends AntigravityAcpConnection {
   ): Promise<SessionState> {
     await this.protectSession(sessionId);
     const routed = await this.sessionMeta({ sessionId, cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) });
-    const session = await super.loadSession(sessionId, cwd, mcpServers, signal, routed);
+    const session = await this.retryStartupAuthRace(signal, () => super.loadSession(sessionId, cwd, mcpServers, signal, routed));
     if ("availableCommands" in session && Array.isArray(session.availableCommands)) {
       this.updateUsageCommands(sessionId, session.availableCommands);
     }

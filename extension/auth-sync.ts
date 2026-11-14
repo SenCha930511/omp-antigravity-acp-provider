@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { clearAntigravityCredentials, inspectAntigravityAuth, resolveAntigravityAcpDirectory } from "./runtime.mjs";
 import type { AntigravityAuthHealth } from "./runtime/acp/antigravity.ts";
 import { createSecretService, runSecretTool } from "./secret-service.ts";
@@ -93,14 +94,15 @@ function emailFromTokenJson(raw: string): string | undefined {
   } catch { return undefined; }
 }
 
-// The signed-in Google account, from the ACP server's token file only.
-// Keychain-stored tokens report no email: reading the macOS keychain secret
-// would require the account password on every call, so that path is removed.
-export function antigravityAccountEmail(): string | undefined {
+// The signed-in Google account from the ACP token file, then the Linux
+// Secret Service metadata when the file is absent. The keyring payload is
+// parsed only for the non-secret email claim.
+export async function antigravityAccountEmail(): Promise<string | undefined> {
   try {
-    return emailFromTokenJson(fs.readFileSync(path.join(resolveAntigravityAcpDirectory(), "acp_token.json"), "utf8"));
+    const fileEmail = emailFromTokenJson(fs.readFileSync(path.join(resolveAntigravityAcpDirectory(), "acp_token.json"), "utf8"));
+    if (fileEmail) return fileEmail;
   } catch { /* no token file */ }
-  return undefined;
+  return await secretService.accountEmail?.();
 }
 
 // Timing knobs for following OMP-side logouts; mutable so offline tests can
@@ -242,6 +244,7 @@ export interface AuthCoordinatorDeps {
     on: (name: string, handler: (event: unknown, ctx: OmpCommandContext) => unknown) => void;
   };
   connections: Set<TierConnection>;
+  stateDir?: string;
   isPoolBusy: () => boolean;
   logoutAllRuntimes: () => Promise<void>;
   closeAllRuntimes: () => Promise<void>;
@@ -294,8 +297,82 @@ export class OmpAuthCoordinator {
   apiKeyFallback = true;
   private followTimer: NodeJS.Timeout | undefined;
   private followRetry: NodeJS.Timeout | undefined;
+  private loginLockToken: string | undefined;
 
   constructor(private readonly deps: AuthCoordinatorDeps) {}
+
+  private get loginLockPath(): string | undefined {
+    return this.deps.stateDir ? path.join(this.deps.stateDir, "login-in-progress.json") : undefined;
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return true; }
+    catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+  }
+
+  private readActiveLoginLock(): { pid: number; token: string; startedAt: number } | undefined {
+    const file = this.loginLockPath;
+    if (!file) return undefined;
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: unknown; token?: unknown; startedAt?: unknown } | null;
+      if (typeof raw?.pid !== "number" || typeof raw?.token !== "string" || typeof raw?.startedAt !== "number") return undefined;
+      const age = Date.now() - raw.startedAt;
+      if (age > 10 * 60_000 || age < -60_000 || !this.isProcessAlive(raw.pid)) {
+        try { fs.rmSync(file, { force: true }); } catch { /* Stale lock cleanup is best effort. */ }
+        return undefined;
+      }
+      return { pid: raw.pid, token: raw.token, startedAt: raw.startedAt };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private acquireLoginLock(): void {
+    const file = this.loginLockPath;
+    if (!file) return;
+    const existing = this.readActiveLoginLock();
+    if (existing) {
+      if (existing.pid !== process.pid) {
+        throw new Error("Another OMP session is already signing in to Antigravity. Complete or cancel that login first.");
+      }
+      if (this.loginLockToken === existing.token) return;
+      try { fs.rmSync(file, { force: true }); } catch { /* Retry the atomic create once. */ }
+    }
+    const token = randomUUID();
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        fs.writeFileSync(file, JSON.stringify({ pid: process.pid, token, startedAt: Date.now() }), { mode: 0o600, flag: "wx" });
+        this.loginLockToken = token;
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const active = this.readActiveLoginLock();
+        if (active && active.pid !== process.pid) {
+          throw new Error("Another OMP session is already signing in to Antigravity. Complete or cancel that login first.");
+        }
+        if (active && active.pid === process.pid && active.token === this.loginLockToken) return;
+        try { fs.rmSync(file, { force: true }); } catch { /* Retry the atomic create once. */ }
+      }
+    }
+    throw new Error("Unable to acquire the Antigravity login lock.");
+  }
+
+  private endFreshGoogleLogin(): void {
+    const file = this.loginLockPath;
+    const token = this.loginLockToken;
+    this.loginLockToken = undefined;
+    if (!file || !token) return;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { token?: unknown } | null;
+      if (parsed?.token === token) fs.rmSync(file, { force: true });
+    } catch { /* Already cleared or inaccessible. */ }
+  }
+
+  releaseContext(ctx?: OmpCommandContext): void {
+    if (!ctx || this.activeContext === ctx) this.activeContext = undefined;
+  }
 
   ompMarkerStored(ctx: OmpCommandContext | undefined): boolean | undefined {
     try {
@@ -346,6 +423,7 @@ export class OmpAuthCoordinator {
     this.followTimer = undefined;
     clearTimeout(this.followRetry);
     this.followRetry = undefined;
+    this.endFreshGoogleLogin();
     if (!this.apiKeyFallback) {
       this.apiKeyFallback = true;
       this.deps.onSyncProvider();
@@ -358,6 +436,7 @@ export class OmpAuthCoordinator {
     this.baseSuppressFollow = false;
     clearTimeout(this.followTimer);
     this.followTimer = undefined;
+    this.endFreshGoogleLogin();
     this.restoreApiKeyFallback(this.activeContext);
   }
 
@@ -373,6 +452,7 @@ export class OmpAuthCoordinator {
     if (this.deps.isPoolBusy()) {
       throw new Error("Wait for active Antigravity requests to finish before logging in.");
     }
+    this.acquireLoginLock();
     // OMP removes the stale marker while the browser sign-in is still running.
     // That generation change must not be mistaken for a user logout and close
     // the new ACP runtime before the login can finish, so suppress it before
@@ -408,6 +488,7 @@ export class OmpAuthCoordinator {
       if (this.activeLogins.delete(attempt) && this.activeLogins.size === 0) {
         this.suppressFollow = this.baseSuppressFollow || performance.now() < this.disabledUntil;
         this.baseSuppressFollow = false;
+        this.endFreshGoogleLogin();
       }
       throw error;
     }

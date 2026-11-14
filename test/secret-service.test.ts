@@ -35,6 +35,26 @@ test("linux lookup and clear use the gemini/antigravity secret-tool argv", async
 	assert.deepEqual(calls, [LOOKUP, CLEAR]);
 });
 
+test("extracts a non-secret account email from keyring metadata", async () => {
+	const direct = createSecretService(async () => JSON.stringify({
+		id_token_email: "direct@example.com",
+		access_token: SYNTHETIC_SECRET,
+	}), "linux");
+	assert.equal(await direct.accountEmail(), "direct@example.com");
+
+	const payload = Buffer.from(JSON.stringify({ email: "jwt@example.com" })).toString("base64url");
+	const jwt = createSecretService(async () => JSON.stringify({
+		id_token: `header.${payload}.signature`,
+		access_token: SYNTHETIC_SECRET,
+	}), "linux");
+	assert.equal(await jwt.accountEmail(), "jwt@example.com");
+
+	const malformed = createSecretService(async () => "not-json", "linux");
+	assert.equal(await malformed.accountEmail(), undefined);
+	const otherPlatform = createSecretService(async () => JSON.stringify({ id_token_email: "direct@example.com" }), "darwin");
+	assert.equal(await otherPlatform.accountEmail(), undefined);
+});
+
 test("only non-whitespace lookup output is a present item and nothing is cached", async () => {
 	let output = "";
 	const service = createSecretService(async () => output, "linux");

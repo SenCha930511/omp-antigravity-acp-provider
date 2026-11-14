@@ -27,8 +27,11 @@ export function boundedNdjsonStream(
 	const encoder = new TextEncoder();
 	const decoder = new TextDecoder("utf-8", { fatal: true });
 	let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-	let pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+	let chunks: Uint8Array<ArrayBufferLike>[] = [];
+	let chunkBytes = 0;
 	let closed = false;
+	let inputDone = false;
+	const queuedFrames: Uint8Array<ArrayBufferLike>[] = [];
 	let released = false;
 	const releaseReader = () => {
 		if (!reader || released) return;
@@ -43,41 +46,83 @@ export function boundedNdjsonStream(
 			if (closed) return;
 			try {
 				for (;;) {
-					if (closed) return;
-					let newline: number;
-					while ((newline = pending.indexOf(0x0a)) >= 0) {
-						const frame = pending.subarray(0, newline);
-						pending = pending.slice(newline + 1);
+					while (queuedFrames.length > 0) {
+						const frame = queuedFrames.shift()!;
 						if (frame.byteLength > maxFrameBytes) {
 							throw new Error(`ACP frame exceeds ${maxFrameBytes} bytes`);
 						}
 						enqueueFrame(frame, decoder, controller, options.onCompatibilityNoise);
 						if (controller.desiredSize !== null && controller.desiredSize <= 0) return;
 					}
-					const { value, done } = await reader!.read();
-					if (closed) return;
-					if (done) {
-						if (pending.byteLength > 0) {
-							if (pending.byteLength > maxFrameBytes) {
-								throw new Error(`ACP frame exceeds ${maxFrameBytes} bytes`);
-							}
-							enqueueFrame(pending, decoder, controller, options.onCompatibilityNoise);
-							pending = new Uint8Array(0);
-						}
+					if (inputDone) {
 						closed = true;
 						controller.close();
 						releaseReader();
 						return;
 					}
+					const { value, done } = await reader!.read();
+					if (closed) return;
+					if (done) {
+						if (chunkBytes > 0) {
+							if (chunkBytes > maxFrameBytes) {
+								throw new Error(`ACP frame exceeds ${maxFrameBytes} bytes`);
+							}
+							const frame = chunks.length === 1 ? chunks[0]! : joinChunks(chunks, chunkBytes);
+							chunks = [];
+							chunkBytes = 0;
+							queuedFrames.push(frame);
+						}
+						inputDone = true;
+						continue;
+					}
 					if (!value || value.byteLength === 0) continue;
-					pending = appendBytes(pending, value);
-					if (pending.byteLength > maxFrameBytes && pending.indexOf(0x0a) < 0) {
-						throw new Error(`ACP frame exceeds ${maxFrameBytes} bytes`);
+					let offset = 0;
+					let newline = value.indexOf(0x0a, offset);
+					if (newline < 0) {
+						if (chunkBytes + value.byteLength > maxFrameBytes) {
+							throw new Error(`ACP frame exceeds ${maxFrameBytes} bytes`);
+						}
+						chunks.push(value.slice());
+						chunkBytes += value.byteLength;
+						continue;
+					}
+					while (newline >= 0) {
+						const tail = value.subarray(offset, newline);
+						const frameLength = chunkBytes + tail.byteLength;
+						if (frameLength > maxFrameBytes) {
+							throw new Error(`ACP frame exceeds ${maxFrameBytes} bytes`);
+						}
+						let frame: Uint8Array<ArrayBufferLike>;
+						if (chunks.length === 0) {
+							frame = tail;
+						} else {
+							frame = new Uint8Array(frameLength);
+							let cursor = 0;
+							for (const part of chunks) {
+								frame.set(part, cursor);
+								cursor += part.byteLength;
+							}
+							if (tail.byteLength > 0) frame.set(tail, cursor);
+							chunks = [];
+							chunkBytes = 0;
+						}
+						queuedFrames.push(frame);
+						offset = newline + 1;
+						newline = offset < value.byteLength ? value.indexOf(0x0a, offset) : -1;
+					}
+					if (offset < value.byteLength) {
+						const rest = value.subarray(offset);
+						if (rest.byteLength > maxFrameBytes) {
+							throw new Error(`ACP frame exceeds ${maxFrameBytes} bytes`);
+						}
+						chunks.push(rest.slice());
+						chunkBytes = rest.byteLength;
 					}
 				}
 			} catch (cause) {
 				if (closed) return;
 				closed = true;
+				queuedFrames.length = 0;
 				const error = cause instanceof Error ? cause : new Error(String(cause));
 				options.onProtocolError?.(error);
 				// ACP SDK 0.16.1 starts its receive loop without observing the
@@ -90,6 +135,7 @@ export function boundedNdjsonStream(
 		},
 		async cancel(reason) {
 			closed = true;
+			queuedFrames.length = 0;
 			try { await reader?.cancel(reason); } catch { /* The input is already gone. */ }
 			releaseReader();
 		},
@@ -121,14 +167,17 @@ export function boundedNdjsonStream(
 	return { readable, writable };
 }
 
-function appendBytes(
-	left: Uint8Array<ArrayBufferLike>,
-	right: Uint8Array<ArrayBufferLike>,
+function joinChunks(
+	chunks: Uint8Array<ArrayBufferLike>[],
+	totalBytes: number,
 ): Uint8Array<ArrayBufferLike> {
-	if (left.byteLength === 0) return right.slice();
-	const joined = new Uint8Array(left.byteLength + right.byteLength);
-	joined.set(left);
-	joined.set(right, left.byteLength);
+	if (chunks.length === 1) return chunks[0]!;
+	const joined = new Uint8Array(totalBytes);
+	let cursor = 0;
+	for (const chunk of chunks) {
+		joined.set(chunk, cursor);
+		cursor += chunk.byteLength;
+	}
 	return joined;
 }
 
