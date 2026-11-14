@@ -137,7 +137,7 @@ export type ShadowCheckpoint =
 	| { kind: "uncertain"; reason: ShadowRebuildReason };
 
 interface Binding {
- ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedGuard?: HistorySeedGuard; ompImageCheckpoint?: ImageHistoryCheckpoint; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; delivery: RelayDelivery; relayBridge?: PiMcpBridge; relayFingerprint: string;
+ ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedGuard?: HistorySeedGuard; ompImageCheckpoint?: ImageHistoryCheckpoint; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompUnabsorbedToolBoundary?: boolean; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; delivery: RelayDelivery; relayBridge?: PiMcpBridge; relayFingerprint: string;
 	ompTerminalStopReason?: PromptResponse["stopReason"];
 	ompCancelledCheckpoint?: boolean;
 	ompCancelledHadOutput?: boolean;
@@ -936,6 +936,7 @@ export class AntigravityRuntime {
 				binding.needsReconstruction = true;
 			} else {
 				const undelivered = hasUndeliveredRelay(binding.delivery, results.map(({ pending }) => pending.invocation.id));
+				if (undelivered) binding.ompUnabsorbedToolBoundary = true;
 				await claimContinuation(binding, async () => {
 				binding.writer = writer;
 				const continuationTurn = binding.turnCompletion; await this.noteContinuationInstructions(binding, context); if (!continuationTurn || binding.turnCompletion !== continuationTurn || binding.abortRequested || options.signal?.aborted || !binding.connection.process.alive) throw abortError();
@@ -1064,6 +1065,7 @@ export class AntigravityRuntime {
 			binding.instructionsFingerprint = instructionFingerprint(context);
 			binding.ompFallbackContextTokens = parts.estimatedContextTokens;
 			binding.needsReconstruction = false;
+			binding.ompUnabsorbedToolBoundary = false;
 			binding.pendingContextCount = context.messages.length;
 			binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
 			binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
@@ -1090,7 +1092,7 @@ export class AntigravityRuntime {
             if (binding.ompInvalidated || !binding.connection.process.alive) throw new AntigravityAcpError('protocol', 'ACP session closed before prompt dispatch');
             if (options.signal?.aborted) throw abortError();
             ompDispatched = true;
-            if (deliveryBatch && deliveryOwner) deliveryOwner.delivery.commit(deliveryBatch);
+
             let ompSeedUsage: PromptUsageResult | undefined;
             if (parts.seedSteps?.length) {
               const savedWriter = binding.writer;
@@ -1134,6 +1136,7 @@ export class AntigravityRuntime {
                 binding.writer = savedWriter;
               }
             }
+            if (deliveryBatch && deliveryOwner) deliveryOwner.delivery.commit(deliveryBatch);
             const response = await binding.connection.prompt(
 				{ sessionId: binding.session.sessionId, prompt: parts.prompt },
 				options.signal,
@@ -1153,10 +1156,12 @@ export class AntigravityRuntime {
 			binding.messageCount = binding.pendingContextCount || parts.messageCount;
 			binding.historyFingerprint = binding.pendingContextFingerprint;
 			binding.ompConversationFingerprint = binding.pendingConversationFingerprint;
-            binding.expectedAssistantFingerprint = this.ompMessageFingerprint(activeWriter.message.content.length
-              ? activeWriter.message : { ...activeWriter.message, content: [{ type: 'text', text: '' }] });
-            binding.ompExpectedAssistantNormalized = this.ompMessageFingerprint(this.ompNormalizeAssistantForBoundary(activeWriter.message));
-            binding.ompExpectedAssistantHasOutput = activeWriter.message.content.some(block => block.type !== 'text' || block.text.length > 0);
+            if (!binding.ompUnabsorbedToolBoundary) {
+              binding.expectedAssistantFingerprint = this.ompMessageFingerprint(activeWriter.message.content.length
+                ? activeWriter.message : { ...activeWriter.message, content: [{ type: 'text', text: '' }] });
+              binding.ompExpectedAssistantNormalized = this.ompMessageFingerprint(this.ompNormalizeAssistantForBoundary(activeWriter.message));
+              binding.ompExpectedAssistantHasOutput = activeWriter.message.content.some(block => block.type !== 'text' || block.text.length > 0);
+            }
             binding.ompInFlight = false;
 			if (response.stopReason !== 'cancelled') binding.ompCancelledCheckpoint = false;
 			await this.persistBinding(binding);
@@ -1277,9 +1282,9 @@ export class AntigravityRuntime {
 		const bridgeConfigured = binding.initialize.agentCapabilities?.mcpCapabilities?.http === true &&
 			binding.bridge !== undefined && !binding.bridge.empty;
 		// A side turn never executes tools. Its legacy prompt guidance must say
-		// so instead of advertising the main pi_task delegation mapping, and the
+		// so instead of advertising the main omp_task delegation mapping, and the
 		// prompt planner must use the ephemeral history/continuation/retry text
-		// that prohibits every tool call rather than only the pi_ guidance.
+		// that prohibits every tool call rather than only the omp_ guidance.
 		const sessionGuidance = sessionAppend
 			? undefined
 			: ompToolGuidance(binding.initialize, routing?.nativeTools ?? "prefer", bridgeConfigured,
@@ -1576,7 +1581,7 @@ export class AntigravityRuntime {
 								return { content: [{ type: "text", text: "call_id must be a non-empty string" }], isError: true };
 							}
 							const result = await relay.await(callId);
-							delivery.consume(callId);
+							delivery.consume(callId, result);
 							return result;
 						},
 					});

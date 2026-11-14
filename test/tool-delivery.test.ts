@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { RelayDelivery, hasUndeliveredRelay, relayNoticeCallId } from "../extension/runtime/tools/delivery.ts";
+import { RelayDelivery, hasUndeliveredRelay, relayNoticeCallId, toolResultEnvelope } from "../extension/runtime/tools/delivery.ts";
 import type { RelayOutcome } from "../extension/runtime/tools/relay.ts";
 import { relayNotice } from "../extension/tool-relay-protocol.mjs";
 
@@ -73,6 +73,17 @@ test("awaiting the result consumes the obligation", () => {
   assert.equal(delivery.decide(boundary()).batch, undefined);
 });
 
+test("consume ignores a relay notice even if the relay settles immediately", () => {
+  const outcomes = new Map<string, RelayOutcome>([
+    ["call-1", { kind: "settled", state: "fulfilled", result: result("done") }],
+  ]);
+  const delivery = setup(outcomes);
+  delivery.consume("call-1", { content: [{ type: "text", text: relayNotice("call-1") }], isError: false });
+  assert.deepEqual(delivery.open(), ["call-1"]);
+  delivery.consume("call-1", result("done"));
+  assert.deepEqual(delivery.open(), []);
+});
+
 test("expired and cancelled results are dropped", () => {
   const outcomes = new Map<string, RelayOutcome>([
     ["call-1", { kind: "cancelled", reason: "aborted" }],
@@ -132,4 +143,17 @@ test("hasUndeliveredRelay detects open and claimed obligations", () => {
   assert.equal(hasUndeliveredRelay(delivery, ["call-1"]), true, "a claimed batch is not delivered yet");
   delivery.commit(batch);
   assert.equal(hasUndeliveredRelay(delivery, ["call-1"]), false);
+});
+
+
+test("envelope truncation counts UTF-8 bytes without splitting astral characters", () => {
+  const blocks = toolResultEnvelope([{
+    callId: "call-1",
+    toolName: "read",
+    result: result("😀😀"),
+  }], "continuation", { images: false, maxBytes: 4 });
+  const text = String(blocks[0]?.text);
+  assert.match(text, /😀/);
+  assert.doesNotMatch(text, /�/);
+  assert.doesNotMatch(text, /😀😀/);
 });

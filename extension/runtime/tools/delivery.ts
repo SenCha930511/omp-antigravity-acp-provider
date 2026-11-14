@@ -85,7 +85,8 @@ export class RelayDelivery {
     });
   }
 
-  consume(callId: string): void {
+  consume(callId: string, result?: CallToolResult): void {
+    if (result && relayNoticeCallId(result) !== undefined) return;
     const obligation = this.obligations.get(callId);
     if (!obligation || obligation.state === "delivered") return;
     const outcome = this.relay.inspect(callId);
@@ -183,8 +184,9 @@ export function toolResultEnvelope(
   const share = entries.length > 0 ? Math.max(1, Math.floor(options.maxBytes / entries.length)) : options.maxBytes;
   const blocks: TransferBlock[] = [];
   for (const entry of entries) {
-    const text = resultText(entry.result).slice(0, share);
-    const truncated = text.length < resultText(entry.result).length;
+    const full = resultText(entry.result);
+    const text = truncateUtf8(full, share);
+    const truncated = text !== full;
     blocks.push({
       type: "text",
       text: `<tool_result id="${entry.callId}" name="${entry.toolName}"${entry.result.isError ? ' error="true"' : ""}>\n` +
@@ -207,6 +209,18 @@ function resultText(result: CallToolResult): string {
     .filter(block => block.type === "text")
     .map(block => block.type === "text" ? block.text : "")
     .join("\n");
+}
+
+function truncateUtf8(text: string, maxBytes: number): string {
+  let output = "";
+  let bytes = 0;
+  for (const character of text) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > maxBytes) break;
+    output += character;
+    bytes += size;
+  }
+  return output;
 }
 
 function escapeClosingTag(text: string): string {
