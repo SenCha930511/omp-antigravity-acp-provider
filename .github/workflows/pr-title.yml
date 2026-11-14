@@ -1,7 +1,7 @@
 name: PR title
 
 on:
-  pull_request:
+  pull_request_target:
     types:
       - opened
       - synchronize
@@ -23,7 +23,7 @@ jobs:
       - name: Validate pull request title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        # Keep this inline. The workflow comes from the base branch; a checked-out script comes from the PR and could be rewritten.
+        # This workflow runs from the base branch on pull_request_target, so the inline check cannot be rewritten by the PR.
         run: |
           node -e '
             const title = process.env.PR_TITLE ?? "";

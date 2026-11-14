@@ -28,7 +28,7 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        # Keep this inline. The workflow comes from the base branch; a checked-out script comes from the PR and could be rewritten.
+        # Fast feedback only. The trusted gate is the PR title workflow on pull_request_target.
         run: |
           node -e '
             const title = process.env.PR_TITLE ?? "";
