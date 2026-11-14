@@ -39,13 +39,17 @@ test("accepts a matching tarball and writes GitHub env", (t) => {
 
 test("resolves relative --directory when writing TARBALL to GitHub env", (t) => {
   const { root, tarball } = fixture(t);
-  const env = path.join(root, "github-env");
+  const realRoot = fs.realpathSync(root);
+  const env = path.join(realRoot, "github-env");
   const result = invoke(
-    ["--directory", path.basename(root), "--tag", `v${version}`, "--head", head, "--github-env", env],
-    { cwd: path.dirname(root) },
+    ["--directory", path.basename(realRoot), "--tag", `v${version}`, "--head", head, "--github-env", env],
+    { cwd: path.dirname(realRoot) },
   );
   assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-  assert.equal(fs.readFileSync(env, "utf8"), `TARBALL=${tarball}\nNAME=${name}\nVERSION=${version}\n`);
+  assert.equal(
+    fs.readFileSync(env, "utf8"),
+    `TARBALL=${path.join(realRoot, path.basename(tarball))}\nNAME=${name}\nVERSION=${version}\n`,
+  );
 });
 
 test("rejects a tag mismatch", (t) => {
