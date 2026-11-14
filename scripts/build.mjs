@@ -58,8 +58,8 @@ for (const [directory, metadata] of [...packages].sort((a, b) => a[1].name.local
       texts.push(`${name}\n${await fs.readFile(path.join(directory, name), "utf8")}`);
     }
   }
-  if (!texts.length && metadata.name === "@earendil-works/pi-ai" && metadata.version === "1.3.0") {
-    texts.push(await fs.readFile(path.join(root, "licenses/pi-ai-1.3.0.txt"), "utf8"));
+  if (!texts.length && metadata.name.startsWith("@earendil-works/pi-")) {
+    texts.push(await fs.readFile(path.join(root, "licenses/pi-mit.txt"), "utf8"));
   }
   if (!texts.length) {
     for (const name of (await fs.readdir(directory)).filter(name => /^readme(?:\..*)?$/i.test(name))) {
