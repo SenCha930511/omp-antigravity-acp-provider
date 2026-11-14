@@ -1,0 +1,214 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: release-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare isolated home
+        run: |
+          mkdir -p "$RUNNER_TEMP/omp-home"
+          echo "HOME=$RUNNER_TEMP/omp-home" >> "$GITHUB_ENV"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.19.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      - name: Install CI tools
+        run: |
+          npm install --global npm@11.21.2
+          npm install --prefix "$RUNNER_TEMP/omp" --no-save --no-audit --no-fund @oh-my-pi/pi-coding-agent@18.19.0
+          echo "$RUNNER_TEMP/omp/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Verify tool versions
+        run: |
+          printf '%s\n' "node $(node --version)" "npm $(npm --version)" "bun $(bun --version)" "$(omp --version)"
+          test "$(node --version)" = "v22.19.0"
+          test "$(npm --version)" = "11.21.2"
+          test "$(bun --version)" = "1.4.4"
+          test "$(omp --version)" = "omp/18.19.0"
+
+      - name: Verify the exact release tag and metadata
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = "tag"
+          test "$GITHUB_REF" = "refs/tags/$TAG"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$TAG^{commit}")"
+          node scripts/check-release-versions.mjs --release --tag "$TAG"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run offline verification
+        run: npm run check
+
+      - name: Recheck versions and release helpers
+        run: |
+          npm run check:versions
+          node --test scripts/test-check-release-versions.mjs
+
+      - name: Set the release commit as gitHead
+        run: npm pkg set gitHead="$(git rev-parse HEAD)"
+
+      - name: Pack the exact release artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          npm pack --pack-destination dist
+
+      - name: Verify the packed tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$(find dist -maxdepth 1 -type f -name '*.tgz' | wc -l)" -eq 1
+          TARBALL=$(find dist -maxdepth 1 -type f -name '*.tgz')
+          NAME=$(tar -xOf "$TARBALL" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')
+          VERSION=$(tar -xOf "$TARBALL" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
+          GIT_HEAD=$(tar -xOf "$TARBALL" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).gitHead')
+          test "$NAME" = "omp-antigravity-acp-provider"
+          test "v$VERSION" = "$TAG"
+          test "$GIT_HEAD" = "$(git rev-parse HEAD)"
+          echo "Packed $NAME@$VERSION from $GIT_HEAD"
+
+      - name: Upload the release tarball
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-tarball
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: npm-publish
+      url: https://www.npmjs.com/package/omp-antigravity-acp-provider
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.19.0
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.21.2
+
+      - name: Download the release tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-tarball
+          path: dist
+
+      - name: Verify the downloaded tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = "tag"
+          test "$GITHUB_REF" = "refs/tags/$TAG"
+          test "$(find dist -maxdepth 1 -type f -name '*.tgz' | wc -l)" -eq 1
+          TARBALL=$(find dist -maxdepth 1 -type f -name '*.tgz')
+          NAME=$(tar -xOf "$TARBALL" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')
+          VERSION=$(tar -xOf "$TARBALL" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
+          GIT_HEAD=$(tar -xOf "$TARBALL" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).gitHead')
+          test "$NAME" = "omp-antigravity-acp-provider"
+          test "v$VERSION" = "$TAG"
+          test "$GIT_HEAD" = "$(git rev-parse HEAD)"
+          {
+            echo "TARBALL=$TARBALL"
+            echo "NAME=$NAME"
+            echo "VERSION=$VERSION"
+          } >> "$GITHUB_ENV"
+
+      - name: Publish or verify the exact tarball
+        run: |
+          set -euo pipefail
+          LOCAL_INTEGRITY=$(node -e 'const { createHash } = require("node:crypto"); const { readFileSync } = require("node:fs"); process.stdout.write(`sha512-${createHash("sha512").update(readFileSync(process.argv[1])).digest("base64")}`)' "$TARBALL")
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            PUBLISHED_INTEGRITY=$(npm view "$NAME@$VERSION" dist.integrity)
+            test "$PUBLISHED_INTEGRITY" = "$LOCAL_INTEGRITY"
+            echo "$NAME@$VERSION is already published with the same integrity; skipping publish."
+            exit 0
+          fi
+          npm publish "$TARBALL" --access public --provenance
+
+  github-release:
+    name: github-release
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the release tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-tarball
+          path: dist
+
+      - name: Verify the downloaded tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = "tag"
+          test "$GITHUB_REF" = "refs/tags/$TAG"
+          test "$(find dist -maxdepth 1 -type f -name '*.tgz' | wc -l)" -eq 1
+          TARBALL=$(find dist -maxdepth 1 -type f -name '*.tgz')
+          VERSION=$(tar -xOf "$TARBALL" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
+          test "v$VERSION" = "$TAG"
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+      - name: Create or reuse the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$TARBALL" --clobber --repo "$GITHUB_REPOSITORY"
+            echo "Reused the existing GitHub release $TAG with the exact release tarball."
+          else
+            gh release create "$TAG" "$TARBALL" --verify-tag --generate-notes --title "$TAG" --repo "$GITHUB_REPOSITORY"
+          fi
