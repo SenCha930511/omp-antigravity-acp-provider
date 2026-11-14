@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3 — 2026-11-14
+
+- Default `nativeTools` to `disabled` for strict OMP-only sessions (requires ACP 1.4.1+ with system-append support; `/antigravity-acp native-tools prefer` or `"nativeTools": "prefer"` restores ACP-native tools on older runtimes).
+- Reduce bundle size, startup cost, and steady-state memory usage: lazy-load `unzipper` into `assets/zip-archive.mjs`, trim non-English `zod` locales from the runtime bundle, stream oversized prompt and history text chunks by string offsets (gating double-pass plan verification behind `OMP_ACP_PLAN_VERIFY=1`), read SQLite model steps in bounded batches with capped page cache and disabled mmap, lower the default idle runtime cap (`OMP_ACP_MAX_IDLE_RUNTIMES=1`), expire idle standby warmup connections (`OMP_ACP_STANDBY_TTL_MS=300000`), and release retained auth-context, compaction, and transcript-routing state.
+- Harden startup auth, login coordination, quota discovery, and stream transport: coordinate concurrent Google sign-ins across OMP processes with a stale-safe login lock, fall back to Linux Secret Service metadata for `/antigravity-acp account` when `acp_token.json` is absent, retry transient startup session auth races, run quota discovery in an isolated temporary directory, consume queued NDJSON frames linearly without shifting the array, and classify protocol-wrapped `oauth2.googleapis.com/token` network/EOF errors (except `invalid_grant`) as transport failures with proxy hints.
+- Harden CI and release verification (`check:portable`/`check:posix`, `scripts/verify-release-tarball.mjs`, reusable `release-verify.yml`, and `release-dry-run.yml`) and update development dependencies.
+
 ## 0.2.2 — 2026-11-14
 
 - Publish the exact packed tarball through a filesystem path so npm does not parse the tarball name as a GitHub shorthand. The v0.2.1 tag was created but the release failed before publication; 0.2.2 is the first published 0.2.x release.
