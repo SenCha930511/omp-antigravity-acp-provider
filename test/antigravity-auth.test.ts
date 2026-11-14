@@ -66,7 +66,7 @@ test("a corrupt settings file survives logout instead of being deleted", async (
   }
 });
 
-test("a failed settings rewrite keeps the original file", { skip: process.getuid?.() === 0 }, async () => {
+test("a failed settings rewrite keeps the original file", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
   const directory = await fixture();
   try {
     const settings = path.join(directory, "settings.json");

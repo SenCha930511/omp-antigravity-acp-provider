@@ -11,6 +11,9 @@ import { SessionCleanup, saveCleanupPolicy } from "../extension/session-cleanup.
 import { AcpSessionStore } from "../extension/session-store.ts";
 import { findSources, sourceId } from "../extension/omp-session-source.ts";
 
+// Session cleanup exercises POSIX process and file-lock semantics. Windows coverage lives in the marketplace and packed-tarball jobs.
+const testPosix = process.platform === "win32" ? test.skip : test;
+
 function fixture(t: any) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-acp-cleanup-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -41,7 +44,7 @@ async function trackedSource(f: any, id: string) {
   return { root, file, mappingFile };
 }
 
-test("deleted OMP source removes its mapping and owned ACP files only after two checks and lease release", async t => {
+testPosix("deleted OMP source removes its mapping and owned ACP files only after two checks and lease release", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   const source = await trackedSource(f, id);
@@ -53,7 +56,7 @@ test("deleted OMP source removes its mapping and owned ACP files only after two 
   assert.equal(f.exists(id), false); assert.equal(fs.existsSync(source.mappingFile), false);
 });
 
-test("closing, moving, restoring or unmounting an OMP source never proves deletion", async t => {
+testPosix("closing, moving, restoring or unmounting an OMP source never proves deletion", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   const source = await trackedSource(f, id);
@@ -69,7 +72,7 @@ test("closing, moving, restoring or unmounting an OMP source never proves deleti
   assert.ok(fs.existsSync(source.mappingFile));
 });
 
-test("off preserves deleted OMP sources and malformed relocation scans stay conservative", async t => {
+testPosix("off preserves deleted OMP sources and malformed relocation scans stay conservative", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   const source = await trackedSource(f, id);
@@ -81,7 +84,7 @@ test("off preserves deleted OMP sources and malformed relocation scans stay cons
   assert.equal(f.cleaner.status().failures, 0, "an unreadable journal is not a scan failure");
 });
 
-test("deleted-source reconciliation recovers after mapping removal without losing ownership proof", async t => {
+testPosix("deleted-source reconciliation recovers after mapping removal without losing ownership proof", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   const source = await trackedSource(f, id);
@@ -93,7 +96,7 @@ test("deleted-source reconciliation recovers after mapping removal without losin
   assert.equal(await f.create().collect(), 1); assert.equal(f.exists(id), false);
 });
 
-test("an old mapping without a verified journal source is never inferred deleted", async t => {
+testPosix("an old mapping without a verified journal source is never inferred deleted", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   fs.writeFileSync(path.join(f.root, "state", "sessions.json"), JSON.stringify([{
@@ -106,7 +109,7 @@ test("an old mapping without a verified journal source is never inferred deleted
   assert.equal(f.cleaner.status().failures, 0);
 });
 
-test("conservative cleanup waits for successful replacement AND old process release", async t => {
+testPosix("conservative cleanup waits for successful replacement AND old process release", async t => {
   const f = fixture(t); const old = f.session(), next = f.session();
   const lease = await f.cleaner.acquire(old, true, 987654);
   await f.cleaner.retire("sid:chat", old);
@@ -122,7 +125,7 @@ test("conservative cleanup waits for successful replacement AND old process rele
   assert.deepEqual(fs.readdirSync(path.join(f.acp, "conversations")).sort(), [".db", ".db-journal", ".db-shm", ".db-wal", ".meta"].map(s => next + s).sort());
 });
 
-test("off defers even confirmed superseded data; switching back retries", async t => {
+testPosix("off defers even confirmed superseded data; switching back retries", async t => {
   const f = fixture(t); f.cleaner.configure("off"); const id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   await f.cleaner.retire("chat", id); await f.cleaner.confirm("chat", randomUUID()); await f.cleaner.release(token);
@@ -130,7 +133,7 @@ test("off defers even confirmed superseded data; switching back retries", async 
   f.cleaner.configure("conservative"); assert.equal(await f.cleaner.collect(), 1);
 });
 
-test("idle/resumable sessions survive conservative mode; timeout uses configured last activity", async t => {
+testPosix("idle/resumable sessions survive conservative mode; timeout uses configured last activity", async t => {
   const f = fixture(t); const id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.release(token);
   f.advance(100); assert.equal(await f.cleaner.collect(), 0);
@@ -140,7 +143,7 @@ test("idle/resumable sessions survive conservative mode; timeout uses configured
   assert.equal(f.exists(id), false);
 });
 
-test("independent instances share leases; parent OR server process protects a session", async t => {
+testPosix("independent instances share leases; parent OR server process protects a session", async t => {
   const f = fixture(t); const id = f.session();
   await f.cleaner.acquire(id, true, 987654);
   const peer = f.create(); peer.configure("timeout", 1); f.advance(2);
@@ -149,7 +152,7 @@ test("independent instances share leases; parent OR server process protects a se
   f.living.delete(process.pid); assert.equal(await peer.collect(), 1);
 });
 
-test("unregistered and resumed legacy sessions are never adopted for deletion", async t => {
+testPosix("unregistered and resumed legacy sessions are never adopted for deletion", async t => {
   const f = fixture(t); const unregistered = f.session(), legacy = f.session();
   const token = await f.cleaner.acquire(legacy, false, 987654); await f.cleaner.release(token);
   await f.cleaner.retire("chat", legacy); await f.cleaner.confirm("chat", randomUUID());
@@ -157,14 +160,14 @@ test("unregistered and resumed legacy sessions are never adopted for deletion", 
   assert.ok(f.exists(unregistered)); assert.ok(f.exists(legacy));
 });
 
-test("only matching OMP replacement group can confirm retirement; cancelled replacement cannot confirm itself", async t => {
+testPosix("only matching OMP replacement group can confirm retirement; cancelled replacement cannot confirm itself", async t => {
   const f = fixture(t); const id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.retire("chat-A", id); await f.cleaner.release(token);
   await f.cleaner.confirm("chat-B", randomUUID()); await f.cleaner.confirm("chat-A", id);
   assert.ok(f.exists(id)); await f.cleaner.confirm("chat-A", randomUUID()); assert.equal(f.exists(id), false);
 });
 
-test("symlinked artifacts or parent directories preserve all session files and external data", async t => {
+testPosix("symlinked artifacts or parent directories preserve all session files and external data", async t => {
   const f = fixture(t); const id = f.session();
   const external = path.join(f.root, "keep.txt"); fs.writeFileSync(external, "keep");
   fs.symlinkSync(external, path.join(f.acp, "brain", id, "link"));
@@ -176,7 +179,7 @@ test("symlinked artifacts or parent directories preserve all session files and e
   assert.equal(await f.cleaner.collect(), 0); assert.ok(f.exists(id));
 });
 
-test("invalid UUID/settings, corrupted registry, and busy locks fail closed", async t => {
+testPosix("invalid UUID/settings, corrupted registry, and busy locks fail closed", async t => {
   const f = fixture(t);
   await assert.rejects(async () => await f.cleaner.acquire("../../credentials", true, 987654));
   for (const days of [0, NaN, 4000]) assert.throws(() => f.cleaner.configure("timeout", days));
@@ -191,7 +194,7 @@ test("invalid UUID/settings, corrupted registry, and busy locks fail closed", as
   assert.equal(await f.cleaner.collect(), 0); assert.ok(f.exists(id));
 });
 
-test("throttled touch skips redundant disk writes within throttle window and flushes before collect", async t => {
+testPosix("throttled touch skips redundant disk writes within throttle window and flushes before collect", async t => {
   const f = fixture(t);
   f.cleaner.configure("timeout", 1);
   const id = f.session();
@@ -213,7 +216,7 @@ test("throttled touch skips redundant disk writes within throttle window and flu
   assert.equal(f.exists(id), false);
 });
 
-test("quota warns in conservative mode; timeout evicts only idle unmapped owned data after grace", async t => {
+testPosix("quota warns in conservative mode; timeout evicts only idle unmapped owned data after grace", async t => {
   const f = fixture(t), mapped = f.session(), active = f.session(), orphan = f.session(), foreign = f.session(), unknown = f.session();
   for (const id of [mapped, orphan]) { const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.release(token); }
   await f.cleaner.acquire(active, true, 987654);
@@ -231,7 +234,7 @@ test("quota warns in conservative mode; timeout evicts only idle unmapped owned 
   assert.equal(f.cleaner.status().overBudget, true, "Protected sessions can exceed a soft budget");
 });
 
-test("confirmed cleanup is batched and lifecycle lock failures are retried without adopting data", async t => {
+testPosix("confirmed cleanup is batched and lifecycle lock failures are retried without adopting data", async t => {
   const f = fixture(t); f.cleaner.configure("off");
   const ids = Array.from({ length: 5 }, () => f.session());
   for (const id of ids) { const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.retire("batch", id); await f.cleaner.release(token); }
@@ -248,7 +251,7 @@ test("confirmed cleanup is batched and lifecycle lock failures are retried witho
   await f.cleaner.confirm("retry", randomUUID()); await f.cleaner.release(token); assert.equal(f.exists(id), false);
 });
 
-test("a cleanup commit preserves notes appended during its final write", async t => {
+testPosix("a cleanup commit preserves notes appended during its final write", async t => {
   const f = fixture(t);
   const id = f.session();
   const started = Promise.withResolvers<void>();
@@ -286,7 +289,7 @@ test("a cleanup commit preserves notes appended during its final write", async t
   }
 });
 
-test("malformed mappings block deletion and asynchronous directory inspection yields to timers", async t => {
+testPosix("malformed mappings block deletion and asynchronous directory inspection yields to timers", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.release(token);
   f.cleaner.configure("timeout", 1); f.advance(2);
@@ -298,7 +301,7 @@ test("malformed mappings block deletion and asynchronous directory inspection yi
   assert.equal(await f.cleaner.collect(), 1); clearTimeout(timer); assert.equal(tick, true);
 });
 
-test("a competing process acquires its lease while cleanup is still walking session sizes", async t => {
+testPosix("a competing process acquires its lease while cleanup is still walking session sizes", async t => {
   const f = fixture(t), id = f.session();
   saveCleanupPolicy(f.cleaner.policyPath, { mode: "off", idleDays: 7 });
   await f.cleaner.release(await f.cleaner.acquire(id, true, 987654));
@@ -336,7 +339,7 @@ test("a competing process acquires its lease while cleanup is still walking sess
   assert.equal(f.cleaner.status().ownedBytes, 37, "unlocked measurement retains the five conversation files and tool.json bytes");
 });
 
-test("malformed individual mapping records preserve every cleanup candidate", async t => {
+testPosix("malformed individual mapping records preserve every cleanup candidate", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   await f.cleaner.release(token);
@@ -349,7 +352,7 @@ test("malformed individual mapping records preserve every cleanup candidate", as
   }
 });
 
-test("cleanup forgets activity entries after unowned lease records are removed", async t => {
+testPosix("cleanup forgets activity entries after unowned lease records are removed", async t => {
   const f = fixture(t);
   for (let i = 0; i < 8; i++) {
     const token = await f.cleaner.acquire(randomUUID(), false, 987654);
@@ -358,7 +361,7 @@ test("cleanup forgets activity entries after unowned lease records are removed",
   assert.equal((f.cleaner as any).touched.size, 0);
 });
 
-test("balanced preset keeps existing modes and explicit budgets, and validates recovery retention", t => {
+testPosix("balanced preset keeps existing modes and explicit budgets, and validates recovery retention", t => {
   const f = fixture(t);
   assert.equal(f.cleaner.status().mode, "conservative");
   f.cleaner.configure("timeout", 0.5);
@@ -377,7 +380,7 @@ test("balanced preset keeps existing modes and explicit budgets, and validates r
   }
 });
 
-test("balanced reclaims mapped and orphaned conversations only after the full idle window", async t => {
+testPosix("balanced reclaims mapped and orphaned conversations only after the full idle window", async t => {
   const f = fixture(t), idle = f.session(), orphan = f.session(), leased = f.session(), unknown = f.session();
   const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
   const idleToken = await f.cleaner.acquire(idle, true, 987654);
@@ -403,7 +406,7 @@ test("balanced reclaims mapped and orphaned conversations only after the full id
   assert.ok(f.exists(unknown));
 });
 
-test("conservative and timeout modes never reclaim mapped history", async t => {
+testPosix("conservative and timeout modes never reclaim mapped history", async t => {
   const f = fixture(t), id = f.session();
   const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
   const token = await f.cleaner.acquire(id, true, 987654);
@@ -419,7 +422,7 @@ test("conservative and timeout modes never reclaim mapped history", async t => {
   assert.equal(await store.get("chat"), undefined); assert.equal(f.exists(id), false);
 });
 
-test("balanced replacement recovery survives restart, repeated confirmations and quota pressure", async t => {
+testPosix("balanced replacement recovery survives restart, repeated confirmations and quota pressure", async t => {
   const f = fixture(t), id = f.session();
   f.cleaner.configure("balanced"); f.cleaner.budget(0, 1);
   const token = await f.cleaner.acquire(id, true, 987654);
@@ -431,7 +434,7 @@ test("balanced replacement recovery survives restart, repeated confirmations and
   assert.equal(f.exists(id), false);
 });
 
-test("explicit final release unmaps only owned one-shot state and balanced mode keeps a recovery copy", async t => {
+testPosix("explicit final release unmaps only owned one-shot state and balanced mode keeps a recovery copy", async t => {
   const f = fixture(t), id = f.session(), main = f.session();
   f.cleaner.configure("balanced");
   const token = await f.cleaner.acquire(id, true, 987654);
@@ -449,7 +452,7 @@ test("explicit final release unmaps only owned one-shot state and balanced mode 
   await f.cleaner.release(mainToken); f.advance(1); await f.cleaner.collect(); assert.ok(f.exists(main));
 });
 
-test("one-shot recovery starts at final release and off mode preserves its files", async t => {
+testPosix("one-shot recovery starts at final release and off mode preserves its files", async t => {
   const f = fixture(t), id = f.session();
   f.cleaner.configure("off");
   const token = await f.cleaner.acquire(id, true, 987654);
@@ -463,7 +466,7 @@ test("one-shot recovery starts at final release and off mode preserves its files
   f.advance(0.01); assert.equal(await f.create().collect(), 1);
 });
 
-test("final release preserves unregistered and ambiguously shared ACP mappings", async t => {
+testPosix("final release preserves unregistered and ambiguously shared ACP mappings", async t => {
   const f = fixture(t), unknown = f.session(), shared = f.session();
   const token = await f.cleaner.acquire(shared, true, 987654); await f.cleaner.release(token);
   const file = path.join(f.root, "state/sessions.json"), store = new AcpSessionStore(file);
@@ -475,7 +478,7 @@ test("final release preserves unregistered and ambiguously shared ACP mappings",
   assert.ok(f.exists(shared)); assert.ok(f.exists(unknown));
 });
 
-test("final release cannot erase a newer mapping installed after its ownership snapshot", async t => {
+testPosix("final release cannot erase a newer mapping installed after its ownership snapshot", async t => {
   const f = fixture(t), old = f.session(), newer = f.session();
   f.cleaner.configure("balanced");
   const token = await f.cleaner.acquire(old, true, 987654); await f.cleaner.release(token);
@@ -493,7 +496,7 @@ test("final release cannot erase a newer mapping installed after its ownership s
   assert.ok(f.exists(newer)); assert.ok(f.exists(old));
 });
 
-test("a persisted final-release marker repairs interrupted unmapping after process restart", async t => {
+testPosix("a persisted final-release marker repairs interrupted unmapping after process restart", async t => {
   const f = fixture(t), id = f.session();
   f.cleaner.configure("balanced");
   const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.release(token);
@@ -510,7 +513,7 @@ test("a persisted final-release marker repairs interrupted unmapping after proce
   f.advance(1); assert.equal(await restarted.collect(), 1);
 });
 
-test("contended final release retries its intent and preserves the balanced recovery window", async t => {
+testPosix("contended final release retries its intent and preserves the balanced recovery window", async t => {
   const f = fixture(t), id = f.session();
   f.cleaner.configure("balanced");
   const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.release(token);
@@ -528,7 +531,7 @@ test("contended final release retries its intent and preserves the balanced reco
   assert.equal(f.cleaner.status().pendingLifecycleUpdates, 0);
 });
 
-test("duplicate OMP identities cannot authorize final-release deletion of either owned session", async t => {
+testPosix("duplicate OMP identities cannot authorize final-release deletion of either owned session", async t => {
   const f = fixture(t), ids = [f.session(), f.session()];
   for (const id of ids) { const token = await f.cleaner.acquire(id, true, 987654); await f.cleaner.release(token); }
   const file = path.join(f.root, "state/sessions.json");
@@ -540,7 +543,7 @@ test("duplicate OMP identities cannot authorize final-release deletion of either
   for (const id of ids) assert.ok(f.exists(id));
 });
 
-test("duplicate cleanup ownership cannot hide another record's active lease", async t => {
+testPosix("duplicate cleanup ownership cannot hide another record's active lease", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   const state = path.join(f.root, "state"), file = path.join(state, fs.readdirSync(state).find(n => n.startsWith("cleanup-sessions-"))!);
@@ -553,7 +556,7 @@ test("duplicate cleanup ownership cannot hide another record's active lease", as
   assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).sessions[1].leases[0].token, token);
 });
 
-test("recovery-path acquisition waits out short contention without blocking fail-fast callers", async t => {
+testPosix("recovery-path acquisition waits out short contention without blocking fail-fast callers", async t => {
   const f = fixture(t), id = f.session();
   await f.cleaner.acquire(id, true, 987654);
   const state = path.join(f.root, "state");
@@ -578,7 +581,7 @@ test("recovery-path acquisition waits out short contention without blocking fail
   assert.ok(sleeps >= 1);
 });
 
-test("a lock budget expiring under sustained contention wraps the raw ELOCKED cause", async t => {
+testPosix("a lock budget expiring under sustained contention wraps the raw ELOCKED cause", async t => {
   const f = fixture(t), id = f.session();
   await f.cleaner.acquire(id, true, 987654);
   const state = path.join(f.root, "state");
@@ -595,7 +598,7 @@ test("a lock budget expiring under sustained contention wraps the raw ELOCKED ca
   fs.rmdirSync(file + ".lock");
 });
 
-test("a non-lock registry failure bypasses the retry budget entirely", async t => {
+testPosix("a non-lock registry failure bypasses the retry budget entirely", async t => {
   const f = fixture(t), id = f.session();
   await f.cleaner.acquire(id, true, 987654);
   const state = path.join(f.root, "state");
@@ -609,7 +612,7 @@ test("a non-lock registry failure bypasses the retry budget entirely", async t =
   assert.equal(sleeps, 0);
 });
 
-test("the default acquisition path keeps the raw ELOCKED identity", async t => {
+testPosix("the default acquisition path keeps the raw ELOCKED identity", async t => {
   const f = fixture(t), id = f.session();
   await f.cleaner.acquire(id, true, 987654);
   const state = path.join(f.root, "state");
@@ -622,7 +625,7 @@ test("the default acquisition path keeps the raw ELOCKED identity", async t => {
   fs.rmdirSync(file + ".lock");
 });
 
-test("the lock budget and the retention policy advance on separate clocks", async t => {
+testPosix("the lock budget and the retention policy advance on separate clocks", async t => {
   const f = fixture(t), id = f.session();
   await f.cleaner.acquire(id, true, 987654);
   const state = path.join(f.root, "state");
@@ -651,7 +654,7 @@ test("the lock budget and the retention policy advance on separate clocks", asyn
     "lastUsed comes from the policy clock even while the lock clock runs far ahead");
 });
 
-test("trackSource scans mappings once and stamps only mapped owned records", async t => {
+testPosix("trackSource scans mappings once and stamps only mapped owned records", async t => {
   const f = fixture(t);
   const matching = f.session(), unrelated = f.session(), foreign = f.session();
   await f.cleaner.acquire(matching, true, 987654);
@@ -690,7 +693,7 @@ test("trackSource scans mappings once and stamps only mapped owned records", asy
   assert.equal(reads.piSessionId, scanned, "an empty mapping list performs no property scans");
 });
 
-test("an unreadable journal marks the scan incomplete instead of failing it", async t => {
+testPosix("an unreadable journal marks the scan incomplete instead of failing it", async t => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-source-scan-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, "workspace"));
@@ -705,7 +708,7 @@ test("an unreadable journal marks the scan incomplete instead of failing it", as
   assert.equal((await findSources(root)).complete, false, "a truncated header is equally unprovable");
 });
 
-test("duplicate journal IDs stay ambiguous instead of naming a move target", async t => {
+testPosix("duplicate journal IDs stay ambiguous instead of naming a move target", async t => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-source-duplicate-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, "workspace"));
@@ -717,7 +720,7 @@ test("duplicate journal IDs stay ambiguous instead of naming a move target", asy
   assert.equal(scan.complete, false);
 });
 
-test("a symlinked journal is rejected without canonical path comparison", { skip: process.platform === "win32" }, async t => {
+testPosix("a symlinked journal is rejected without canonical path comparison", { skip: process.platform === "win32" }, async t => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-source-symlink-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const real = path.join(root, "real.jsonl");
@@ -728,7 +731,7 @@ test("a symlinked journal is rejected without canonical path comparison", { skip
   await assert.rejects(sourceId(link), /Symlinked OMP session/);
 });
 
-test("trackSource rejects an intermediate symlinked bucket", { skip: process.platform === "win32" }, async t => {
+testPosix("trackSource rejects an intermediate symlinked bucket", { skip: process.platform === "win32" }, async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   await f.cleaner.release(token);
@@ -752,7 +755,7 @@ test("trackSource rejects an intermediate symlinked bucket", { skip: process.pla
   assert.equal(registry.sessions.find((record: any) => record.id === id)?.ompSource, undefined);
 });
 
-test("a corrupt sibling journal cannot prove a missing source was deleted", async t => {
+testPosix("a corrupt sibling journal cannot prove a missing source was deleted", async t => {
   const f = fixture(t), id = f.session();
   const token = await f.cleaner.acquire(id, true, 987654);
   const source = await trackedSource(f, id);
@@ -769,7 +772,7 @@ test("a corrupt sibling journal cannot prove a missing source was deleted", asyn
   assert.equal(f.exists(id), false);
 });
 
-test("retired unmapped orphans whose confirmation chain broke are reclaimed after grace/idle period", async t => {
+testPosix("retired unmapped orphans whose confirmation chain broke are reclaimed after grace/idle period", async t => {
   const f = fixture(t), brokenConservative = f.session(), brokenBalanced = f.session();
   const t1 = await f.cleaner.acquire(brokenConservative, true, 987654);
   await f.cleaner.retire("sid:abandoned", brokenConservative);
@@ -791,7 +794,7 @@ test("retired unmapped orphans whose confirmation chain broke are reclaimed afte
   assert.equal(f.exists(brokenBalanced), false);
 });
 
-test("sessionStore overwrite, expiry, cap eviction and clear notify cleanup to prevent orphan leaks", async t => {
+testPosix("sessionStore overwrite, expiry, cap eviction and clear notify cleanup to prevent orphan leaks", async t => {
   const f = fixture(t);
   const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
   const oldId = f.session(), newId = f.session(), clearedId = f.session();
@@ -813,7 +816,7 @@ test("sessionStore overwrite, expiry, cap eviction and clear notify cleanup to p
   assert.equal(f.exists(clearedId), false);
 });
 
-test("sessionStore save flushes replacement and cap-eviction cleanup notes", async t => {
+testPosix("sessionStore save flushes replacement and cap-eviction cleanup notes", async t => {
   const f = fixture(t);
   const store = new AcpSessionStore(path.join(f.root, "state/sessions.json"));
   let flushes = 0;
@@ -833,7 +836,7 @@ test("sessionStore save flushes replacement and cap-eviction cleanup notes", asy
   assert.equal((await store.list()).length, 256);
 });
 
-test("trackSource after /fresh rotation associates the rotated routing ID with the journal file and cleans up on file deletion", async t => {
+testPosix("trackSource after /fresh rotation associates the rotated routing ID with the journal file and cleans up on file deletion", async t => {
   const f = fixture(t), preFresh = f.session(), postFresh = f.session();
   for (const id of [preFresh, postFresh]) {
     const token = await f.cleaner.acquire(id, true, 987654);
