@@ -10,8 +10,6 @@
 
 Google Antigravity's official ACP server, adapted for **Oh My Pi (OMP)**.
 
-Current version: `0.2.2`.
-
 **An OMP-focused derivative fork of [zacbemis/pi-antigravity-acp-provider](https://github.com/zacbemis/pi-antigravity-acp-provider).** Original project by [zacbemis](https://github.com/zacbemis) and contributors, licensed under MIT.
 
 This is an independent adaptation, **NOT** an official Google or OMP integration. It uses ACP over stdio. The local HTTP MCP bridge carries tool calls; it is not a model API reverse proxy.
