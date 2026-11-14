@@ -124,7 +124,7 @@ export function deferredAbortSignal(
       controller.abort(signal.reason);
       return;
     }
-    giveup = armSteerGiveup(activity?.source, activity?.sessionId, timings, () => controller.abort(signal.reason));
+    giveup = armSteerGiveup(activity?.source, activity?.sessionId ?? "", timings, () => controller.abort(signal.reason));
   };
 
   signal.addEventListener("abort", onAbort, { once: true });

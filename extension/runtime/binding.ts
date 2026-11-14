@@ -120,7 +120,7 @@ function matches(value: unknown, saved: unknown, budget = { nodes: 0 }): boolean
       Object.getPrototypeOf(value) !== (array ? Array.prototype : Object.prototype)) return false;
   const keys = Object.keys(value);
   if (keys.length > MAX_MESSAGE_NODES || keys.length !== Object.keys(saved).length ||
-      (array && (value.length !== saved.length || Object.getOwnPropertyNames(value).length !== keys.length + 1))) return false;
+      (Array.isArray(value) && Array.isArray(saved) && (value.length !== saved.length || Object.getOwnPropertyNames(value).length !== keys.length + 1))) return false;
   for (const key of keys) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
     if (!Object.hasOwn(descriptor, "value") || !Object.hasOwn(saved, key) ||
@@ -136,7 +136,7 @@ export function createHistoryFingerprintMemo() {
     if (previous && matches(value, previous.value)) return previous.digest;
     // Drop stale strings even if canonical serialization subsequently throws.
     if (previous) entries.delete(message);
-    if (!worthCaching(Reflect.get(value, "content"))) return compute();
+    if (!value || typeof value !== "object" || !worthCaching(Reflect.get(value, "content"))) return compute();
     const saved = snapshot(value);
     const digest = compute();
     if (saved !== UNSUPPORTED) entries.set(message, { value: saved, digest });

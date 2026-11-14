@@ -1,13 +1,12 @@
 {
   "compilerOptions": {
-    "target": "ES2023",
+    "target": "ES2024",
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "strict": true,
-    "skipLibCheck": true,
-    "types": []
+    "skipLibCheck": true
   },
-  "include": ["scripts/typecheck-contracts.ts"]
+  "include": ["extension/**/*.ts", "extension/**/*.d.mts", "marketplace/**/*.ts", "scripts/typecheck-contracts.ts"]
 }

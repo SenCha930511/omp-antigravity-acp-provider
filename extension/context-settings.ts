@@ -55,9 +55,9 @@ export function saveContextSettings(file: string, settings: ContextSettings) {
 export function updateContextSettings(settings: ContextSettings, target: string, key: string, value: number | string): ContextSettings {
   if (["__proto__", "constructor", "prototype"].includes(target)) throw new Error("Invalid model ID");
   const next = structuredClone(settings);
-  const options: Record<string, unknown> = target === "default" ? next.defaults
+  const options: ContextOptions = target === "default" ? next.defaults
     : Object.hasOwn(next.models, target) ? next.models[target]! : (next.models[target] = {});
-  options[key] = value;
+  Reflect.set(options, key, value);
   validate(options, target === "default");
   return next;
 }

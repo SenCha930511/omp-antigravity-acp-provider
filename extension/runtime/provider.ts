@@ -2,25 +2,53 @@ import type {
 	Api,
 	ApiStreamOptions,
 	AssistantMessageEventStream,
+	Context,
 	TranscriptContext,
 	Model,
 	Provider,
 	RefreshModelsContext,
-	SimpleStreamOptions,
+	StreamOptions,
 } from "@earendil-works/pi-ai";
 
 import { hasAntigravityAuth } from "./acp/antigravity.ts";
-import { FALLBACK_MODELS, projectModels, PROVIDER_ID } from "./models.ts";
+import { type AntigravityModel, FALLBACK_MODELS, projectModels, PROVIDER_ID } from "./models.ts";
 import { AntigravityRuntime, MANAGED_AUTH_MARKER, type OmpStreamOptions } from "./runtime.ts";
 
+export interface AntigravityProvider extends Omit<Provider<"antigravity-acp">, "auth" | "streamSimple"> {
+	auth: NonNullable<Provider<"antigravity-acp">["auth"]> & {
+		oauth: {
+			name: string;
+			loginLabel: string;
+			login(interaction: {
+				signal?: AbortSignal;
+				notify: (event: { type?: "progress" | "info"; message?: string; links?: Array<{ url: string; label?: string }> }) => void;
+				prompt: (prompt: { type?: "secret" | "text" | "manual_code"; message: string; placeholder?: string; signal?: AbortSignal }) => Promise<string>;
+			}): Promise<{
+				type: "oauth";
+				refresh: string;
+				access: string;
+				expires: number;
+				[key: string]: unknown;
+			}>;
+			refresh<T>(credential: T, signal?: AbortSignal): Promise<T>;
+			toAuth(): Promise<{ apiKey: string }>;
+		};
+	};
+	streamSimple(
+		model: AntigravityModel,
+		context: Context | TranscriptContext,
+		options?: OmpStreamOptions,
+	): AssistantMessageEventStream;
+}
+
 export interface AntigravityProviderBundle {
-	provider: Provider<"antigravity-acp">;
+	provider: AntigravityProvider;
 	runtime: AntigravityRuntime;
 }
 
 export function createAntigravityProvider(runtime = new AntigravityRuntime()): AntigravityProviderBundle {
 	let models = [...FALLBACK_MODELS];
-	const provider: Provider<"antigravity-acp"> = {
+	const provider: AntigravityProvider = {
 		id: PROVIDER_ID,
 		name: "Google Antigravity (ACP)",
 		auth: {
@@ -58,7 +86,7 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 						expires: Number.MAX_SAFE_INTEGER,
 					};
 				},
-				async refresh(credential) {
+				async refresh<T>(credential: T) {
 					return credential;
 				},
 				async toAuth() {
@@ -127,7 +155,7 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 				},
 			});
 		},
-		stream(model, context, options) {
+		stream(model, context, options: StreamOptions | undefined) {
 			return stream(runtime, model, context, options);
 		},
 		streamSimple(model, context, options) {
@@ -139,11 +167,11 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 
 function stream(
 	runtime: AntigravityRuntime,
-	model: Model<"antigravity-acp">,
-	context: TranscriptContext,
-	options: ApiStreamOptions<"antigravity-acp"> | SimpleStreamOptions | undefined,
+	model: AntigravityModel,
+	context: Context | TranscriptContext,
+	options: OmpStreamOptions | undefined,
 ): AssistantMessageEventStream {
-	return runtime.stream(model, context, options as OmpStreamOptions | undefined).stream;
+	return runtime.stream(model, context, options).stream;
 }
 
 export const ANTIGRAVITY_ACP_API = "antigravity-acp" satisfies Api;

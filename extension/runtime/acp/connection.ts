@@ -118,15 +118,16 @@ export class AntigravityAcpConnection {
 					} else if (notification.update.sessionUpdate === "current_mode_update") {
 						const state = this.getSessionState(notification.sessionId);
 						const modeSelector = findSessionSelector(state, "mode");
+						const currentModeId = notification.update.currentModeId;
 						this.sessions.set(notification.sessionId, {
 							...state,
 							...(state.modes
-								? { modes: { ...state.modes, currentModeId: notification.update.currentModeId } }
+								? { modes: { ...state.modes, currentModeId } }
 								: {}),
 							...(modeSelector && state.configOptions
 								? { configOptions: state.configOptions.map(option =>
 									option.type === "select" && option.id === modeSelector.id
-										? { ...option, currentValue: notification.update.currentModeId }
+										? { ...option, currentValue: currentModeId }
 										: option) }
 								: {}),
 						});
@@ -368,6 +369,14 @@ export class AntigravityAcpConnection {
 		await this.closePromise;
 	}
 
+	async discardSession(_sessionId: string): Promise<void> {}
+
+	muteSteerChunks(_sessionId: string): void {}
+
+	async confirmReplacement(_key: string, _sessionId: string): Promise<void> {}
+
+	async retireForReplacement(_key: string, _sessionId: string): Promise<void> {}
+
 	private updateSessionState(sessionId: string, response: unknown): SessionState {
 		const commands = (response as { availableCommands?: AvailableCommand[] | null }).availableCommands;
 		const state = { ...this.sessions.get(sessionId), ...decodeSessionState(response), ...(commands === undefined ? {} : { availableCommands: commands }) };
@@ -375,13 +384,15 @@ export class AntigravityAcpConnection {
 		return state;
 	}
 
-	private async setSelector(
+	protected async setSelector(
 		sessionId: string,
-		category: "model" | "mode" | "thought_level",
+		category: string,
 		value: string,
 		signal?: AbortSignal,
 	): Promise<boolean> {
-		const selector = findSessionSelector(this.sessions.get(sessionId) ?? {}, category);
+		const selector = this.sessions.get(sessionId)?.configOptions?.find(
+			option => option.type === "select" && (option.category === category || option.id === category),
+		);
 		if (!selector) return false;
 		const response = await this.withAbort(
 			this.withDeadline(
@@ -392,7 +403,8 @@ export class AntigravityAcpConnection {
 			signal,
 		);
 		const state = this.updateSessionState(sessionId, response);
-		if (findSessionSelector(state, category)?.currentValue !== value) {
+		const updated = state.configOptions?.find(option => option.id === selector.id);
+		if (!updated || updated.type !== "select" || updated.currentValue !== value) {
 			throw new AntigravityAcpError("protocol", `Antigravity did not confirm the requested ${category} selection`);
 		}
 		return true;

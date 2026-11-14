@@ -15,7 +15,7 @@ import type { SessionCleanup } from "./session-cleanup.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import { deferredAbortSignal, isSteerAbort, steerMode as resolveSteerMode, steerTimings as resolveSteerTimings, type SteerMode, type SteerTimings } from "./turn-cancellation.ts";
 import { PermissionIdentityRegistry } from "./permission-identity.ts";
-import type { AvailableCommand, McpServer, PromptResponse } from "@agentclientprotocol/sdk";
+import type { AvailableCommand, InitializeResponse, McpServer, PromptResponse } from "@agentclientprotocol/sdk";
 
 const CONTINUATION_PROMPT = "Continue exactly where your previous output stopped. Do not repeat any earlier text.";
 function continuationLimit(): number {
@@ -256,7 +256,7 @@ export class TierConnection extends AntigravityAcpConnection {
     this.ompProjectedToolNames = [...names];
   }
 
-  async initialize(signal?: AbortSignal) {
+  override async initialize(signal?: AbortSignal): Promise<InitializeResponse> {
     return normalizeInitializeResponse(await super.initialize(signal));
   }
 
@@ -604,7 +604,7 @@ export class TierConnection extends AntigravityAcpConnection {
     return response;
   }
 
-  override async prompt(request: Parameters<AntigravityAcpConnection["prompt"]>[0], signal?: AbortSignal) {
+  override async prompt(request: Parameters<AntigravityAcpConnection["prompt"]>[0], signal?: AbortSignal): Promise<PromptResponse> {
     this.activePrompts++;
     const id = request.sessionId;
     this.noticeClosed?.delete(id);
@@ -650,7 +650,7 @@ export class TierConnection extends AntigravityAcpConnection {
       const response = await this.promptWithContinuations(request, deferred?.signal ?? signal);
       this.diagnostics?.record("acp.prompt", performance.now() - started);
       if (abortedAt !== undefined && ["cancelled", "end_turn"].includes(response.stopReason)) this.diagnostics?.record("acp.cancel-confirmation", performance.now() - abortedAt);
-      const withContext = <T extends { _meta?: Record<string, unknown> }>(value: T): T => {
+      const withContext = (value: PromptResponse): PromptResponse => {
         const context = this.contextUsage.get(id);
         if (!context) return value;
         const ompContextWindow = this.ompContextWindows?.get(id);

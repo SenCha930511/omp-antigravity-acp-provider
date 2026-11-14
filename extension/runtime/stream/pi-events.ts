@@ -24,13 +24,13 @@ export class PiEventWriter {
 		return this.terminal;
 	}
 
-	constructor(model: Model<Api>) {
+	constructor(model: Pick<Model<Api>, "id"> & Partial<Pick<Model<Api>, "api" | "provider">>) {
 		this.stream = createAssistantMessageEventStream();
 		this.message = {
 			role: "assistant",
 			content: [],
-			api: model.api,
-			provider: model.provider,
+			api: model.api ?? "antigravity-acp",
+			provider: model.provider ?? "antigravity-acp",
 			model: model.id,
 			usage: emptyUsage(),
 			stopReason: "pending",

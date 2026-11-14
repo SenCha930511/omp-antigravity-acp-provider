@@ -16,7 +16,7 @@ export interface PromptUsageResult {
 }
 
 export function usageFromPrompt(
-  response: Parameters<typeof upstreamUsage>[0] & { _meta?: { ompContextTokens?: unknown } },
+  response: Parameters<typeof upstreamUsage>[0] & { _meta?: { ompContextTokens?: unknown } | null },
   fallbackContextTokens?: number,
 ): PromptUsageResult {
   const usage: PromptUsageResult = upstreamUsage(response);
