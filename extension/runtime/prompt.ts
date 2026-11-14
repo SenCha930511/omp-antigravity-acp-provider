@@ -721,7 +721,7 @@ function historyRecordItems(
 }
 
 export function buildPromptParts(context: TransferContext, fresh: boolean, unseenStart?: number,
-  limits: { contextWindow?: number; maxTokens?: number; policy?: ContextOptions; sessionRouting?: boolean; sessionGuidance?: string; promptKind?: PromptKind } = {}, retryResend = false): PromptParts {
+  limits: { contextWindow?: number; maxTokens?: number; policy?: ContextOptions; sessionRouting?: boolean; sessionGuidance?: string; promptKind?: PromptKind; deliveryBlocks?: readonly TransferBlock[] } = {}, retryResend = false): PromptParts {
   // catalog-store attaches ompContextPolicy to discovered models; re-resolution
   // is only needed for partial input in tests and standalone callers.
   const policy = limits.policy;
@@ -757,6 +757,7 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
   // user prompt would duplicate policy text and consume the step budget.
   const instructions = fresh && !limits.sessionRouting ? currentSystemInstructions(context) : "";
   const guidance = fresh && !limits.sessionRouting ? limits.sessionGuidance ?? "" : "";
+  const deliveryBlocks = limits.deliveryBlocks ?? [];
   checkStepTextBytes(Buffer.byteLength(instructions, "utf8"));
   const instructionParts = [instructions, guidance].filter(Boolean);
   const instructionsText = instructionParts.length ? `# OMP session instructions\n\n${instructionParts.join("\n\n")}` : "";
@@ -839,7 +840,7 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
     const continuation = { type: "text", text: retryResend
       ? retryRequestText(messages[latest]!.content, kind)
       : continuationText };
-    tailBlocks.push(...reminderBlocks, continuation);
+    tailBlocks.push(...reminderBlocks, ...deliveryBlocks, continuation);
   } else {
     // Official ACP merges following text into an embedded-resource string with
     // a space. Explicit newlines/labels must survive that conversion; role
@@ -851,9 +852,9 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
     const content = messages[latest]!.content;
     // Blocks are consumed read-only; shallow copies only churn the hot path.
     const latestBlocks: TransferBlock[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
-    const normalTail: TransferBlock[] = [...reminderBlocks, boundary, ...latestBlocks];
+    const normalTail: TransferBlock[] = [...reminderBlocks, ...deliveryBlocks, boundary, ...latestBlocks];
     if (promptTextBytes(normalTail) > ACP_STEP_TEXT_BYTES) {
-      const split = splitOversizedRequest(latestBlocks, inProgress, kind, reminderBlocks);
+      const split = splitOversizedRequest(latestBlocks, inProgress, kind, [...reminderBlocks, ...deliveryBlocks]);
       requestSeedSteps = split.seedSteps;
       tailBlocks = split.tailBlocks;
     } else {

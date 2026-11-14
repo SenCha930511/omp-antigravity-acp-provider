@@ -216,6 +216,29 @@ test("a completed relay result survives into the next turn", async () => {
   assert.match(textOf(expired), /unknown|expired/i);
 });
 
+test("inspect projects relay state without consuming the result", async () => {
+  const { clock, relay } = relayFor();
+  const deferred = Promise.withResolvers<CallToolResult>();
+  const call = relay.call({ id: "call-1", name: "read", arguments: {} }, () => deferred.promise);
+  assert.deepEqual(relay.inspect("call-1"), { kind: "outstanding", state: "pending" });
+  clock.advance(100);
+  await call;
+  assert.deepEqual(relay.inspect("call-1"), { kind: "outstanding", state: "relayed" });
+  deferred.resolve(result("late"));
+  await Promise.resolve();
+  assert.deepEqual(relay.inspect("call-1"), { kind: "settled", state: "fulfilled", result: result("late") });
+  assert.equal(textOf(await relay.await("call-1")), "late");
+  assert.deepEqual(relay.inspect("missing"), { kind: "unknown" });
+
+  const cancelled = relayFor();
+  const waiting = Promise.withResolvers<CallToolResult>();
+  cancelled.relay.call({ id: "call-2", name: "read", arguments: {} }, () => waiting.promise);
+  cancelled.clock.advance(100);
+  cancelled.relay.cancelAll("stop");
+  assert.deepEqual(cancelled.relay.inspect("call-2"), { kind: "cancelled", reason: "stop" });
+  waiting.resolve(result("late"));
+});
+
 test("relay config accepts only 0 or 5000 through 165000", () => {
   assert.deepEqual(resolveRelayConfig({}), {
     enabled: true,

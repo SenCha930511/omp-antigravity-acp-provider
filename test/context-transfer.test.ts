@@ -60,6 +60,19 @@ const ACTIVE_CONTEXT_HEADER = "# Active OMP context-window reminder";
 const contextWindowReminder = (body: string) => `<context-window-reminder>\n${body}\n</context-window-reminder>`;
 const developer = (content: string) => ({ role: "developer", content, timestamp: 0 });
 
+
+test("delivery blocks sit before the current user request", () => {
+  const output = buildPromptParts({ messages: [
+    user("OLD_REQUEST"),
+    { role: "assistant", content: [{ type: "text", text: "OLD_ANSWER" }] },
+    user("NEW_REQUEST"),
+  ] }, false, 2, {
+    deliveryBlocks: [{ type: "text", text: "<tool_result id=\"call-1\">LATE_RESULT</tool_result>" }],
+  });
+  const text = JSON.stringify(output.prompt);
+  assert.match(text, /LATE_RESULT/);
+  assert.ok(text.indexOf("LATE_RESULT") < text.indexOf("Current OMP user request"));
+});
 test("only the newest developer context-window reminder becomes an active current-turn directive", () => {
   const oldReminder = contextWindowReminder("OLD_CONTEXT_WINDOW_POLICY");
   const activeReminder = contextWindowReminder("ACTIVE_CONTEXT_WINDOW_POLICY");

@@ -1,5 +1,6 @@
 import { AcpFailure } from "../acp-errors.ts";
 import { ToolRelay, resolveRelayConfig, relayControlTool, projectedMcpName, TOOL_RELAY_CONTROL_NAME } from "./tools/relay.ts";
+import { RelayDelivery, hasUndeliveredRelay, relayNoticeCallId, type DeliveryBatch, type DeliveryDecision } from "./tools/delivery.ts";
 import { claimContinuation } from "../continuation-claim.ts";
 import { drainCancelledTurn, isSteerAbort, steerMode } from "../turn-cancellation.ts";
 import { createHistoryFingerprintMemo, createStructuredFingerprintMemo } from "./binding.ts";
@@ -136,7 +137,7 @@ export type ShadowCheckpoint =
 	| { kind: "uncertain"; reason: ShadowRebuildReason };
 
 interface Binding {
- ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedGuard?: HistorySeedGuard; ompImageCheckpoint?: ImageHistoryCheckpoint; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; relayBridge?: PiMcpBridge; relayFingerprint: string;
+ ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedGuard?: HistorySeedGuard; ompImageCheckpoint?: ImageHistoryCheckpoint; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; delivery: RelayDelivery; relayBridge?: PiMcpBridge; relayFingerprint: string;
 	ompTerminalStopReason?: PromptResponse["stopReason"];
 	ompCancelledCheckpoint?: boolean;
 	ompCancelledHadOutput?: boolean;
@@ -361,6 +362,24 @@ export class AntigravityRuntime {
             }
             binding.toolFingerprint = nextFp;
             binding.relayFingerprint = this.ompRelayConfig().fingerprint;
+          }
+          private ompDeliveryDecision(binding: Binding, context: Context): DeliveryDecision | undefined {
+            if (binding.delivery.open().length === 0) return undefined;
+            const absorbed = binding.pendingContextCount;
+            const prefixIntact = context.messages.length >= absorbed &&
+              this.ompMessagesFingerprint(context.messages.slice(0, absorbed)) === binding.pendingContextFingerprint;
+            const arriving = new Set<string>();
+            for (const message of context.messages.slice(absorbed)) {
+              if (message.role === "toolResult" && typeof message.toolCallId === "string") arriving.add(message.toolCallId);
+            }
+            return binding.delivery.decide({
+              promptLive: binding.turnCompletion !== undefined,
+              reusable: !binding.needsReconstruction && !binding.ompCompactionInvalidated && !binding.abortRequested,
+              prefixIntact,
+              newUserRequest: context.messages.findLastIndex(message => message.role === "user") >= absorbed,
+              arriving,
+              images: binding.initialize.agentCapabilities?.promptCapabilities?.image === true,
+            });
           }
           private ompNormalizeAssistantForBoundary(message: Context["messages"][number]): Context["messages"][number] {
             if (message.role !== "assistant") return message;
@@ -916,14 +935,17 @@ export class AntigravityRuntime {
 				binding.pendingTools.clear();
 				binding.needsReconstruction = true;
 			} else {
+				const undelivered = hasUndeliveredRelay(binding.delivery, results.map(({ pending }) => pending.invocation.id));
 				await claimContinuation(binding, async () => {
 				binding.writer = writer;
 				const continuationTurn = binding.turnCompletion; await this.noteContinuationInstructions(binding, context); if (!continuationTurn || binding.turnCompletion !== continuationTurn || binding.abortRequested || options.signal?.aborted || !binding.connection.process.alive) throw abortError();
-				binding.pendingContextCount = context.messages.length;
-				binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
-			binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
-				binding.ompImageCheckpoint = captureImageHistoryCheckpoint(context.messages, message => this.ompMessageFingerprint(message));
-				binding.ompFallbackContextTokens = estimateContextTokens(context);
+				if (!undelivered) {
+					binding.pendingContextCount = context.messages.length;
+					binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
+					binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
+					binding.ompImageCheckpoint = captureImageHistoryCheckpoint(context.messages, message => this.ompMessageFingerprint(message));
+					binding.ompFallbackContextTokens = estimateContextTokens(context);
+				}
 				for (const { pending, message } of results) {
 					binding.pendingTools.delete(pending.invocation.id);
 					pending.resolve(toMcpToolResult(message as ToolResultMessage));
@@ -945,6 +967,8 @@ export class AntigravityRuntime {
 		let ompDispatched = false;
 		let completeTurn: (() => void) | undefined;
 		let onTurnAbort: (() => void) | undefined;
+		let deliveryBatch: DeliveryBatch | undefined;
+		let deliveryOwner: Binding | undefined;
 		try {
 			await this.modeChanges;
 			this.assertEpoch(epoch);
@@ -1019,8 +1043,11 @@ export class AntigravityRuntime {
 				? undefined
 				: ompToolGuidance(binding.initialize, routing?.nativeTools ?? "prefer", bridgeConfigured,
 					"main", binding.bridge?.projectedToolNames ?? []);
+			const deliveryDecision = this.ompDeliveryDecision(binding, context);
+			deliveryBatch = deliveryDecision?.batch;
+			deliveryOwner = binding;
 			const parts = adaptPromptToCapabilities(
-				buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy, sessionRouting: sessionAppend, sessionGuidance }, ompRetryResend),
+				buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy, sessionRouting: sessionAppend, sessionGuidance, deliveryBlocks: deliveryBatch?.blocks }, ompRetryResend),
 				binding.initialize,
 			);
 			await this.modeChanges;
@@ -1063,6 +1090,7 @@ export class AntigravityRuntime {
             if (binding.ompInvalidated || !binding.connection.process.alive) throw new AntigravityAcpError('protocol', 'ACP session closed before prompt dispatch');
             if (options.signal?.aborted) throw abortError();
             ompDispatched = true;
+            if (deliveryBatch && deliveryOwner) deliveryOwner.delivery.commit(deliveryBatch);
             let ompSeedUsage: PromptUsageResult | undefined;
             if (parts.seedSteps?.length) {
               const savedWriter = binding.writer;
@@ -1176,6 +1204,7 @@ export class AntigravityRuntime {
 			if (onTurnAbort) options.signal?.removeEventListener("abort", onTurnAbort);
 			completeTurn?.();
 			binding.relay.endTurn();
+			if (deliveryBatch && deliveryOwner) deliveryOwner.delivery.abandon(deliveryBatch);
 			binding.turnCompletion = undefined;
 			binding.ompFallbackContextTokens = undefined;
 			binding.abortRequested = false;
@@ -1523,6 +1552,7 @@ export class AntigravityRuntime {
 				: tools.filter((tool) => tool.name !== PERMISSION_TOOL_NAME).map((tool) => ({ name: tool.name, reason: "Agent did not advertise MCP over HTTP" }));
 			const relayConfig = this.ompRelayConfig();
 			const relay = new ToolRelay(relayConfig);
+			const delivery = new RelayDelivery(relay);
 			const relayCollision = relayConfig.enabled ? tools.find(tool => projectedMcpName(tool.name) === TOOL_RELAY_CONTROL_NAME) : undefined;
 			if (relayCollision) throw new AntigravityAcpError("invalid_input", "Tool " + relayCollision.name + " collides with the relay control tool " + TOOL_RELAY_CONTROL_NAME + "; rename it or disable OMP_ACP_TOOL_RELAY_MS");
 			let mcpServer;
@@ -1530,17 +1560,24 @@ export class AntigravityRuntime {
 			if (tools.length > 0 && initialize.agentCapabilities?.mcpCapabilities?.http === true) {
 				bridge = new PiMcpBridge({
 					tools,
-					onCall: (invocation) => relay.call(invocation, () => this.requestPiTool(binding, invocation)),
+					onCall: async (invocation) => {
+						const result = await relay.call(invocation, () => this.requestPiTool(binding, invocation));
+						delivery.observe(invocation, relayNoticeCallId(result));
+						return result;
+					},
 				});
 				mcpServer = await bridge.start();
 				if (relayConfig.enabled) {
 					relayBridge = new PiMcpBridge({
 						tools: [relayControlTool],
-						onCall: (invocation) => {
+						onCall: async (invocation) => {
 							const callId = invocation.arguments.call_id;
-							return typeof callId === "string" && callId
-								? relay.await(callId)
-								: Promise.resolve({ content: [{ type: "text", text: "call_id must be a non-empty string" }], isError: true });
+							if (typeof callId !== "string" || !callId) {
+								return { content: [{ type: "text", text: "call_id must be a non-empty string" }], isError: true };
+							}
+							const result = await relay.await(callId);
+							delivery.consume(callId);
+							return result;
 						},
 					});
 					relayServer = await relayBridge.start();
@@ -1598,7 +1635,7 @@ export class AntigravityRuntime {
             ompReleaseLease: releaseLease,
             ompExpectedAssistantHasOutput: restored && (saved?.ompExpectedAssistantHasOutput === true ||
               (saved?.ompExpectedAssistantHasOutput === undefined && Boolean(saved?.expectedAssistantFingerprint))),
-            relay, relayBridge, relayFingerprint: relayConfig.fingerprint,
+            relay, delivery, relayBridge, relayFingerprint: relayConfig.fingerprint,
             pendingConversationFingerprint: this.ompMessagesFingerprint([]),
 				key,
 				route,
@@ -2209,6 +2246,7 @@ function abortTurn(binding: Binding): void {
 
 function cancelPiTools(binding: Binding, reason: string): void {
 	binding.relay.cancelAll(reason);
+	binding.delivery.reset();
 	if (binding.toolBatchTimer) clearTimeout(binding.toolBatchTimer);
 	binding.toolBatchTimer = undefined;
 	for (const pending of binding.pendingTools.values()) {
