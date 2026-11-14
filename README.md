@@ -304,8 +304,9 @@ The `Release` workflow runs only for pushed `v*` tags. It reruns the offline che
 ## Contributors
 
 The Linux Secret Service credential handling and model metadata/fallback adaptations come from [Maddock (@notmaddock)](https://github.com/notmaddock)'s work, including [PR #2](https://github.com/SenCha930511/omp-antigravity-acp-provider/pull/2). Image-eviction continuity and hidden-seed guards are adapted from `ldfhhc/omp-antigravity-acp-provider`. Auth/discovery, Bun SQLite usage, CLI stat caching, quota timing, warmup and release-helper adaptations use work from `00lllooolll00/omp-antigravity-acp-provider`, with additional integration and lifecycle fixes in this repository.
+The standard Google OAuth endpoint and AccountChooser handling in headless login is adapted from [Dwi Fitriyanto (@masred)](https://github.com/masred)'s [PR #14](https://github.com/SenCha930511/omp-antigravity-acp-provider/pull/14).
 
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for links to all three fork projects and the separation between their adaptations and the upstream project attribution.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for links to all four fork projects and the separation between their adaptations and the upstream project attribution.
 
 GitHub counts a contributor when a commit that credits them, as author or through a `Co-authored-by:` trailer, reaches the default branch ([contributor list](https://docs.github.com/en/repositories/viewing-activity-and-data-for-your-repository/viewing-a-projects-contributors), [co-authored commits](https://docs.github.com/en/pull-requests/how-tos/commit-changes/creating-a-commit-with-multiple-authors)). Until commits carrying that credit are on the default branch of the public repository, its contributors page will not list the addition.
 

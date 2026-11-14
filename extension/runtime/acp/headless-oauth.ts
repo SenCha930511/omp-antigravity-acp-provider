@@ -109,22 +109,35 @@ export function shouldUseHeadlessOAuth(
 	return platform === "linux" && !environment.DISPLAY && !environment.WAYLAND_DISPLAY;
 }
 
-function parseAuthorization(text: string): CapturedOAuthAuthorization {
+export function parseAuthorization(text: string): CapturedOAuthAuthorization {
+	const trimmed = text.trim();
 	let url: URL;
 	try {
-		url = new URL(text);
+		url = new URL(trimmed);
 	} catch {
 		throw new Error("Antigravity produced an invalid OAuth authorization URL");
 	}
-	if (
-		url.protocol !== "https:" ||
-		url.hostname !== "accounts.google.com" ||
-		url.pathname !== "/o/oauth2/v2/auth"
-	) {
+	if (url.protocol !== "https:" || url.hostname !== "accounts.google.com") {
 		throw new Error("Antigravity produced an unexpected OAuth authorization URL");
 	}
-	const redirect = url.searchParams.get("redirect_uri");
-	const state = url.searchParams.get("state");
+	let targetUrl = url;
+	if (url.pathname === "/AccountChooser") {
+		const continuation = url.searchParams.get("continue");
+		if (continuation) {
+			try {
+				const continueUrl = new URL(continuation);
+				if (continueUrl.protocol === "https:" && continueUrl.hostname === "accounts.google.com") {
+					targetUrl = continueUrl;
+				}
+			} catch { /* Keep the outer URL and reject its path below. */ }
+		}
+	}
+	const allowedPaths = new Set(["/o/oauth2/auth", "/o/oauth2/v2/auth", "/signin/oauth"]);
+	if (!allowedPaths.has(targetUrl.pathname)) {
+		throw new Error("Antigravity produced an unexpected OAuth authorization URL");
+	}
+	const redirect = targetUrl.searchParams.get("redirect_uri");
+	const state = targetUrl.searchParams.get("state");
 	if (!redirect || !state) throw new Error("Antigravity OAuth URL is missing redirect or state data");
 	const redirectUrl = new URL(redirect);
 	validateLoopback(redirectUrl);

@@ -13,6 +13,7 @@ The following community work was adapted into the owned adapter architecture rat
 - [notmaddock/omp-antigravity-acp-provider](https://github.com/notmaddock/omp-antigravity-acp-provider) (`@notmaddock`): Linux Secret Service authentication and known Claude/GPT-OSS metadata plus offline partner-model fallback.
 - [ldfhhc/omp-antigravity-acp-provider](https://github.com/ldfhhc/omp-antigravity-acp-provider) (`@ldfhhc`): oldest-image history continuity and hidden history/request seed guards. The independently guarded implementation lives in `extension/runtime/image-history.ts` and `extension/runtime/history-seed.ts`.
 - [00lllooolll00/omp-antigravity-acp-provider](https://github.com/00lllooolll00/omp-antigravity-acp-provider) (`@00lllooolll00`): fresh-login watcher protection, Hydrogen/offline catalog discovery, Bun SQLite usage, CLI stat caching, quota refresh grace, standby warmup and release helper ideas, adapted and additionally hardened in this repository.
+- [masred/omp-antigravity-acp-provider](https://github.com/masred/omp-antigravity-acp-provider) (`@masred`): standard Google OAuth endpoints and AccountChooser handling for headless login, adapted into `extension/runtime/acp/headless-oauth.ts`.
 
 Each contribution remains distinguishable in the owned source and its feature commit where applicable. The adapter does not copy fork-specific package names, publishing identities or personal skill files.
 
