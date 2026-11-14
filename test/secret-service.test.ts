@@ -132,6 +132,13 @@ test("clear succeeds, a bare exit 1 is already absent, other failures are fixed"
 	assert.equal(messages.size, 1, "remove failures must share one credential-free message");
 });
 
+test("a killed clear is unavailable rather than removed", async () => {
+	const service = createSecretService(async () => {
+		throw failure({ code: null, killed: true, signal: "SIGKILL", stdout: SYNTHETIC_SECRET, stderr: RAW_FAILURE });
+	}, "linux");
+	assert.equal(await service.remove(), undefined);
+});
+
 test("runSecretTool forwards argv through execFile without a shell", async () => {
 	const script = "process.stdout.write(JSON.stringify(process.argv.slice(1)))";
 	const forwarded = ["service", "gemini; echo injected", "$(echo injected)", "`echo injected`", "username antigravity"];
