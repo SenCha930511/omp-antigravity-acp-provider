@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { parseRelayCallId } from "../../tool-relay-protocol.mjs";
+import { parseRelayCallId, TOOL_RELAY_CONTROL_NAME } from "../../tool-relay-protocol.mjs";
 import type { TransferBlock } from "../prompt.ts";
 import type { RelayInvocation, RelayOutcome } from "./relay.ts";
 
@@ -63,6 +63,7 @@ export function relayNoticeCallId(result: CallToolResult): string | undefined {
     .filter(block => block.type === "text")
     .map(block => block.type === "text" ? block.text : "")
     .join("");
+  if (!text.startsWith("Tool still running.") || !text.includes(`Call ${TOOL_RELAY_CONTROL_NAME} with `)) return undefined;
   return parseRelayCallId(text);
 }
 
@@ -86,7 +87,7 @@ export class RelayDelivery {
   }
 
   consume(callId: string, result?: CallToolResult): void {
-    if (result && relayNoticeCallId(result) !== undefined) return;
+    if (result && relayNoticeCallId(result) === callId) return;
     const obligation = this.obligations.get(callId);
     if (!obligation || obligation.state === "delivered") return;
     const outcome = this.relay.inspect(callId);

@@ -137,7 +137,7 @@ export type ShadowCheckpoint =
 	| { kind: "uncertain"; reason: ShadowRebuildReason };
 
 interface Binding {
- ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedGuard?: HistorySeedGuard; ompImageCheckpoint?: ImageHistoryCheckpoint; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompUnabsorbedToolBoundary?: boolean; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; delivery: RelayDelivery; relayBridge?: PiMcpBridge; relayFingerprint: string;
+ ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedGuard?: HistorySeedGuard; ompImageCheckpoint?: ImageHistoryCheckpoint; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompUnabsorbedToolBoundary?: boolean; ompUnabsorbedToolBoundaryFingerprint?: string; ompUnabsorbedToolBoundaryNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; delivery: RelayDelivery; relayBridge?: PiMcpBridge; relayFingerprint: string;
 	ompTerminalStopReason?: PromptResponse["stopReason"];
 	ompCancelledCheckpoint?: boolean;
 	ompCancelledHadOutput?: boolean;
@@ -936,7 +936,14 @@ export class AntigravityRuntime {
 				binding.needsReconstruction = true;
 			} else {
 				const undelivered = hasUndeliveredRelay(binding.delivery, results.map(({ pending }) => pending.invocation.id));
-				if (undelivered) binding.ompUnabsorbedToolBoundary = true;
+				if (undelivered) {
+					binding.ompUnabsorbedToolBoundary = true;
+					const boundary = context.messages[binding.pendingContextCount];
+					if (boundary?.role === "assistant") {
+						binding.ompUnabsorbedToolBoundaryFingerprint = this.ompMessageFingerprint(boundary);
+						binding.ompUnabsorbedToolBoundaryNormalized = this.ompMessageFingerprint(this.ompNormalizeAssistantForBoundary(boundary));
+					}
+				}
 				await claimContinuation(binding, async () => {
 				binding.writer = writer;
 				const continuationTurn = binding.turnCompletion; await this.noteContinuationInstructions(binding, context); if (!continuationTurn || binding.turnCompletion !== continuationTurn || binding.abortRequested || options.signal?.aborted || !binding.connection.process.alive) throw abortError();
@@ -1066,6 +1073,8 @@ export class AntigravityRuntime {
 			binding.ompFallbackContextTokens = parts.estimatedContextTokens;
 			binding.needsReconstruction = false;
 			binding.ompUnabsorbedToolBoundary = false;
+			binding.ompUnabsorbedToolBoundaryFingerprint = undefined;
+			binding.ompUnabsorbedToolBoundaryNormalized = undefined;
 			binding.pendingContextCount = context.messages.length;
 			binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
 			binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
@@ -1156,7 +1165,11 @@ export class AntigravityRuntime {
 			binding.messageCount = binding.pendingContextCount || parts.messageCount;
 			binding.historyFingerprint = binding.pendingContextFingerprint;
 			binding.ompConversationFingerprint = binding.pendingConversationFingerprint;
-            if (!binding.ompUnabsorbedToolBoundary) {
+            if (binding.ompUnabsorbedToolBoundary && binding.ompUnabsorbedToolBoundaryFingerprint) {
+              binding.expectedAssistantFingerprint = binding.ompUnabsorbedToolBoundaryFingerprint;
+              binding.ompExpectedAssistantNormalized = binding.ompUnabsorbedToolBoundaryNormalized;
+              binding.ompExpectedAssistantHasOutput = true;
+            } else if (!binding.ompUnabsorbedToolBoundary) {
               binding.expectedAssistantFingerprint = this.ompMessageFingerprint(activeWriter.message.content.length
                 ? activeWriter.message : { ...activeWriter.message, content: [{ type: 'text', text: '' }] });
               binding.ompExpectedAssistantNormalized = this.ompMessageFingerprint(this.ompNormalizeAssistantForBoundary(activeWriter.message));

@@ -82,6 +82,10 @@ test("consume ignores a relay notice even if the relay settles immediately", () 
   assert.deepEqual(delivery.open(), ["call-1"]);
   delivery.consume("call-1", result("done"));
   assert.deepEqual(delivery.open(), []);
+
+  const external = setup(outcomes);
+  external.consume("call-1", result('{"call_id":"external-job-7","status":"done"}'));
+  assert.deepEqual(external.open(), []);
 });
 
 test("expired and cancelled results are dropped", () => {
@@ -129,6 +133,7 @@ test("a failed result is delivered as an error envelope", () => {
 
 test("relay notice parsing ignores real results and reads the call id", () => {
   assert.equal(relayNoticeCallId(result("real")), undefined);
+  assert.equal(relayNoticeCallId(result('{"call_id":"external-job-7","status":"done"}')), undefined);
   assert.equal(relayNoticeCallId({ content: [{ type: "text", text: relayNotice("call-9") }], isError: false }), "call-9");
 });
 
