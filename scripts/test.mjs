@@ -8,10 +8,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // Compiled output must live inside the project so runtime resolution of the
 // externalized node_modules dependencies walks up to the project root.
 const output = path.join(root, ".test-build");
-// The vendored upstream ships TypeScript sources under extension/vendor, which Node
-// refuses to type-strip at runtime; those imports stay bundled while every
-// other package loads directly from the project's node_modules.
-const upstream = path.join(root, "extension/vendor/pi-antigravity-acp-provider");
+// Local TypeScript is bundled (Node cannot type-strip project sources at
+// runtime), while every package loads directly from node_modules.
 try {
   const filters = process.argv.slice(2);
   const files = (await readdir(path.join(root, "test"))).filter(file => file.endsWith(".test.ts"));
@@ -38,20 +36,11 @@ try {
     format: "esm",
     target: "node22",
     banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' },
-    plugins: [{
-      name: "bundle-upstream-typescript",
-      setup(builder) {
-        builder.onResolve({ filter: /^pi-antigravity-acp-provider(\/|$)/ }, args => {
-          const suffix = args.path.slice("pi-antigravity-acp-provider".length);
-          return { path: path.join(upstream, suffix) };
-        });
-      },
-    }],
     logLevel: "warning",
   });
-  const compiled = (await readdir(path.join(output, "test")))
-    .filter(file => file.endsWith(".mjs"))
-    .map(file => path.join(output, "test", file));
+  const compiled = entries.map(file => path.join(
+    output, "test", `${path.basename(file, ".ts")}.mjs`,
+  ));
   const result = spawnSync(process.execPath, ["--test", ...compiled], {
     stdio: "inherit",
   });

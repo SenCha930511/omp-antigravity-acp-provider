@@ -6,12 +6,12 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { registerOmpAdapter } from "../extension/index.ts";
 import { AcpSessionStore, AntigravityRuntime, SessionCleanup } from "../extension/runtime.mjs";
-import type { OmpCommandContext } from "../extension/auth-sync.ts";
+import { secretService, type OmpCommandContext } from "../extension/auth-sync.ts";
 import type { TierConnection } from "../extension/tier-connection.ts";
 
 type Hook = (event: unknown, ctx: OmpCommandContext) => unknown;
 type Command = { handler: (args: string, ctx: OmpCommandContext) => Promise<void> };
-type Runtime = { quota: (apiKey: string | undefined, signal?: AbortSignal) => Promise<unknown>; close: () => Promise<void> };
+type Runtime = { snapshot: () => Promise<unknown>; close: () => Promise<void> };
 type Cleaner = { flushStoreNotes: () => Promise<void>; stop: () => Promise<void> };
 
 test("session_shutdown finishes cleanup after runtime teardown rejection and preserves other pool entries", async () => {
@@ -37,6 +37,11 @@ test("session_shutdown finishes cleanup after runtime teardown rejection and pre
   const savedEnvironment = Object.fromEntries(Object.keys(environment).map(key => [key, process.env[key]]));
   Object.assign(process.env, environment);
 
+  const originalSecretPresent = secretService.present;
+  const originalSecretRemove = secretService.remove;
+  secretService.present = async () => false;
+  secretService.remove = async () => undefined;
+
   const hooks = new Map<string, Hook>();
   const runtimeIds = new Map<object, string>();
   const closedRuntimes: string[] = [];
@@ -49,13 +54,13 @@ test("session_shutdown finishes cleanup after runtime teardown rejection and pre
   let failingRuntime: object | undefined;
 
   const originalSessionStoreFlush = AcpSessionStore.prototype.flush;
-  const originalQuota = AntigravityRuntime.prototype.quota;
+  const originalSnapshot = AntigravityRuntime.prototype.snapshot;
   const originalClose = AntigravityRuntime.prototype.close;
   const originalFlush = SessionCleanup.prototype.flushStoreNotes;
   const originalStop = SessionCleanup.prototype.stop;
-  AntigravityRuntime.prototype.quota = function (this: Runtime, apiKey: string | undefined, signal?: AbortSignal) {
+  AntigravityRuntime.prototype.snapshot = function (this: Runtime) {
     if (acquiringSession && !runtimeIds.has(this)) runtimeIds.set(this, acquiringSession);
-    return originalQuota.call(this, apiKey, signal);
+    return originalSnapshot.call(this);
   };
   AntigravityRuntime.prototype.close = function (this: Runtime) {
     const id = runtimeIds.get(this) ?? "unregistered";
@@ -144,11 +149,11 @@ test("session_shutdown finishes cleanup after runtime teardown rejection and pre
     const createRuntime = async (sessionId: string): Promise<object> => {
       const before = new Set(runtimeIds.keys());
       acquiringSession = sessionId;
-      try { await command.handler("quota", context(sessionId)); }
+      try { await command.handler("status", context(sessionId)); }
       finally { acquiringSession = undefined; }
-      assert.match(notices.at(-1) ?? "", /Fixture Models/, "the real quota path must complete through the fake ACP");
+      assert.match(notices.at(-1) ?? "", /Antigravity ACP \(OMP adapter\)/, "the real status path must inspect the pool runtime");
       const created = [...runtimeIds].find(([runtime]) => !before.has(runtime));
-      assert.ok(created, "quota must create a genuine pool runtime");
+      assert.ok(created, "status must create a genuine pool runtime");
       assert.equal(created[1], sessionId);
       return created[0];
     };
@@ -209,10 +214,12 @@ test("session_shutdown finishes cleanup after runtime teardown rejection and pre
     failingRuntime = undefined;
     try { await hooks.get("session_shutdown")?.({}, { ui: { notify() {} } }); } catch { /* best-effort fixture teardown */ }
     AcpSessionStore.prototype.flush = originalSessionStoreFlush;
-    AntigravityRuntime.prototype.quota = originalQuota;
+    AntigravityRuntime.prototype.snapshot = originalSnapshot;
     AntigravityRuntime.prototype.close = originalClose;
     SessionCleanup.prototype.flushStoreNotes = originalFlush;
     SessionCleanup.prototype.stop = originalStop;
+    secretService.present = originalSecretPresent;
+    secretService.remove = originalSecretRemove;
     for (const [key, value] of Object.entries(savedEnvironment)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }

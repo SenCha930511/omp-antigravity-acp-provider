@@ -5,7 +5,7 @@ import {
   applyCompactionUpdate,
   formatCompactionNotice,
 } from "../extension/acp-compaction.ts";
-import { AntigravityAcpConnection } from "../extension/vendor/pi-antigravity-acp-provider/src/acp/connection.ts";
+import { AntigravityAcpConnection } from "../extension/runtime/acp/connection.ts";
 import { TierConnection } from "../extension/tier-connection.ts";
 
 function bareConnection() {
@@ -39,6 +39,22 @@ test("ACP compaction chunks and upserts become one terminal notification", () =>
   assert.equal(notices[0].status, "completed");
   assert.equal(notices[0].summary, "Earlier decisions: keep the API contract.");
   assert.deepEqual(connection.takeCompactionNotices(), [], "a completed compaction is notified once");
+});
+
+test("compaction notices are claimed only by their owning ACP session", () => {
+  const connection = bareConnection();
+  for (const sessionId of ["session-a", "session-b"]) {
+    connection.recordCompaction(sessionId, {
+      sessionUpdate: "compaction_update",
+      compactionId: `compact-${sessionId}`,
+      status: "completed",
+    });
+  }
+  const first = connection.takeCompactionNotices("session-a");
+  assert.deepEqual(first.map((notice: { sessionId: string }) => notice.sessionId), ["session-a"]);
+  const second = connection.takeCompactionNotices("session-b");
+  assert.deepEqual(second.map((notice: { sessionId: string }) => notice.sessionId), ["session-b"]);
+  assert.deepEqual(connection.takeCompactionNotices(), []);
 });
 
 test("compaction failures surface the error and clear on explicit null", () => {

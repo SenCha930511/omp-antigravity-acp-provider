@@ -4,7 +4,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { lock } from "proper-lockfile";
 import { releaseAfter } from "./lock-release.ts";
-import { resolveAntigravityAcpDirectory } from "./vendor/pi-antigravity-acp-provider/src/acp/antigravity.ts";
+import { resolveAntigravityAcpDirectory } from "./runtime/acp/antigravity.ts";
 import { isMissingFileError, writeJsonAtomic } from "./fs-atomic.ts";
 import { AcpSessionStore, registerSessionStoreCleanup } from "./session-store.ts";
 import { sourceRoot, sourceId, findSources, type OmpSessionSource, type OmpSourceScan } from "./omp-session-source.ts";
@@ -73,6 +73,11 @@ export class SessionCleanup {
     const relative = path.relative(root, file);
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative) || !file.endsWith(".jsonl")) return;
     const stat = await sourceRoot(root);
+    let current = root;
+    for (const part of relative.split(path.sep)) {
+      current = path.join(current, part);
+      if ((await afs.lstat(current)).isSymbolicLink()) throw new Error("Symlinked OMP session path");
+    }
     const headerId = await sourceId(file);
     if (!headerId) return;
     const rotated = id !== headerId;
@@ -265,8 +270,42 @@ export class SessionCleanup {
       }
     }); return pending;
   }
+  // The session tree can be large, so measure it before the registry lock to
+  // keep lease acquisition responsive. The unlocked snapshot only selects
+  // owned UUIDs to measure; the validated registry inside the transaction
+  // still authorizes every retention and deletion decision.
+  private async measureSizes(): Promise<ReadonlyMap<string, number | null>> {
+    const sizes = new Map<string, number | null>();
+    let snapshot: unknown;
+    try { snapshot = JSON.parse(await afs.readFile(this.registryPath, "utf8")); } catch { return sizes; }
+    if (typeof snapshot !== "object" || snapshot === null || !("sessions" in snapshot) || !Array.isArray(snapshot.sessions)) return sizes;
+    const items: unknown[] = snapshot.sessions;
+    const ids: string[] = [];
+    for (const item of items) {
+      if (typeof item !== "object" || item === null || !("id" in item) || !("owned" in item)) continue;
+      if (item.owned !== true || typeof item.id !== "string" || !UUID.test(item.id)) continue;
+      ids.push(item.id);
+    }
+    if (!ids.length) return sizes;
+    let dirs: { conversations: string; brain: string };
+    try { dirs = await this.verifyRoot(); } catch {
+      // A failed root is a known failure for every record selected here; an
+      // empty map would walk the same tree again under the lock after repair.
+      for (const id of ids) sizes.set(id, null);
+      return sizes;
+    }
+    for (const id of ids) {
+      try {
+        let size = 0;
+        for (const target of this.targets(id, dirs)) size += await this.inspect(target);
+        sizes.set(id, size);
+      } catch { sizes.set(id, null); }
+    }
+    return sizes;
+  }
   private async collectOnce() {
     const policy = loadCleanupPolicy(this.policyPath);
+    const sizes = await this.measureSizes();
     return this.transaction(async registry => {
       // Use the same complete validation as checkpoint restoration. An array
       // alone cannot prove that a damaged mapping no longer protects data.
@@ -327,7 +366,15 @@ export class SessionCleanup {
         }
         report.owned++; if (v.leases.length) report.active++;
         if (mapped.has(v.id)) { report.mapped++; delete v.orphanedAt; } else { report.unmapped++; v.orphanedAt ??= this.now(); }
-        let size = 0; try { dirs ??= await this.verifyRoot(); for (const target of this.targets(v.id, dirs)) size += await this.inspect(target); } catch { report.failures++; }
+        const measured = sizes.get(v.id);
+        let size = 0;
+        // null means the unlocked measurement already failed: one failure, no
+        // bytes. undefined means this session registered after the prepass, so
+        // keep the in-lock traversal that yields exact bytes for it.
+        if (measured === null) report.failures++;
+        else if (measured === undefined) {
+          try { dirs ??= await this.verifyRoot(); for (const target of this.targets(v.id, dirs)) size += await this.inspect(target); } catch { report.failures++; }
+        } else size = measured;
         report.ownedBytes += size; owned.push({ v, size });
       }
       const over = () => Boolean((policy.maxSessions && report.owned > policy.maxSessions) || (policy.maxBytes && report.ownedBytes > policy.maxBytes));

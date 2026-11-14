@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AcpFailure, classifyAcpFailure } from "../extension/acp-errors.ts";
-import { AntigravityAcpError } from "../extension/vendor/pi-antigravity-acp-provider/src/acp/errors.ts";
+import { AntigravityAcpError, redactTail } from "../extension/runtime/acp/errors.ts";
 
 function classify(message: string): AcpFailure {
   const failure = classifyAcpFailure(new Error(message));
@@ -44,7 +44,53 @@ test("vendor codes survive when the message is ambiguous", () => {
   assert.equal(classifyAcpFailure(new AntigravityAcpError("model", "model unavailable")).code, "model");
 });
 
+test("protocol errors are classified without relying on the message", () => {
+  const failure = classifyAcpFailure(new AntigravityAcpError("protocol", "malformed frame"));
+  assert.ok(failure instanceof AcpFailure);
+  assert.equal(failure.code, "protocol");
+  assert.match(failure.message, /protocol error/u);
+});
+
+test("unknown errors with a sensitive cause or stack are sanitized", () => {
+  const cause = new Error("access_token=secret-token");
+  const original = new Error("something unusual", { cause });
+  const classified = classifyAcpFailure(original);
+  assert.notEqual(classified, original);
+  assert.equal(classified.message, "something unusual");
+  const sanitized = classified.cause as Error;
+  assert.ok(sanitized instanceof Error);
+  assert.doesNotMatch(sanitized.message, /secret-token/u);
+  assert.doesNotMatch(sanitized.stack ?? "", /secret-token/u);
+
+  const empty = new Error("", { cause });
+  const emptyClassified = classifyAcpFailure(empty);
+  assert.notEqual(emptyClassified, empty);
+  assert.doesNotMatch((emptyClassified.cause as Error).message, /secret-token/u);
+
+  const stacked = new Error("something unusual");
+  stacked.stack = "Error: something unusual\n    at access_token=secret-token";
+  const stackClassified = classifyAcpFailure(stacked);
+  assert.notEqual(stackClassified, stacked);
+  assert.doesNotMatch(stackClassified.stack ?? "", /secret-token/u);
+});
+
 test("unknown failures are left untouched", () => {
   const original = new Error("something unusual");
   assert.equal(classifyAcpFailure(original), original);
+});
+
+test("classified failures do not retain the raw credential-bearing cause", () => {
+  const failure = classifyAcpFailure(new AntigravityAcpError("auth", "login failed access_token=secret-token"));
+  assert.match(failure.message, /access_token=\*\*\*/u);
+  const cause = failure.cause as Error;
+  assert.doesNotMatch(cause.message, /secret-token/u);
+  assert.doesNotMatch(cause.stack ?? "", /secret-token/u);
+});
+
+test("redactTail keeps the newest output and still masks secrets", () => {
+  const text = `BEGIN ${"old output ".repeat(600)}crash access_token=secret-value`;
+  const tail = redactTail(text);
+  assert.equal(tail.length <= 4_096, true);
+  assert.match(tail, /crash access_token=<redacted>$/u);
+  assert.doesNotMatch(tail, /BEGIN/u);
 });

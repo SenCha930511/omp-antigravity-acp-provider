@@ -7,7 +7,7 @@ import {
   resolveRelayConfig,
   type RelayClock,
   projectedMcpName,
-} from "../extension/tool-relay.ts";
+} from "../extension/runtime/tools/relay.ts";
 import { parseRelayCallId, TOOL_RELAY_CONTROL_NAME } from "../extension/tool-relay-protocol.mjs";
 
 class ManualClock implements RelayClock {
@@ -194,6 +194,26 @@ test("an await timeout cannot overwrite a cancellation in the same synchronous t
   deferred.resolve(result("late"));
   await Promise.resolve();
   assert.match(textOf(await relay.await("call-1")), /cancelled after wait timeout/);
+});
+
+test("a completed relay result survives into the next turn", async () => {
+  const { clock, relay } = relayFor();
+  const deferred = Promise.withResolvers<CallToolResult>();
+  const call = relay.call({ id: "call-1", name: "read", arguments: {} }, () => deferred.promise);
+  clock.advance(100);
+  await call;
+  deferred.resolve(result("late result"));
+  await Promise.resolve();
+
+  relay.beginTurn();
+  const value = await relay.await("call-1");
+  assert.equal(value.isError, false);
+  assert.equal(textOf(value), "late result");
+
+  relay.beginTurn();
+  const expired = await relay.await("call-1");
+  assert.equal(expired.isError, true);
+  assert.match(textOf(expired), /unknown|expired/i);
 });
 
 test("relay config accepts only 0 or 5000 through 165000", () => {

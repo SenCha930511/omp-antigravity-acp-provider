@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { mock } from "bun:test";
-import { buildPromptParts } from "../extension/context-transfer.ts";
+import { buildPromptParts } from "../extension/runtime/prompt.ts";
 
 const source = process.env.OMP_ACP_TEST_OMP_SOURCE;
 if (!source) throw new Error("Set OMP_ACP_TEST_OMP_SOURCE to an OMP source checkout");

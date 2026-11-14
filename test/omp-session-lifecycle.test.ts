@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { OmpSessionLifecycle, type OmpProviderSessionState } from "../extension/omp-session-lifecycle.ts";
 import { toolDeclarations, normalizeOmpSystemDeltas } from "../extension/omp-context.ts";
 import { AntigravityRuntime, Type } from "../extension/runtime.mjs";
+import { ownerRoutingId } from "../extension/runtime/routing.ts";
 
-function fixture() {
+function fixture(ownerOf?: (id: string | undefined) => string | undefined) {
   const bundles = new Map<string | undefined, object>(), closed: Array<string | undefined> = [];
   const gates = new Map<string | undefined, Promise<void>>();
   const released: Array<string | undefined> = [], releaseGates = new Map<string | undefined, Promise<void>>();
@@ -13,7 +14,7 @@ function fixture() {
     if (!bundle) return;
     bundles.delete(id); closed.push(id);
     await lifecycle.disposeRuntime(id, bundle, () => gates.get(id) ?? Promise.resolve());
-  }, async id => { released.push(id); await releaseGates.get(id); });
+  }, async id => { released.push(id); await releaseGates.get(id); }, ownerOf);
   const scope = () => new Map<string, OmpProviderSessionState>();
   function bind(id: string, host: Map<string, OmpProviderSessionState>) {
     const ticket = lifecycle.capture(id, host), bundle = {};
@@ -79,6 +80,26 @@ test("releaseSession retires only the side request and failed preparation retain
   for (let i = 0; i < 32; i++) f.lifecycle.finish(f.lifecycle.capture(`failed-${i}`, scope));
   scope.get("antigravity-acp")!.close();
   assert.deepEqual(f.closed, ["main:side:1", "main"]);
+  await f.lifecycle.closeAll();
+});
+
+test("releasing a side routing id keeps the parent-owned shadow runtime and its bundle alive", async () => {
+  const f = fixture(ownerRoutingId), scope = f.scope();
+  f.bind("main", scope); f.bind("main:side:1", scope);
+  scope.get("antigravity-acp")!.releaseSession!("main:side:1");
+  assert.deepEqual(f.closed, [], "a one-shot release must not tear the parent runtime down");
+  for (let i = 0; i < 8 && !f.released.length; i++) await Promise.resolve();
+  assert.deepEqual(f.released, ["main:side:1"], "only the released id's mapping is retired");
+  assert.ok(f.bundles.has("main"), "the parent bundle still owns the warm shadow");
+
+  // A later one-shot id resolves to the same parent owner and dispatches warm.
+  const next = f.lifecycle.capture("main:side:2", scope);
+  await f.lifecycle.ready(next);
+  assert.ok(f.bundles.has("main"));
+  f.lifecycle.finish(next);
+
+  scope.get("antigravity-acp")!.close();
+  assert.deepEqual(f.closed, ["main"], "parent teardown closes the owner runtime exactly once");
   await f.lifecycle.closeAll();
 });
 

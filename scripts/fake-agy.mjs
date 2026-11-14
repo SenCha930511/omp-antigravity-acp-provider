@@ -426,6 +426,7 @@ async function prompt(state, id, params) {
 }
 
 async function handleMessage(incoming) {
+  if (incoming.id !== undefined && incoming.method !== undefined) log({ event: "method", name: incoming.method });
   if (incoming.id !== undefined && incoming.method === undefined) {
     for (const state of sessions.values()) {
       const resolve = state.pending.get(incoming.id);
@@ -440,12 +441,18 @@ async function handleMessage(incoming) {
   if (incoming.method === "initialize") {
     respond(incoming.id, {
       protocolVersion: 1,
+      ...(process.env.FAKE_AGY_API_KEY_AUTH === "1" ? {
+        authMethods: [{ id: "api-key", name: "Gemini API key", _meta: { "api-key": {} } }],
+      } : {}),
       ...(modern ? { agentInfo: { name: agentName, title: agentName, version: "1.5.3" } } : {}),
       agentCapabilities: {
         promptCapabilities: { embeddedContext: true },
         ...(modern
           ? mcpHttpOverride === undefined ? {} : { mcpCapabilities: { http: mcpHttpOverride === "true" } }
           : { mcpCapabilities: { http: true } }),
+        sessionCapabilities: {
+          ...(process.env.FAKE_AGY_SESSION_LIST === "1" ? { list: {} } : {}),
+        },
       },
     });
     return;
@@ -457,6 +464,20 @@ async function handleMessage(incoming) {
     } catch (error) {
       respondError(incoming.id, -32603, error instanceof Error ? error.message : String(error));
     }
+    return;
+  }
+  if (incoming.method === "session/list") {
+    if (process.env.FAKE_AGY_SESSION_LIST !== "1") {
+      respondError(incoming.id, -32601, "Method not found");
+      return;
+    }
+    respond(incoming.id, {
+      sessions: [...sessions.values()].map(state => ({ sessionId: state.id, cwd: incoming.params?.cwd ?? process.cwd() })),
+    });
+    return;
+  }
+  if (incoming.method === "authenticate") {
+    respond(incoming.id, {});
     return;
   }
   if (incoming.method === "session/set_mode" || incoming.method === "session/set_config_option") {
@@ -500,7 +521,7 @@ async function handleMessage(incoming) {
     void prompt(state, incoming.id, incoming.params ?? {});
     return;
   }
-  if (incoming.id !== undefined) respondError(incoming.id, -32601, "Method not found");
+  if (incoming.id !== undefined) respondError(incoming.id, -32601, `Method not found: ${incoming.method}`);
 }
 
 async function shutdown() {

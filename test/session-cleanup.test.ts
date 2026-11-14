@@ -5,9 +5,11 @@ import afs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { SessionCleanup, saveCleanupPolicy } from "../extension/session-cleanup.ts";
 import { AcpSessionStore } from "../extension/session-store.ts";
-import { findSources } from "../extension/omp-session-source.ts";
+import { findSources, sourceId } from "../extension/omp-session-source.ts";
 
 function fixture(t: any) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-acp-cleanup-")));
@@ -294,6 +296,44 @@ test("malformed mappings block deletion and asynchronous directory inspection yi
   for (let i = 0; i < 100; i++) fs.writeFileSync(path.join(f.acp, "brain", id, String(i)), "fixture");
   let tick = false; const timer = setTimeout(() => { tick = true; }, 0);
   assert.equal(await f.cleaner.collect(), 1); clearTimeout(timer); assert.equal(tick, true);
+});
+
+test("a competing process acquires its lease while cleanup is still walking session sizes", async t => {
+  const f = fixture(t), id = f.session();
+  saveCleanupPolicy(f.cleaner.policyPath, { mode: "off", idleDays: 7 });
+  await f.cleaner.release(await f.cleaner.acquire(id, true, 987654));
+  type Inspection = { inspect(file: string): Promise<number> };
+  const internal = f.cleaner as unknown as Inspection, inspect = internal.inspect;
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+  internal.inspect = async file => { entered.resolve(); await gate.promise; return inspect.call(f.cleaner, file); };
+  const collected = f.cleaner.collect();
+  await entered.promise;
+  // The child shares only the registry file: it has its own module state, so it
+  // contends like another OMP process instead of queueing on this process's
+  // transaction chain.
+  const peer = spawn("bun", [path.resolve("test/fixtures/cleanup-peer-acquire.ts"), path.join(f.root, "state"), f.acp, id],
+    { stdio: ["ignore", "pipe", "pipe"] });
+  const exited = once(peer, "exit");
+  let lease = "", failure = "";
+  peer.stdout.setEncoding("utf8").on("data", (chunk: string) => { lease += chunk; });
+  peer.stderr.setEncoding("utf8").on("data", (chunk: string) => { failure += chunk; });
+  let token: string | undefined;
+  try {
+    await exited;
+    assert.equal(peer.exitCode, 0, `peer acquire failed with ${lease.trim() || failure.trim()}`);
+    token = lease.trim();
+    assert.match(token, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i, "the peer holds a real lease");
+    const state = path.join(f.root, "state");
+    const registry = path.join(state, fs.readdirSync(state).find(name => name.startsWith("cleanup-sessions-"))!);
+    assert.match(fs.readFileSync(registry, "utf8"), new RegExp(token), "the lease is persisted at the registry path while traversal stays blocked");
+  } finally {
+    gate.resolve();
+    await collected;
+    if (peer.exitCode === null && peer.signalCode === null) peer.kill("SIGKILL");
+    await exited.catch(() => {});
+    if (token) await f.cleaner.release(token);
+  }
+  assert.equal(f.cleaner.status().ownedBytes, 37, "unlocked measurement retains the five conversation files and tool.json bytes");
 });
 
 test("malformed individual mapping records preserve every cleanup candidate", async t => {
@@ -663,6 +703,53 @@ test("an unreadable journal marks the scan incomplete instead of failing it", as
   assert.equal(scan.complete, false);
   fs.writeFileSync(path.join(root, "workspace", "empty.jsonl"), '{"type":"session","id":"half');
   assert.equal((await findSources(root)).complete, false, "a truncated header is equally unprovable");
+});
+
+test("duplicate journal IDs stay ambiguous instead of naming a move target", async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-source-duplicate-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "workspace"));
+  const header = JSON.stringify({ type: "session", id: "duplicate" }) + "\n";
+  fs.writeFileSync(path.join(root, "workspace", "one.jsonl"), header);
+  fs.writeFileSync(path.join(root, "workspace", "backup.jsonl"), header);
+  const scan = await findSources(root);
+  assert.equal(scan.sources.has("duplicate"), false);
+  assert.equal(scan.complete, false);
+});
+
+test("a symlinked journal is rejected without canonical path comparison", { skip: process.platform === "win32" }, async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-source-symlink-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const real = path.join(root, "real.jsonl");
+  const link = path.join(root, "link.jsonl");
+  fs.writeFileSync(real, JSON.stringify({ type: "session", id: "symlink-source" }) + "\n");
+  fs.symlinkSync(real, link);
+  assert.equal(await sourceId(real), "symlink-source");
+  await assert.rejects(sourceId(link), /Symlinked OMP session/);
+});
+
+test("trackSource rejects an intermediate symlinked bucket", { skip: process.platform === "win32" }, async t => {
+  const f = fixture(t), id = f.session();
+  const token = await f.cleaner.acquire(id, true, 987654);
+  await f.cleaner.release(token);
+  const root = path.join(f.root, "sessions");
+  const external = path.join(f.root, "external");
+  fs.mkdirSync(external, { recursive: true });
+  const file = path.join(external, "chat.jsonl");
+  fs.writeFileSync(file, JSON.stringify({ type: "session", id: "omp-chat" }) + "\n");
+  fs.mkdirSync(root, { recursive: true });
+  fs.symlinkSync(external, path.join(root, "workspace"), "dir");
+  fs.writeFileSync(path.join(f.root, "state", "sessions.json"), JSON.stringify([{
+    piSessionId: "omp-chat", acpSessionId: id, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now(),
+  }]));
+  await assert.rejects(
+    f.cleaner.trackSource("omp-chat", path.join(root, "workspace", "chat.jsonl")),
+    /Symlink/u,
+  );
+  const state = path.join(f.root, "state");
+  const registry = JSON.parse(fs.readFileSync(path.join(state, fs.readdirSync(state).find(name => name.startsWith("cleanup-sessions-"))!), "utf8"));
+  assert.equal(registry.sessions.find((record: any) => record.id === id)?.ompSource, undefined);
 });
 
 test("a corrupt sibling journal cannot prove a missing source was deleted", async t => {

@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { registerOmpAdapter } from "../extension/index.ts";
+import { loadToolPolicy } from "../extension/tool-policy.ts";
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tool-command-"));
 const hooks = new Map<string, Function>();
 let command: any;
@@ -26,10 +27,11 @@ try {
   await command.handler("cleanup budget 4 16", context);
   const budget = JSON.parse(await fs.readFile(path.join(temporary, "cleanup.json"), "utf8"));
   assert.equal(budget.maxSessions, 4); assert.equal(budget.maxBytes, 16 * 1024 * 1024); notices.pop();
-  for (const setting of ["on", "reset", "off"]) { await command.handler(`diagnostics ${setting}`, context); notices.pop(); }
-  assert.equal(JSON.parse(await fs.readFile(path.join(temporary, "diagnostics.json"), "utf8")).enabled, false);
-  assert.equal(JSON.parse(await fs.readFile(path.join(temporary, "config.json"), "utf8")).diagnostics, false);
-  await assert.rejects(command.handler("diagnostics invalid", context), /Usage:/);
+  // Removed subcommands must reject without creating state or a runtime.
+  for (const removed of ["diagnostics on", "debug on", "tools", "quota"]) {
+    await assert.rejects(command.handler(removed, context), /Usage:/);
+  }
+  await assert.rejects(fs.access(path.join(temporary, "diagnostics.json")), { code: "ENOENT" }, "a removed command must not write settings");
   assert.equal(JSON.parse(await fs.readFile(path.join(temporary, "cleanup.json"), "utf8")).idleDays, 3);
   for (const invalid of ["typo", "timeout 0", "timeout NaN", "off 7", "timeout 7 extra"]) {
     await assert.rejects(command.handler(`cleanup ${invalid}`, context));
@@ -42,15 +44,10 @@ try {
   await assert.rejects(command.handler("native-tools typo", context), /must be prefer or disabled/);
   assert.equal(JSON.parse(await fs.readFile(path.join(temporary, "omp-tools.json"), "utf8")).nativeTools, "prefer");
   await command.handler("native-tools disabled", context);
-  await command.handler("debug on", context);
-  assert.deepEqual(JSON.parse(await fs.readFile(path.join(temporary, "omp-tools.json"), "utf8")), { nativeTools: "disabled", debugToolUpdates: true });
-  await command.handler("debug off", context);
-  assert.deepEqual(JSON.parse(await fs.readFile(path.join(temporary, "omp-tools.json"), "utf8")), { nativeTools: "disabled", debugToolUpdates: false });
   const toolConfig = JSON.parse(await fs.readFile(path.join(temporary, "config.json"), "utf8"));
   assert.equal(toolConfig.nativeTools, "disabled");
-  assert.equal(toolConfig.debugToolUpdates, false);
-  await assert.rejects(command.handler("debug typo", context), /Usage:/);
-  assert.ok(notices.length === 5);
+  assert.equal(loadToolPolicy(path.join(temporary, "omp-tools.json")).debugToolUpdates, false);
+  assert.equal(notices.length, 3);
   await command.handler("context set default contextWindow 524288", context);
   await command.handler("context set default maxTokens 32000", context);
   await command.handler("context set default maxTransferBytes 33554432", context);

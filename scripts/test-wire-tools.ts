@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { AntigravityRuntime, PERMISSION_RESULT_KIND, PERMISSION_TOOL_NAME, TierConnection, Type } from "../extension/runtime.mjs";
-import { estimateContextTokens } from "../extension/context-transfer.ts";
+import { estimateContextTokens } from "../extension/runtime/prompt.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const model = {

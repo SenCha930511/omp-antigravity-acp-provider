@@ -5,14 +5,17 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { transformSync } from "esbuild";
+import { createHistoryFingerprintMemo } from "../extension/runtime/binding.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const source = fs.readFileSync(path.join(root, "extension/vendor/pi-antigravity-acp-provider/src/runtime.ts"), "utf8");
+const source = fs.readFileSync(path.join(root, "extension/runtime/runtime.ts"), "utf8");
 const start = source.indexOf("function messagesFingerprint(");
 const end = source.indexOf("function findToolResult(", start);
 assert.ok(start > 0 && end > start);
 const code = transformSync(source.slice(start, end), { loader: "ts", target: "node22" }).code;
-const baseline = Function("createHash", code + ";return { messagesFingerprint, messageFingerprint };")(createHash);
+const baseline = Function("createHash", "createHistoryFingerprintMemo",
+  "const ompMessageFingerprintMemo = createHistoryFingerprintMemo();" + code +
+  ";return { messagesFingerprint, messageFingerprint };")(createHash, createHistoryFingerprintMemo);
 
 function payload(m: any) {
   if (m.role === "user") return { role: m.role, content: m.content };

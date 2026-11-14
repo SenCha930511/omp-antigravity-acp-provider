@@ -3,7 +3,7 @@ import fs from "node:fs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { setImmediate as immediate } from "node:timers/promises";
-import { createHistoryFingerprintMemo } from "../extension/history-fingerprint.ts";
+import { createHistoryFingerprintMemo } from "../extension/runtime/binding.ts";
 
 const source = fs.readFileSync("extension/runtime.mjs", "utf8");
 const start = source.indexOf("function messagesFingerprint(");

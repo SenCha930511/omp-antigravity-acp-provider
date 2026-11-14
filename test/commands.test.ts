@@ -4,15 +4,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createAntigravityArgumentCompletions, createAntigravityCommandHandler, type CommandControllerDeps, type RuntimeBundleView } from "../extension/commands.ts";
-import type { OmpCommandContext } from "../extension/auth-sync.ts";
+import { keychain, secretService, type OmpCommandContext } from "../extension/auth-sync.ts";
 import { SessionCleanup } from "../extension/session-cleanup.ts";
-import { Diagnostics } from "../extension/diagnostics.ts";
 import type { TierConnection } from "../extension/tier-connection.ts";
+
+// These command paths report credential state without a live runtime. Keep the
+// Linux Secret Service probe away from the real user keyring unless a test
+// opts in; the default "not applicable" result matches the macOS keychain stub.
+const noSecretService = async () => undefined;
+secretService.present = noSecretService;
+secretService.remove = noSecretService;
 
 const bundle: RuntimeBundleView = {
   runtime: {
     snapshot: async () => ({ bindings: 0, permissionMode: "yolo", metrics: {}, processes: [] }),
-    quota: async () => { throw new Error("quota fixture not configured"); },
     setPermissionMode: async () => {},
     logout: async () => {},
     close: async () => {},
@@ -43,7 +48,6 @@ function makeHandler() {
     getToolPolicy: () => ({ nativeTools: "prefer", debugToolUpdates: false }),
     setToolPolicy: () => {},
     setPermissionModeState: () => {},
-    getLastToolAudit: () => undefined,
     getRuntimeForSession: () => { runtimeCreates++; return bundle; },
     peekRuntimeForSession: () => undefined,
     getSavedSessionCount: () => 0,
@@ -144,61 +148,128 @@ test("account retains credential-store errors without starting a runtime", async
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
-test("quota reports formatted live groups without ephemeral usage noise while holding and releasing a runtime lease", async () => {
+test("account, status and login read keyring health instead of a Promise", async () => {
   const fixture = makeHandler();
-  let prepared = 0, released = 0, quotaCalls = 0;
-  fixture.deps.prepareRuntime = async () => { prepared++; };
-  fixture.deps.acquireRuntimeForSession = () => ({
-    value: {
-      ...bundle,
-      runtime: {
-        ...bundle.runtime,
-        quota: async () => {
-          quotaCalls++;
-          return { at: Date.UTC(2026, 10, 10, 12), groups: [
-            { displayName: "Gemini 4 Argon", buckets: [
-              { window: "5h", remainingFraction: 0.42, resetTime: "2026-11-10T18:30:00.000Z" },
-              { window: "weekly", remainingFraction: 0.75 },
-            ] },
-            { displayName: "Gemini 3.8 Flash", buckets: [] },
-          ] };
-        },
-        snapshot: async () => ({ bindings: 1, permissionMode: "yolo", metrics: { totals: { turns: 3 } }, processes: [] }),
-      },
-    },
-    release: () => { released++; },
-  });
-  await fixture.handler("quota", fixture.ctx);
-  assert.equal(prepared, 1);
-  assert.equal(quotaCalls, 1);
-  assert.equal(released, 1);
-  const report = fixture.notices[0]!;
-  assert.match(report, /^Antigravity quota\n  Gemini 4 Argon\n    5h\s+42% remaining · reset 2026-11-10T18:30:00.000Z\n    weekly\s+75% remaining/);
-  assert.match(report, /  Gemini 3.8 Flash\n    no percentage limits reported/);
-  assert.doesNotMatch(report, /Usage:|\{|\},|displayName|remainingFraction/);
-  assert.equal(fixture.runtimeCreates(), 0);
-  fs.rmSync(fixture.state, { recursive: true, force: true });
+  const savedHome = process.env.GEMINI_HOME;
+  const savedKey = process.env.GEMINI_API_KEY;
+  const originalKeychainPresent = keychain.present;
+  process.env.GEMINI_HOME = fixture.state;
+  delete process.env.GEMINI_API_KEY;
+  keychain.present = async () => false;
+  secretService.present = async () => true;
+  try {
+    // A keyring-only login has no token file and no macOS keychain entry.
+    await fixture.handler("account", fixture.ctx);
+    const account = fixture.notices.at(-1)!;
+    assert.match(account, /Google account:\s+signed in[^\n]*system keyring/);
+    assert.match(account, /ACP authentication:\s+oauth-refreshable · oauth-personal/);
+    assert.doesNotMatch(account, /undefined|\[object Promise\]/);
+
+    await fixture.handler("status", fixture.ctx);
+    const status = fixture.notices.at(-1)!;
+    assert.match(status, /Login:\s+ready/);
+    assert.doesNotMatch(status, /not ready|undefined|\[object Promise\]/);
+
+    let freshLogins = 0;
+    const attempt = Object.freeze({ fixture: "fresh-login-attempt" });
+    let successfulAttempt: unknown;
+    fixture.deps.auth = {
+      watchOmpCredentials() {},
+      beginFreshGoogleLogin: async () => { freshLogins++; return attempt; },
+      noteLoginSucceeded: (received: unknown) => { successfulAttempt = received; },
+    } as unknown as CommandControllerDeps["auth"];
+    await fixture.handler("login", fixture.ctx);
+    assert.equal(freshLogins, 1, "login must still run a fresh Google sign-in");
+    assert.equal(successfulAttempt, attempt, "success must settle the identity returned by begin");
+    const login = fixture.notices.at(-1)!;
+    assert.match(login, /Antigravity Google login finished/);
+    assert.match(login, /ACP auth: oauth-refreshable \(oauth-personal\)/);
+    assert.doesNotMatch(login, /undefined|\[object Promise\]/);
+
+    fixture.deps.auth = {
+      watchOmpCredentials() {},
+      performCommandLogout: async () => ({ keychainRemoved: false, keyringRemoved: true, ompMarker: "removed" }),
+    } as unknown as CommandControllerDeps["auth"];
+    await fixture.handler("logout", fixture.ctx);
+    const logout = fixture.notices.at(-1)!;
+    assert.match(logout,
+      /logged out — Google credentials, saved ACP sessions, the system keyring entry and the OMP marker record cleared/);
+    assert.doesNotMatch(logout, /synthetic|refresh_token|token=/);
+    await assert.rejects(fixture.handler("quota", fixture.ctx), /Usage:/,
+      "the removed quota subcommand must stay removed next to the auth commands");
+  } finally {
+    keychain.present = originalKeychainPresent;
+    secretService.present = noSecretService;
+    if (savedHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = savedHome;
+    if (savedKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = savedKey;
+    fs.rmSync(fixture.state, { recursive: true, force: true });
+  }
+  assert.equal(process.env.GEMINI_HOME, savedHome);
+  assert.equal(process.env.GEMINI_API_KEY, savedKey);
 });
 
-test("quota failures are explicit reports and extra arguments do not prepare a runtime", async () => {
+test("the login command clears fresh-login suppression when authorization is cancelled", async t => {
   const fixture = makeHandler();
-  await fixture.handler("quota", fixture.ctx);
-  assert.match(fixture.notices[0]!, /Antigravity quota\n  Status:\s+unavailable\n  Reason:\s+quota fixture not configured/);
-  await assert.rejects(fixture.handler("quota extra", fixture.ctx), /^Error: Usage: \/antigravity-acp quota$/);
-  assert.equal(fixture.runtimeCreates(), 1, "only the valid quota query creates a runtime");
+  t.after(() => fs.rmSync(fixture.state, { recursive: true, force: true }));
+  let cancellations = 0;
+  let successfulLogins = 0;
+  const attempt = Object.freeze({ fixture: "cancelled-login-attempt" });
+  let cancelledAttempt: unknown;
+  fixture.deps.auth = {
+    watchOmpCredentials() {},
+    beginFreshGoogleLogin: async () => attempt,
+    cancelFreshGoogleLogin: (received: unknown) => { cancellations++; cancelledAttempt = received; },
+    noteLoginSucceeded: () => { successfulLogins++; },
+  } as unknown as CommandControllerDeps["auth"];
+  fixture.ctx.ui.input = async () => undefined;
+  fixture.deps.getRuntimeForSession = (): RuntimeBundleView => ({
+    ...bundle,
+    provider: {
+      auth: { oauth: {
+        login: async callbacks => {
+          await callbacks.prompt({ message: "Authorization code", placeholder: "" });
+          return {};
+        },
+        refresh: async () => ({}),
+      } },
+      streamSimple: () => (async function* () {})(),
+    },
+    isBusy: () => false,
+  });
+  await assert.rejects(fixture.handler("login", fixture.ctx), /Antigravity OAuth login cancelled/);
+  assert.equal(cancellations, 1);
+  assert.equal(cancelledAttempt, attempt, "cancellation must settle the identity returned by begin");
+  assert.equal(successfulLogins, 0);
+});
+
+test("removed quota, tools, diagnostics and debug subcommands reject without a runtime or settings", async () => {
+  const fixture = makeHandler();
+  let prepared = 0;
+  fixture.deps.prepareRuntime = async () => { prepared++; };
+  for (const input of [
+    "quota", "quota extra",
+    "tools", "tools extra",
+    "diagnostics", "diagnostics on", "diagnostics reset", "diagnostics on extra",
+    "debug", "debug on", "debug off", "debug on extra",
+  ]) {
+    await assert.rejects(fixture.handler(input, fixture.ctx), /Usage: \/antigravity-acp \[status\|account\|/);
+  }
+  assert.equal(prepared, 0, "the removed quota command must not prepare a runtime");
+  assert.deepEqual(fs.readdirSync(fixture.state), [], "Removed commands must not write settings");
+  assert.equal(fixture.notices.length, 0);
+  assert.equal(fixture.runtimeCreates(), 0);
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
 test("unknown subcommands and stray arguments fail with usage errors, not a runtime", async () => {
   const fixture = makeHandler();
   await assert.rejects(fixture.handler("unknown", fixture.ctx), /Usage: \/antigravity-acp \[status\|account\|/);
-  await assert.rejects(fixture.handler("permissions invalid", fixture.ctx), /Usage: \/antigravity-acp permissions default\|auto-edit\|yolo/);
+  await assert.rejects(fixture.handler("permissions invalid", fixture.ctx), /Usage: \/antigravity-acp permissions default\|auto-edit\|yolo\|follow/);
   await assert.rejects(fixture.handler("permissions", fixture.ctx), /Usage: \/antigravity-acp permissions/);
   await assert.rejects(fixture.handler("permissions default extra", fixture.ctx), /Usage: \/antigravity-acp permissions/);
   await assert.rejects(fixture.handler("refresh extra", fixture.ctx), /Usage: \/antigravity-acp refresh/);
-  await assert.rejects(fixture.handler("tools extra", fixture.ctx), /Usage: \/antigravity-acp tools/);
   await assert.rejects(fixture.handler("status extra", fixture.ctx), /Usage: \/antigravity-acp \[status\|account\|/);
-  for (const command of ["usage off extra", "debug on extra", "native-tools disabled extra"]) {
+  for (const command of ["usage off extra", "native-tools disabled extra"]) {
     await assert.rejects(fixture.handler(command, fixture.ctx), /Usage: \/antigravity-acp/);
   }
   assert.deepEqual(fs.readdirSync(fixture.state), [], "Invalid commands must not write settings");
@@ -273,7 +344,7 @@ test("permissions and native-tools do not mutate live state or close runtimes if
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
-test("status and tools hold a runtime lease for their snapshot", async () => {
+test("status holds a runtime lease for its snapshot", async () => {
   const fixture = makeHandler();
   let acquired = 0, released = 0;
   fixture.deps.acquireRuntimeForSession = () => {
@@ -281,16 +352,14 @@ test("status and tools hold a runtime lease for their snapshot", async () => {
     return { value: bundle, release: () => { released++; } };
   };
   await fixture.handler("status", fixture.ctx);
-  await fixture.handler("tools", fixture.ctx);
   const lines = fixture.notices[0]!.split("\n");
   assert.equal(lines[0], "Antigravity ACP (OMP adapter)");
   assert.ok(lines.slice(1).every(line => line.startsWith("  ")), "status fields form one indented list");
   assert.match(fixture.notices[0]!, /Permission:\s+requested default → wire yolo/);
   assert.match(fixture.notices[0]!, /Active sessions:\s+0/);
   assert.doesNotMatch(fixture.notices[0]!, /Processes|omittedTools|\{|\}/);
-  assert.equal(fixture.notices[1], "No model request yet. Send a message with this ACP model to inspect its offered OMP tools.");
-  assert.equal(acquired, 2);
-  assert.equal(released, 2);
+  assert.equal(acquired, 1);
+  assert.equal(released, 1);
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
@@ -336,60 +405,6 @@ test("status summarizes live runtime details without process JSON or zero metric
   assert.doesNotMatch(report, /processes|mcpHttp|waitingForTools|\{|\}/);
   assert.equal(acquired, 1);
   assert.equal(released, 1);
-  fs.rmSync(fixture.state, { recursive: true, force: true });
-});
-
-test("tools lists every projected and live tool omission with its reason", async () => {
-  const fixture = makeHandler();
-  let released = 0;
-  fixture.deps.getLastToolAudit = () => ({
-    offered: ["read", "unsupported"],
-    available: ["read"],
-    omitted: [{ name: "unsupported", reason: "Schema contains unsupported union" }],
-  });
-  fixture.deps.acquireRuntimeForSession = () => ({
-    value: {
-      ...bundle,
-      runtime: {
-        ...bundle.runtime,
-        snapshot: async () => ({
-          bindings: 1,
-          permissionMode: "default",
-          metrics: {},
-          processes: [{ key: "runtime-key", mcpHttp: false, omittedTools: [{ name: "live-only", reason: "Agent did not advertise MCP over HTTP" }] }],
-        }),
-      },
-    },
-    release: () => { released++; },
-  });
-  await fixture.handler("tools", fixture.ctx);
-  const report = fixture.notices[0]!;
-  assert.match(report, /Offered:\s+2/);
-  assert.match(report, /Available:\s+read/);
-  assert.match(report, /unsupported:\s+Schema contains unsupported union/);
-  assert.match(report, /MCP over HTTP:\s+no/);
-  assert.match(report, /Omitted live-only:\s+Agent did not advertise MCP over HTTP/);
-  assert.doesNotMatch(report, /"omitted"|omittedTools|\[|\{/);
-  assert.equal(released, 1);
-  fs.rmSync(fixture.state, { recursive: true, force: true });
-});
-
-test("diagnostics prints count, median and max per stage without empty statistics", async () => {
-  const fixture = makeHandler();
-  const diagnostics = new Diagnostics(path.join(fixture.state, "diagnostics.json"));
-  fixture.deps.diagnostics = diagnostics;
-  await fixture.handler("diagnostics", fixture.ctx);
-  assert.match(fixture.notices[0]!, /Collection:\s+off/);
-  assert.doesNotMatch(fixture.notices[0]!, /Samples|stages|\{|\}/);
-  diagnostics.configure(true);
-  diagnostics.record("history.compare", 1.25);
-  diagnostics.record("history.compare", 3.5);
-  await fixture.handler("diagnostics", fixture.ctx);
-  const report = fixture.notices[1]!;
-  assert.match(report, /Collection:\s+on/);
-  assert.match(report, /Samples:\s+2 \/ 128/);
-  assert.match(report, /history\.compare:\s+count 2 · median 3\.5 ms · max 3\.5 ms/);
-  assert.doesNotMatch(report, /"medianMs"|"samples"/);
   fs.rmSync(fixture.state, { recursive: true, force: true });
 });
 
@@ -464,7 +479,7 @@ test("argument completions list every subcommand and stay in sync with the handl
   const all = items("");
   const labels = all.map(item => item.label);
   assert.deepEqual(labels,
-    ["status", "account", "login", "logout", "tools", "usage", "quota", "context", "cleanup", "diagnostics", "debug", "native-tools", "permissions", "refresh"]);
+    ["status", "account", "login", "logout", "usage", "context", "cleanup", "native-tools", "permissions", "refresh"]);
   for (const item of all) {
     assert.equal(item.value, `${item.label} `);
     assert.ok(item.description.length > 0);
@@ -490,15 +505,17 @@ test("argument completions filter by prefix, ignore case, and chain fixed values
   assert.equal(items("CLEANUP b")[0]!.value, "cleanup balanced ");
   assert.deepEqual(items("usage a").map(item => item.label), ["auto"]);
   assert.equal(items("usage a")[0]!.value, "usage auto ");
-  assert.deepEqual(items("diagnostics res").map(item => item.label), ["reset"]);
-  assert.deepEqual(items("debug o").map(item => item.label), ["on", "off"]);
   assert.deepEqual(items("native-tools p").map(item => item.label), ["prefer"]);
   assert.deepEqual(items("permissions auto-e").map(item => item.label), ["auto-edit"]);
+  assert.deepEqual(items("permissions f").map(item => item.label), ["follow"]);
   assert.deepEqual(items("permissions y").map(item => item.label), ["yolo"]);
   assert.equal(complete("usage x"), null);
   assert.equal(complete("status x"), null);
   assert.equal(complete("refresh "), null);
   assert.equal(complete("login x"), null);
+  for (const removed of ["quota", "tools", "diagnostics", "debug"]) {
+    assert.equal(complete(removed), null, `${removed} is no longer a subcommand`);
+  }
   assert.equal(complete(" "), null);
 });
 

@@ -84,6 +84,7 @@ async function runTurn(runtime: any, model: any, messages: any[], tools: any[], 
 
 async function waitForUsage(sessionId: string): Promise<unknown> {
   const file = conversationDbPath(resolveAntigravityAcpDirectory(), sessionId);
+  if (!file) return { file: undefined, batch: undefined };
   for (let attempt = 0; attempt < 20; attempt++) {
     const maxIdx = peekMaxModelStepIdx(file);
     if (maxIdx >= 0) return { file, batch: readModelStepsAfter(file, -1) };

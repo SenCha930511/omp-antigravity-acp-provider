@@ -7,6 +7,10 @@ import { execFileSync } from "node:child_process";
 import { registerOmpAdapter } from "../extension/index.ts";
 import { TierConnection, Type } from "../extension/runtime.mjs";
 if (!process.argv.includes("--live")) throw new Error("Pass --live; uses Flash quota and creates an ACP session.");
+// Fresh state needs its own selected launch plan, not the real profile's
+// generated wrapper interpreted as an unrelated external override.
+const previousAcpBin = process.env.AGY_ACP_BIN;
+delete process.env.AGY_ACP_BIN;
 const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-continuity-live-"));
 await fs.copyFile(path.join(os.homedir(), ".omp/agent/antigravity-acp-provider/models-cache.json"), path.join(state, "models-cache.json"));
 const previousIdle = process.env.OMP_ACP_IDLE_TIMEOUT_MS;
@@ -28,7 +32,28 @@ const messages: any[] = [
 ];
 const tools = [{ name: "read", description: "Read only synthetic probe://fixture; no real filesystem access.", parameters: Type.Object({ path: Type.String() }) }];
 function rssKiB() {
-  const rows = execFileSync("ps", ["-axo", "pid=,ppid=,rss="], { encoding: "utf8" }).trim().split("\n").map(line => line.trim().split(/\s+/).map(Number));
+  let rows: Array<[number, number, number]>;
+  if (process.platform === "win32") {
+    const powershell = path.join(process.env.SystemRoot?.trim() || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const output = execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+      "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize | ConvertTo-Json -Compress"], {
+      encoding: "utf8", timeout: 15_000, windowsHide: true,
+    }).trim();
+    const parsed: unknown = JSON.parse(output || "[]");
+    const records = parsed === null ? [] : Array.isArray(parsed) ? parsed : [parsed];
+    rows = records.map(record => {
+      if (!record || typeof record !== "object") throw new Error("Invalid Windows process record");
+      const pid = Reflect.get(record, "ProcessId");
+      const parent = Reflect.get(record, "ParentProcessId");
+      const bytes = Reflect.get(record, "WorkingSetSize");
+      if (![pid, parent, bytes].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+        throw new Error("Invalid Windows process metrics");
+      }
+      return [pid, parent, bytes / 1024] as [number, number, number];
+    });
+  } else {
+    rows = execFileSync("ps", ["-axo", "pid=,ppid=,rss="], { encoding: "utf8" }).trim().split("\n").map(line => line.trim().split(/\s+/).map(Number));
+  }
   const pids = new Set([...seen].map(c => c.process.pid));
   for (let pass = 0; pass < 8; pass++) for (const [pid, parent] of rows) if (pids.has(parent)) pids.add(pid);
   return rows.filter(([pid]) => pids.has(pid)).reduce((sum, row) => sum + row[2], 0);
@@ -61,7 +86,7 @@ try {
     const answer = final?.content.filter((block: any) => block.type === "text").map((block: any) => block.text).join("");
     assert.ok(answer?.includes(marker), "Early context lost");
     assert.ok(answer.includes(`FIXTURE_${turn}`)); assert.ok(calls > 0);
-    assert.ok(final.usage.input > 0, "Real usage was not attached");
+    assert.ok(final.usage.totalTokens > 0, "Real usage was not attached");
     assert.ok(!answer.includes("Session Usage"), "Usage command leaked into answer");
     const activeMiB = rssKiB() / 1024;
     await new Promise(resolve => setTimeout(resolve, 2200));
@@ -72,6 +97,8 @@ try {
   }
   assert.equal(sessions.size, 1, "Idle resume unexpectedly created another server session");
 } finally {
+  if (previousAcpBin === undefined) delete process.env.AGY_ACP_BIN;
+  else process.env.AGY_ACP_BIN = previousAcpBin;
   await hooks.get("session_shutdown")?.({}, {});
   TierConnection.prototype.prompt = original;
   if (previousIdle === undefined) delete process.env.OMP_ACP_IDLE_TIMEOUT_MS; else process.env.OMP_ACP_IDLE_TIMEOUT_MS = previousIdle;

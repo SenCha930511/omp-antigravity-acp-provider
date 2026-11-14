@@ -1,10 +1,12 @@
 // Offline auth command integration test; requires Bun but never launches ACP,
-// never touches the real ~/.gemini directory, OMP state or the macOS keychain.
+// never touches the real ~/.gemini directory, OMP state, the macOS keychain or
+// the Linux Secret Service keyring.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { registerOmpAdapter, keychain, logoutFollow } from "../extension/index.ts";
+import { secretService } from "../extension/auth-sync.ts";
 import { AntigravityRuntime } from "../extension/runtime.mjs";
 import { SessionRuntimePool } from "../extension/runtime-pool.ts";
 
@@ -18,16 +20,25 @@ process.env.GEMINI_HOME = geminiHome;
 process.env.AGY_ACP_BIN = process.execPath;
 const originalPresent = keychain.present;
 const originalRemove = keychain.remove;
+const originalSecretPresent = secretService.present;
+const originalSecretRemove = secretService.remove;
+const originalSecretApplicable = secretService.applicable;
 const originalLoginGoogle = AntigravityRuntime.prototype.loginGoogle;
 const originalPoolValues = SessionRuntimePool.prototype.values;
 const originalDelayMs = logoutFollow.delayMs;
 const originalRetryMs = logoutFollow.retryMs;
+const originalRemovalRetryMs = logoutFollow.removalRetryMs;
 logoutFollow.delayMs = 10;
 logoutFollow.retryMs = 20;
 const keychainCalls: string[] = [];
 const hooks = new Map<string, Function>();
 let command: any;
 try {
+  // This fixture exercises the macOS keychain path on every host; keep the
+  // Linux Secret Service probe away from the real user keyring.
+  secretService.present = async () => undefined;
+  secretService.remove = async () => undefined;
+  secretService.applicable = false;
   let keychainEntry = true;
   let flushOnce = false;
   keychain.present = async () => { keychainCalls.push("present"); return keychainEntry; };
@@ -91,7 +102,7 @@ try {
   assert.match(account, /OMP login marker:\s+present · non-secret managed marker · authorized 2009-02-13T23:31:30\.123Z · account marker@example\.com/);
   assert.match(account, /OMP auth source:\s+local store \(oauth marker\)/);
   assert.match(account, /Saved ACP sessions:\s+1/);
-  assert.match(account, /Permission:\s+yolo/);
+  assert.match(account, /Permission:\s+default/);
   assert.match(account, /Active sessions:\s+0/);
   await assert.rejects(command.handler("account extra", context), /Usage:/);
 
@@ -244,14 +255,40 @@ try {
   SessionRuntimePool.prototype.values = originalPoolValues;
   await settle(120);
   assert.equal(followNotices().length, 2, "The deferred followed logout must run once the pool is idle");
+
+  // Linux Secret Service: the same command logout clears the system keyring
+  // entry together with the macOS keychain and the OMP marker, and the
+  // confirmation names it without exposing any token.
+  keychainEntry = true;
+  let keyringEntry = true, keyringRemovals = 0;
+  secretService.applicable = true;
+  secretService.present = async () => keyringEntry;
+  secretService.remove = async () => { keyringRemovals++; keyringEntry = false; return true; };
+  logoutFollow.removalRetryMs = 0;
+  storeMarker();
+  await command.handler("logout", context);
+  const keyringNotice = notices.pop();
+  assert.match(keyringNotice,
+    /logged out — Google credentials, saved ACP sessions, the macOS keychain entry, the system keyring entry and the OMP marker record cleared/);
+  assert.equal(keychainEntry, false);
+  assert.equal(keyringEntry, false);
+  assert.equal(keyringRemovals, 1, "The keyring entry is cleared exactly once");
+  assert.doesNotMatch(keyringNotice, /secret-ref|refresh_token|token=/);
+  assert.equal(registrations[registrations.length - 1], false);
+  await settle(80);
+  assert.equal(followNotices().length, 2, "Clearing the keyring must not schedule a followed logout");
   console.log("Account view, login dialog mapping, logout isolation, busy guard and OMP-logout following: PASS");
 } finally {
   keychain.present = originalPresent;
   keychain.remove = originalRemove;
+  secretService.present = originalSecretPresent;
+  secretService.remove = originalSecretRemove;
+  secretService.applicable = originalSecretApplicable;
   AntigravityRuntime.prototype.loginGoogle = originalLoginGoogle;
   SessionRuntimePool.prototype.values = originalPoolValues;
   logoutFollow.delayMs = originalDelayMs;
   logoutFollow.retryMs = originalRetryMs;
+  logoutFollow.removalRetryMs = originalRemovalRetryMs;
   await hooks.get("session_shutdown")?.({}, {});
   await fs.rm(stateDir, { recursive: true, force: true });
   await fs.rm(geminiHome, { recursive: true, force: true });

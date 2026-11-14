@@ -3,85 +3,416 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { installSessionRouting, sessionRoutingRequest, supportsSessionRouting } from "../extension/tool-routing.ts";
+import {
+  mcpHttpAvailable,
+  normalizeInitializeResponse,
+  sessionRoutingRequest,
+  supportsSessionRouting,
+  type InitializeMetadata,
+  type SessionRpcRequest,
+} from "../extension/tool-routing.ts";
+import { TierConnection } from "../extension/tier-connection.ts";
 import { loadNativeToolMode, saveNativeToolMode } from "../extension/tool-policy.ts";
+import { AntigravityRuntime } from "../extension/runtime.mjs";
+import type { AntigravityAcpConnection } from "../extension/runtime/acp/connection.ts";
+import { bridgeExecutionSchema, PiMcpBridge } from "../extension/runtime/tools/bridge.ts";
+import type { Model, Tool } from "@earendil-works/pi-ai";
 
-const initialize = { agentInfo: { name: "antigravity-acp", version: "1.4.1" },
-  agentCapabilities: { _meta: { antigravity: { systemPrompt: { append: true } } } } };
-const request = { cwd: "/fixture", mcpServers: [{ name: "pi-bridge", type: "http", url: "http://127.0.0.1:1" }] };
-
-test("routing uses advertised system extension and eagerly loads only the bridge", () => {
-  const result = sessionRoutingRequest(request, initialize, "prefer");
-  const meta = result._meta.antigravity;
-  assert.match(meta.systemPrompt.append, /Supplied OMP tools/);
-  assert.match(meta.systemPrompt.append, /explicit approval/);
-  assert.deepEqual(meta.eagerMcpServers, ["pi-bridge"]);
-  assert.deepEqual(meta.disabledTools, []);
-  assert.equal(meta.enabledTools, undefined);
-  assert.equal((request as any)._meta, undefined);
+const wireTool = (name: string, parameters: Record<string, unknown>): Tool =>
+  ({ name, label: name, description: "", parameters }) as Tool;
+const contextControlTools = () => [
+  wireTool("context_notes", {
+    type: "object",
+    properties: { i: { type: "string" }, text: { type: "string" } },
+    additionalProperties: false,
+    required: ["i"],
+  }),
+  wireTool("new_context", {
+    type: "object",
+    properties: { i: { type: "string" } },
+    additionalProperties: false,
+    required: ["i"],
+  }),
+];
+const bridgeWith = (tools: Tool[]) => new PiMcpBridge({
+  tools,
+  onCall: async () => { throw new Error("Projection-only test must not execute a tool"); },
 });
 
-test("strict mode filters built-ins but retains MCP configuration and existing metadata", () => {
-  const original = { ...request, _meta: { other: 1, antigravity: { extra: 2, systemPrompt: { append: "Existing instructions" }, eagerMcpServers: ["other-server"] } } };
-  const result = sessionRoutingRequest(original, initialize, "disabled");
-  assert.deepEqual(result._meta.antigravity.enabledTools, []);
-  assert.equal(result._meta.other, 1);
-  assert.equal(result._meta.antigravity.extra, 2);
-  assert.match(result._meta.antigravity.systemPrompt.append, /^Existing instructions/);
-  assert.deepEqual(result._meta.antigravity.eagerMcpServers, ["other-server", "pi-bridge"]);
+const instructions = "# OMP session instructions\n\nCORE_POLICY\n\nDelegate separable work when requested.";
+const initialize: InitializeMetadata = {
+  agentInfo: { name: "antigravity-acp", version: "1.5.8" },
+  agentCapabilities: {
+    mcpCapabilities: { http: true },
+    _meta: { antigravity: { systemPrompt: { append: true } } },
+  },
+};
+const request: SessionRpcRequest = {
+  cwd: "/fixture",
+  mcpServers: [{ name: "pi-bridge", type: "http", url: "http://127.0.0.1:1" }],
+};
+
+function appendOf(routed: SessionRpcRequest): string {
+  const append = routed._meta?.antigravity?.systemPrompt?.append;
+  assert.ok(typeof append === "string", "the routed request must carry a string system append");
+  return append;
+}
+
+test("session routing carries the complete OMP instruction and task mapping once", () => {
+  const result = sessionRoutingRequest(request, initialize, "prefer", instructions);
+  const append = appendOf(result);
+  assert.ok(append.startsWith(instructions), "the complete native instruction must lead the append text");
+  assert.match(append, /OMP tools exposed by the authenticated pi-bridge MCP server use pi_ names/);
+  assert.match(append, /guidance about task maps to pi_task/);
+  assert.match(append, /follow the supplied tool schema for agent selection/);
+  assert.match(append, /supplied wait mechanism for completion notifications/);
+  assert.match(append, /results are not OMP tool results/);
+  assert.doesNotMatch(append, /Supplied OMP tools/, "the legacy routing paragraph must not be duplicated");
+  assert.doesNotMatch(append, /explicit approval/, "native tools are not all gated on explicit approval");
+  assert.doesNotMatch(append, /pi_read|pi_write/, "the append channel must not enumerate projected tools");
+  assert.doesNotMatch(append, /no tools may be called/, "a main session may call tools");
+  assert.deepEqual(result._meta?.antigravity?.eagerMcpServers, ["pi-bridge"]);
+  assert.deepEqual(result._meta?.antigravity?.disabledTools, []);
+  assert.equal(result._meta?.antigravity?.enabledTools, undefined);
+  assert.equal(request._meta, undefined, "the caller's request must not be mutated");
+});
+
+test("main guidance maps only actually projected context tools without changing delegation", () => {
+  const bridge = bridgeWith(contextControlTools());
+  const append = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions, "main", true, bridge.projectedToolNames));
+  assert.match(append, /guidance about context_notes maps to pi_context_notes/);
+  assert.match(append, /guidance about new_context maps to pi_new_context/);
+  assert.equal(append.match(/pi_task/gu)?.length, 2,
+    "the existing task/delegation guidance must remain unchanged");
+  assert.equal(append.match(/Delegate separable work when requested\./gu)?.length, 1,
+    "context-note routing must not add general delegation instructions");
+
+  const onlyNotes = bridgeWith(contextControlTools().slice(0, 1));
+  const notesAppend = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions, "main", true, onlyNotes.projectedToolNames));
+  assert.match(notesAppend, /pi_context_notes/);
+  assert.doesNotMatch(notesAppend, /pi_new_context/);
+  const onlyNew = bridgeWith(contextControlTools().slice(1));
+  const newAppend = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions, "main", true, onlyNew.projectedToolNames));
+  assert.doesNotMatch(newAppend, /pi_context_notes/);
+  assert.match(newAppend, /pi_new_context/);
+
+  const noHttp: InitializeMetadata = {
+    ...initialize,
+    agentCapabilities: { ...initialize.agentCapabilities, mcpCapabilities: { http: false } },
+  };
+  const unavailable = [
+    appendOf(sessionRoutingRequest(request, noHttp, "prefer", instructions, "main", true, bridge.projectedToolNames)),
+    appendOf(sessionRoutingRequest({ cwd: "/fixture" }, initialize, "prefer", instructions, "main", true, bridge.projectedToolNames)),
+    appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions)),
+    appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions, "main", true, bridgeWith([]).projectedToolNames)),
+  ];
+  for (const text of unavailable) {
+    assert.doesNotMatch(text, /pi_context_notes|pi_new_context/);
+  }
+});
+
+test("intent compatibility requires the exact control-tool host shapes", () => {
+  const [notes, fresh] = contextControlTools();
+  const notesExecution = bridgeExecutionSchema(notes) as unknown as Record<string, unknown>;
+  const freshExecution = bridgeExecutionSchema(fresh) as unknown as Record<string, unknown>;
+  assert.deepEqual(notesExecution.required, []);
+  assert.deepEqual(freshExecution.required, []);
+  assert.deepEqual(notesExecution.properties, { i: { type: "string" }, text: { type: "string" } });
+  assert.deepEqual(freshExecution.properties, { i: { type: "string" } });
+
+  const preservedRequired = wireTool("context_notes", {
+    type: "object",
+    properties: { i: { type: "string" }, text: { type: "string" } },
+    additionalProperties: false,
+    required: ["i", "text"],
+  });
+  assert.deepEqual((bridgeExecutionSchema(preservedRequired) as unknown as Record<string, unknown>).required, ["text"]);
+
+  const customNotes = wireTool("context_notes", {
+    type: "object",
+    properties: { i: { type: "string" }, text: { type: "string" }, custom: { type: "string" } },
+    additionalProperties: false,
+    required: ["i", "custom"],
+  });
+  assert.equal(bridgeExecutionSchema(customNotes), customNotes.parameters);
+  const customFresh = wireTool("new_context", {
+    type: "object",
+    properties: { i: { type: "string" } },
+    additionalProperties: true,
+    required: ["i"],
+  });
+  assert.equal(bridgeExecutionSchema(customFresh), customFresh.parameters);
+  const unrelated = wireTool("unrelated", {
+    type: "object",
+    properties: { i: { type: "string" } },
+    additionalProperties: false,
+    required: ["i"],
+  });
+  assert.equal(bridgeExecutionSchema(unrelated), unrelated.parameters);
+  assert.deepEqual((unrelated.parameters as unknown as Record<string, unknown>).required, ["i"]);
+});
+
+test("an ephemeral side session keeps the full instruction but never advertises tool calls", () => {
+  const append = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions, "ephemeral"));
+  assert.ok(append.startsWith(instructions), "the complete native instruction still leads the append text");
+  assert.match(append, /no tools may be called in this side turn/);
+  assert.match(append, /tool calls are discarded without execution/);
+  assert.doesNotMatch(append, /maps to pi_task/);
+  assert.doesNotMatch(append, /use pi_ names|pi_read|pi_write|supplied tool schema/);
+  assert.doesNotMatch(append, /supplied wait mechanism/);
+});
+
+test("capability absence cannot advertise pi_ tools in the append channel", () => {
+  const noHttp: InitializeMetadata = {
+    ...initialize,
+    agentCapabilities: { ...initialize.agentCapabilities, mcpCapabilities: { http: false } },
+  };
+  const append = appendOf(sessionRoutingRequest(request, noHttp, "prefer", instructions));
+  assert.match(append, /pi-bridge MCP server is not available/);
+  assert.match(append, /Do not claim an OMP tool is available/);
+  assert.doesNotMatch(append, /maps to pi_task/);
+  assert.doesNotMatch(append, /pi_[a-z]/u);
+  assert.equal(mcpHttpAvailable(noHttp), false);
+  assert.equal(mcpHttpAvailable(initialize), true);
+  const noBridge = sessionRoutingRequest({ cwd: "/fixture" }, initialize, "prefer", instructions);
+  assert.match(appendOf(noBridge), /pi-bridge MCP server is not available/);
+  assert.doesNotMatch(appendOf(noBridge), /maps to pi_task/);
+  const disabled = appendOf(sessionRoutingRequest(request, noHttp, "disabled", instructions));
+  assert.doesNotMatch(disabled, /use only OMP pi_\* tools/u);
+  assert.match(disabled, /pi-bridge MCP server is not available/u);
+});
+
+test("official 1.5.3 omission of MCP HTTP is normalized before advertising", () => {
+  const official153: InitializeMetadata = {
+    agentInfo: { name: "Antigravity ACP Server", version: "1.5.3" },
+    agentCapabilities: { _meta: { antigravity: { systemPrompt: { append: true } } } },
+  };
+  assert.equal(normalizeInitializeResponse(official153).agentCapabilities?.mcpCapabilities?.http, true);
+  assert.equal(mcpHttpAvailable(official153), true);
+  const append = appendOf(sessionRoutingRequest(request, official153, "prefer", instructions));
+  assert.match(append, /maps to pi_task/);
+});
+
+test("disabled mode filters built-ins but retains MCP configuration and existing metadata", () => {
+  const original: SessionRpcRequest = {
+    ...request,
+    _meta: { other: 1, antigravity: { extra: 2, systemPrompt: { append: "Existing instructions" }, eagerMcpServers: ["other-server"] } },
+  };
+  const result = sessionRoutingRequest(original, initialize, "disabled", instructions);
+  assert.deepEqual(result._meta?.antigravity?.enabledTools, []);
+  assert.equal(result._meta?.other, 1);
+  assert.equal(result._meta?.antigravity?.extra, 2);
+  const append = appendOf(result);
+  assert.doesNotMatch(append, /^Existing instructions/);
+  assert.ok(append.includes(instructions));
+  assert.match(append, /native tools are disabled/);
+  assert.deepEqual(result._meta?.antigravity?.eagerMcpServers, ["other-server", "pi-bridge"]);
   assert.deepEqual(result.mcpServers, request.mcpServers);
-  assert.equal(original._meta.antigravity.systemPrompt.append, "Existing instructions");
+  assert.equal(original._meta?.antigravity?.systemPrompt?.append, "Existing instructions");
 });
 
 test("official ACP 1.5.3 display name applies disabled routing", () => {
-  const official153 = { agentInfo: { name: "Antigravity ACP Server", version: "1.5.3" },
-    agentCapabilities: { _meta: { antigravity: { systemPrompt: { append: true } } } } };
+  const official153: InitializeMetadata = {
+    agentInfo: { name: "Antigravity ACP Server", version: "1.5.3" },
+    agentCapabilities: { _meta: { antigravity: { systemPrompt: { append: true } } } },
+  };
   assert.equal(supportsSessionRouting(official153), true);
-  const result = sessionRoutingRequest(request, official153, "disabled");
-  assert.deepEqual(result._meta.antigravity.enabledTools, []);
-  assert.match(result._meta.antigravity.systemPrompt.append, /native tools are disabled/);
+  const result = sessionRoutingRequest(request, official153, "disabled", instructions);
+  assert.deepEqual(result._meta?.antigravity?.enabledTools, []);
+  assert.match(appendOf(result), /native tools are disabled/);
 });
 
 test("prefer mode explicitly clears an inherited strict allowlist", () => {
-  const result = sessionRoutingRequest({ ...request, _meta: { antigravity: { enabledTools: [] } } }, initialize, "prefer");
-  const json = JSON.parse(JSON.stringify(result));
-  assert.equal(json._meta.antigravity.enabledTools, undefined);
-  assert.deepEqual(json._meta.antigravity.disabledTools, []);
+  const result = sessionRoutingRequest({ ...request, _meta: { antigravity: { enabledTools: [] } } }, initialize, "prefer", instructions);
+  const json = JSON.parse(JSON.stringify(result)) as SessionRpcRequest;
+  assert.equal(json._meta?.antigravity?.enabledTools, undefined);
+  assert.deepEqual(json._meta?.antigravity?.disabledTools, []);
 });
 
-test("unknown runtimes fall back in prefer mode and fail closed in disabled mode", () => {
-  for (const info of [ {}, { ...initialize, agentInfo: { name: "other", version: "1.4.1" } },
+test("unknown runtimes keep the legacy prompt in prefer mode and fail closed in disabled mode", () => {
+  const unknownRuntimes: InitializeMetadata[] = [
+    {},
+    { ...initialize, agentInfo: { name: "other", version: "1.4.1" } },
     { ...initialize, agentInfo: { name: "antigravity-acp", version: "1.3.9" } },
     { ...initialize, agentInfo: { name: "Antigravity ACP Server", version: "1.3.9" } },
     { ...initialize, agentCapabilities: {} },
-    { ...initialize, agentInfo: { name: "antigravity-acp", version: "2.0.0" } } ]) {
+    { ...initialize, agentInfo: { name: "antigravity-acp", version: "2.0.0" } },
+  ];
+  for (const info of unknownRuntimes) {
     assert.equal(supportsSessionRouting(info), false);
-    assert.equal(sessionRoutingRequest(request, info, "prefer"), request);
-    assert.throws(() => sessionRoutingRequest(request, info, "disabled"), /refusing to weaken/);
+    assert.equal(sessionRoutingRequest(request, info, "prefer", instructions), request,
+      "an unsupported runtime must keep the instructions-resource fallback");
+    assert.throws(() => sessionRoutingRequest(request, info, "disabled", instructions), /refusing to weaken/);
   }
 });
 
-test("all session creation and restoration RPCs receive the same policy", async () => {
-  const calls: any[] = [];
-  const rpc = Object.fromEntries(["newSession", "loadSession", "resumeSession"].map(name => [name, async (r: any) => { calls.push({ name, request: r }); return { sessionId: "fixture" }; }]));
-  installSessionRouting(rpc, Promise.resolve(initialize), "disabled");
-  for (const name of ["newSession", "loadSession", "resumeSession"]) {
-    assert.equal((await rpc[name]({ ...request, sessionId: "fixture" })).sessionId, "fixture");
-  }
-  assert.equal(calls.length, 3);
-  for (const call of calls) {
-    assert.deepEqual(call.request._meta.antigravity.enabledTools, []);
-    assert.deepEqual(call.request._meta.antigravity.eagerMcpServers, ["pi-bridge"]);
-    assert.match(call.request._meta.antigravity.systemPrompt.append, /Supplied OMP tools/);
+interface RoutedMeta {
+  antigravity?: {
+    systemPrompt?: { append?: string };
+    eagerMcpServers?: string[];
+    enabledTools?: string[];
+    disabledTools?: string[];
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+function metaOf(args: unknown[]): RoutedMeta {
+  const value = args[args.length - 1];
+  assert.ok(typeof value === "object" && value !== null, "the base session method must receive the routed _meta");
+  return value as RoutedMeta;
+}
+
+test("new, load and resume requests all carry the complete instruction once", () => {
+  const requests: SessionRpcRequest[] = [
+    { ...request },
+    { sessionId: "fixture", ...request },
+    { sessionId: "fixture", ...request },
+  ];
+  for (const current of requests) {
+    const routed = sessionRoutingRequest(current, initialize, "disabled", instructions);
+    assert.deepEqual(routed._meta?.antigravity?.enabledTools, []);
+    assert.deepEqual(routed._meta?.antigravity?.eagerMcpServers, ["pi-bridge"]);
+    const append = appendOf(routed);
+    assert.ok(append.includes(instructions), "the complete instruction must be carried");
+    assert.match(append, /maps to pi_task/);
+    assert.match(append, /native tools are disabled/);
+    assert.equal(append.match(/CORE_POLICY/gu)?.length, 1, "routing must not duplicate instructions");
+    assert.equal(current._meta, undefined, "the caller's request must not be mutated");
   }
 });
 
-test("strict compatibility failure never dispatches a session RPC", async () => {
-  let count = 0;
-  const rpc = Object.fromEntries(["newSession", "loadSession", "resumeSession"].map(name => [name, async () => { count++; }]));
-  installSessionRouting(rpc, Promise.resolve({}), "disabled");
-  await assert.rejects(rpc.newSession(request), /refusing to weaken/);
-  assert.equal(count, 0);
+test("disabled routing redirects the host prompt before the complete OMP text", () => {
+  const original: SessionRpcRequest = {
+    ...request,
+    _meta: { antigravity: { extra: "kept", systemPrompt: { append: "Existing host instructions" } } },
+  };
+  const routed = sessionRoutingRequest(original, initialize, "disabled", instructions);
+  const append = appendOf(routed);
+  assert.ok(!append.includes("Existing host instructions"), "inherited append content must not be replayed");
+  assert.ok(append.indexOf("Follow only the OMP instructions below.") < append.indexOf("CORE_POLICY"),
+    "the override must precede the unchanged OMP instruction");
+  assert.match(append, /use only OMP pi_\* tools and pi_task for reads, writes, searches, commands and subagent delegation/);
+  assert.ok(append.indexOf("CORE_POLICY") < append.indexOf("OMP tools exposed by the authenticated pi-bridge"),
+    "existing tool guidance stays after the instruction");
+  assert.equal(routed._meta?.antigravity?.extra, "kept");
+  assert.equal(original._meta?.antigravity?.systemPrompt?.append, "Existing host instructions");
+
+  const preferred = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions));
+  assert.ok(preferred.startsWith(instructions), "prefer keeps the unchanged OMP instruction first");
+  assert.doesNotMatch(preferred, /Follow only the OMP instructions below/);
+});
+
+test("an ephemeral or tool-less session gets only the short ACP override", () => {
+  const ephemeral = sessionRoutingRequest(request, initialize, "disabled", instructions, "ephemeral");
+  const ephemeralAppend = appendOf(ephemeral);
+  assert.ok(ephemeralAppend.startsWith("Follow only the OMP instructions below."));
+  assert.doesNotMatch(ephemeralAppend, /pi_\*|pi_task|subagent delegation/);
+  assert.match(ephemeralAppend, /no tools may be called in this side turn/);
+  assert.match(ephemeralAppend, /native tools are disabled/);
+  assert.ok(ephemeralAppend.indexOf("no tools may be called") < ephemeralAppend.indexOf("native tools are disabled"),
+    "the side-turn guidance stays before the native-disabled warning");
+  assert.deepEqual(ephemeral._meta?.antigravity?.enabledTools, [], "the protocol filter stays exact");
+  assert.deepEqual(ephemeral._meta?.antigravity?.eagerMcpServers, ["pi-bridge"],
+    "the shadow still eagerly connects the catalog bridge");
+
+  const toolLess = sessionRoutingRequest(request, initialize, "disabled", instructions, "main", false);
+  const toolLessAppend = appendOf(toolLess);
+  assert.ok(toolLessAppend.startsWith("Follow only the OMP instructions below."));
+  assert.doesNotMatch(toolLessAppend, /pi_\*|pi_task|subagent delegation/);
+  assert.match(toolLessAppend, /no OMP tools are exposed/);
+  assert.deepEqual(toolLess._meta?.antigravity?.eagerMcpServers, [],
+    "an externally registered empty bridge must not be eagerly connected");
+  assert.deepEqual(toolLess._meta?.antigravity?.enabledTools, []);
+});
+
+interface BaseSessionMethods {
+  initialize: () => Promise<InitializeMetadata>;
+  newSession: (...args: unknown[]) => Promise<{ sessionId: string }>;
+  resumeSession: (...args: unknown[]) => Promise<Record<string, unknown>>;
+  loadSession: (...args: unknown[]) => Promise<Record<string, unknown>>;
+}
+
+test("TierConnection hands each route to the base session method as _meta", async () => {
+  const parent: BaseSessionMethods = Object.getPrototypeOf(TierConnection.prototype);
+  const original = {
+    initialize: parent.initialize, newSession: parent.newSession,
+    resumeSession: parent.resumeSession, loadSession: parent.loadSession,
+  };
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  let advertised: InitializeMetadata = initialize;
+  parent.initialize = async () => advertised;
+  parent.newSession = async (...args) => { calls.push({ method: "newSession", args }); return { sessionId: "routed-new" }; };
+  parent.resumeSession = async (...args) => { calls.push({ method: "resumeSession", args }); return { availableCommands: [] }; };
+  parent.loadSession = async (...args) => { calls.push({ method: "loadSession", args }); return { availableCommands: [] }; };
+  const disabled = new TierConnection({
+    cwd: process.cwd(), command: process.execPath, args: ["-e", "setTimeout(() => {}, 1000)"],
+    handlers: {}, ompNativeTools: "disabled",
+  });
+  const prefer = new TierConnection({
+    cwd: process.cwd(), command: process.execPath, args: ["-e", "setTimeout(() => {}, 1000)"],
+    handlers: {}, ompNativeTools: "prefer",
+  });
+  try {
+    disabled.setOmpSystemInstructions(instructions);
+    disabled.setOmpProjectedToolNames(bridgeWith(contextControlTools()).projectedToolNames);
+    const mcpServers = [{ name: "pi-bridge", type: "http" as const, url: "http://127.0.0.1:1" }];
+    await disabled.newSession("/fixture", undefined, mcpServers, { custom: "keep" });
+    assert.equal(disabled.toolRouting?.channel, "system-append");
+    const created = calls[0]!;
+    assert.equal(created.method, "newSession");
+    assert.equal(created.args[0], "/fixture");
+    assert.equal(created.args[1], undefined);
+    assert.deepEqual(created.args[2], mcpServers);
+    const meta = metaOf(created.args);
+    assert.equal(meta.custom, "keep", "caller metadata survives routing");
+    const append = meta.antigravity?.systemPrompt?.append;
+    assert.ok(typeof append === "string", "the routed request must carry a string system append");
+    assert.ok(append.startsWith("Follow only the OMP instructions below."));
+    assert.match(append, /use only OMP pi_\* tools and pi_task/);
+    assert.match(append, /pi_context_notes/);
+    assert.match(append, /pi_new_context/);
+    assert.equal(append.match(/CORE_POLICY/gu)?.length, 1, "routing must not duplicate the instruction");
+    assert.deepEqual(meta.antigravity?.enabledTools, []);
+    assert.deepEqual(meta.antigravity?.eagerMcpServers, ["pi-bridge"]);
+
+    disabled.setOmpSessionKind("ephemeral");
+    await disabled.resumeSession("saved", "/fixture", mcpServers);
+    assert.equal(disabled.toolRouting?.channel, "system-append");
+    const resumed = calls[1]!;
+    assert.equal(resumed.method, "resumeSession");
+    assert.equal(resumed.args[0], "saved");
+    assert.deepEqual(resumed.args[2], mcpServers);
+    assert.equal(resumed.args[3], undefined, "the signal slot must stay positional");
+    const resumedAppend = metaOf(resumed.args).antigravity?.systemPrompt?.append;
+    assert.ok(typeof resumedAppend === "string");
+    assert.ok(resumedAppend.startsWith("Follow only the OMP instructions below."));
+    assert.doesNotMatch(resumedAppend, /pi_task|subagent delegation/);
+    assert.match(resumedAppend, /no tools may be called in this side turn/);
+
+    await disabled.loadSession("saved", "/fixture", mcpServers);
+    assert.equal(calls[2]!.method, "loadSession");
+    assert.equal(calls[2]!.args[0], "saved");
+    assert.equal(calls[2]!.args[3], undefined, "the signal slot must stay positional");
+    assert.match(metaOf(calls[2]!.args).antigravity?.systemPrompt?.append ?? "", /CORE_POLICY/);
+
+    advertised = { agentCapabilities: { mcpCapabilities: { http: true } } };
+    await assert.rejects(disabled.newSession("/fixture", undefined, mcpServers), /refusing to weaken/);
+    assert.equal(calls.length, 3, "an unsupported disabled route must never reach the base method");
+
+    prefer.setOmpSystemInstructions(instructions);
+    await prefer.newSession("/fixture", undefined, [], { custom: "legacy" });
+    assert.equal(prefer.toolRouting?.channel, "legacy-prompt");
+    assert.deepEqual(metaOf(calls[3]!.args), { custom: "legacy" },
+      "an unsupported runtime must not synthesize routing metadata");
+  } finally {
+    parent.initialize = original.initialize;
+    parent.newSession = original.newSession;
+    parent.resumeSession = original.resumeSession;
+    parent.loadSession = original.loadSession;
+    await disabled.close();
+    await prefer.close();
+  }
 });
 
 test("tool policy persists independently and rejects invalid data instead of weakening it", () => {
@@ -97,4 +428,58 @@ test("tool policy persists independently and rejects invalid data instead of wea
     fs.writeFileSync(file, '{"nativeTools":"typo"}');
     assert.throws(() => loadNativeToolMode(file), /Invalid OMP ACP tool policy/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+interface PromptRequest {
+  sessionId: string;
+  prompt: Array<{ type: string; resource?: { uri: string; mimeType: string; text: string } }>;
+}
+
+test("a runtime without system append keeps full instructions plus legacy pi_task guidance", async () => {
+  const prompts: PromptRequest[] = [];
+  const modes = { currentModeId: "yolo", availableModes: [{ id: "yolo", name: "Yolo" }] };
+  const models = { currentModelId: "fixture-model", availableModels: [{ modelId: "fixture-model", name: "Fixture" }] };
+  const exited = Promise.withResolvers<{ code: number }>();
+  let alive = true;
+  const connection = {
+    process: { alive: true, exited: exited.promise },
+    async initialize() {
+      return { protocolVersion: 1, agentCapabilities: {
+        promptCapabilities: { embeddedContext: true }, mcpCapabilities: { http: true },
+      } };
+    },
+    async newSession() { return { sessionId: "legacy-session", modes, models }; },
+    getSessionState() { return { modes, models }; },
+    holdPromptWatchdog() { return () => {}; },
+    async prompt(request: PromptRequest) { prompts.push(request); return { stopReason: "end_turn" }; },
+    async close() {
+      if (!alive) return;
+      alive = false;
+      connection.process.alive = false;
+      exited.resolve({ code: 0 });
+    },
+  };
+  const runtime = new AntigravityRuntime(() => connection as unknown as AntigravityAcpConnection, "yolo");
+  const model: Model<"antigravity-acp"> = {
+    id: "fixture-model", name: "Fixture", api: "antigravity-acp", provider: "antigravity-acp",
+    contextWindow: 524_288, maxTokens: 32_000, reasoning: false, input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  };
+  try {
+    for await (const _event of runtime.stream(model, {
+      systemPrompt: "CORE_POLICY",
+      tools: [{ name: "read", description: "Read", parameters: { type: "object", properties: { path: { type: "string" } } } }],
+      messages: [{ role: "user", content: "LEGACY_REQUEST", timestamp: 1 }],
+    }, { sessionId: "legacy-session" }).stream) { /* drain */ }
+    assert.equal(prompts.length, 1);
+    const resource = prompts[0]!.prompt.find(block => block.type === "resource");
+    assert.ok(resource && resource.resource, "a legacy runtime must keep the instructions resource");
+    assert.equal(resource.resource.uri, "urn:omp:antigravity-acp:instructions");
+    assert.match(resource.resource.text, /CORE_POLICY/);
+    assert.match(resource.resource.text, /maps to pi_task/);
+    assert.match(resource.resource.text, /pi-bridge MCP server/);
+    assert.doesNotMatch(resource.resource.text, /Supplied OMP tools/);
+  } finally {
+    await runtime.close();
+  }
 });

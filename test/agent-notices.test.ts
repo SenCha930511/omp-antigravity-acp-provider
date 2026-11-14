@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AgentNoticeFilter, classifyOutputLimitNotice } from "../extension/agent-notices.ts";
 import { TierConnection } from "../extension/tier-connection.ts";
-import { AntigravityAcpConnection } from "../extension/vendor/pi-antigravity-acp-provider/src/acp/connection.ts";
+import { AntigravityAcpConnection } from "../extension/runtime/acp/connection.ts";
 
 test("classifies the output-limit notice and its retry suffix", () => {
   const full = "Your previous response was cut off because it exceeded the output token limit Please continue from where you left off, keeping your response shorter";

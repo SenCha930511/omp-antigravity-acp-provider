@@ -4,7 +4,7 @@
 // reached through the marketplace launcher's dynamic `import(file://…)` of
 // the downloaded adapter (observed with `@agentclientprotocol/sdk` on
 // OMP 18.12.5). Everything upstream therefore has to arrive pre-bundled in
-// extension/runtime.mjs; source files that bare-import the pinned upstream
+// extension/runtime.mjs; source files that bare-import packages
 // (tier-connection.ts, session-cleanup.ts, usage.ts, …) may only be reached
 // through the bundle, never directly from the load-time graph.
 import fs from "node:fs";

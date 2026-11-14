@@ -56,17 +56,51 @@ export function isKnownGemini1MModel(id: string): boolean {
   return /^(?:models\/)?gemini-(?:2\.5(?:$|[-/])|3(?:\.\d+)?(?:$|[-/])|4(?:\.\d+)?(?:$|[-/])|pro-agent(?:$|[-/]))/i.test(id);
 }
 
+// Client-side metadata for the partner models Antigravity advertises besides
+// Gemini. These are conservative catalog defaults, never server-observed
+// limits: an unknown ID keeps the generic floor, and CatalogStore still lets
+// user context settings override these values.
+// Claude 5.5: platform.claude.com/docs/en/about-claude/models/overview
+// (checked 2026-11-10). The Claude 4.6 entries retire on 2026-11-18 and keep
+// the last published 4.x limits. GPT-OSS 120B: OpenAI-compatible listing.
+export function knownModelMetadata(id: string): { contextWindow: number; maxTokens: number } | undefined {
+  // Pricing normalizes the optional "models/" alias prefix too; keep the
+  // known partner limits consistent with the ID the server may advertise.
+  const base = (splitLegacyEffort(id)?.base ?? id).replace(/^models\//i, "");
+  if (isKnownGemini1MModel(id)) return { contextWindow: 1_000_000, maxTokens: 65_536 };
+  if (/^claude-(?:sonnet|opus)-5-5$/i.test(base)) return { contextWindow: 1_000_000, maxTokens: 64_000 };
+  if (/^claude-(?:sonnet|opus)-4-6$/i.test(base)) return { contextWindow: 200_000, maxTokens: 64_000 };
+  if (/^gpt-oss-120b$/i.test(base)) return { contextWindow: 131_072, maxTokens: 65_536 };
+  return undefined;
+}
+
+// Adapter-owned offline fallback so the partner models appear in /model before
+// the first successful ACP discovery. IDs mirror the advertised catalog.
+export const PARTNER_FALLBACK_MODELS: readonly PublicCatalogModel[] = [
+  publicModel("claude-sonnet-5-5", "Claude Sonnet 5.5", {
+    low: "claude-sonnet-5-5-low",
+    medium: "claude-sonnet-5-5-medium",
+    high: "claude-sonnet-5-5-high",
+  }),
+  publicModel("claude-opus-5-5", "Claude Opus 5.5", {
+    low: "claude-opus-5-5-low",
+    medium: "claude-opus-5-5-medium",
+    high: "claude-opus-5-5-high",
+  }),
+  publicModel("gpt-oss-120b", "GPT-OSS-120b"),
+];
+
 function publicModel(id: string, name: string, map: Record<string, string> = {}, current?: string): PublicCatalogModel {
   const efforts = EFFORTS.filter(effort => map[effort]);
-  const knownGemini = isKnownGemini1MModel(id);
+  const known = knownModelMetadata(id);
   const defaultLevel = current && (efforts as readonly string[]).includes(current) ? current
     : efforts.includes("high") ? "high" : efforts.includes("medium") ? "medium" : efforts[0];
   return {
     id, name, api: "antigravity-acp", provider: "antigravity-acp", baseUrl: "",
     reasoning: efforts.length > 0, input: ["text", "image"],
     // These are conservative client metadata defaults, not inferred server limits.
-    contextWindow: knownGemini ? 1_000_000 : 32_768,
-    maxTokens: knownGemini ? 65_536 : 8_192,
+    contextWindow: known?.contextWindow ?? 32_768,
+    maxTokens: known?.maxTokens ?? 8_192,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     ...(efforts.length ? {
       thinkingLevelMap: Object.fromEntries(EFFORTS.map(effort => [effort, map[effort] ?? null])),

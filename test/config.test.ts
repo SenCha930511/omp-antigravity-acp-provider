@@ -4,10 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { loadAdapterConfig, loadRuntimeSourcePreference, saveAdapterPermissionMode, updateAdapterConfig } from "../extension/adapter-config.ts";
+import { loadAdapterConfig, loadRuntimeSourcePreference, readOmpApprovalMode, resolveAdapterPermissionMode, saveAdapterPermissionMode, updateAdapterConfig } from "../extension/adapter-config.ts";
 import { registerOmpAdapter } from "../extension/index.ts";
-import { keychain, type OmpCommandContext } from "../extension/auth-sync.ts";
-import { resolveDefaultPiConfigPath, resolveLegacyGeminiConfigPath } from "../extension/vendor/pi-antigravity-acp-provider/src/config.ts";
+import { keychain, secretService, type OmpCommandContext } from "../extension/auth-sync.ts";
+import { resolveDefaultPiConfigPath, resolveLegacyGeminiConfigPath } from "../extension/runtime/config.ts";
 
 test("runtimeSource defaults to auto and survives permission updates", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "omp-config-"));
@@ -15,17 +15,51 @@ test("runtimeSource defaults to auto and survives permission updates", () => {
   try {
     assert.equal(loadRuntimeSourcePreference(directory), "auto");
     assert.equal(loadAdapterConfig(file).runtimeSource, "auto");
+    assert.equal(loadAdapterConfig(file).permissions, "follow");
     fs.writeFileSync(file, JSON.stringify({ runtimeSource: "cli" }));
     assert.equal(loadRuntimeSourcePreference(directory), "cli");
     assert.equal(loadAdapterConfig(file).runtimeSource, "cli");
     saveAdapterPermissionMode("default", file);
     assert.equal(loadAdapterConfig(file).permissions, "default");
     assert.equal(loadAdapterConfig(file).runtimeSource, "cli");
+    assert.throws(() => updateAdapterConfig(file, { runtimeSource: "invalid" } as never), /runtimeSource must be "auto", "cli", or "managed"/);
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).runtimeSource, "cli", "an invalid update must not be written");
+    fs.writeFileSync(file, JSON.stringify({ permissions: "invalid", runtimeSource: "cli" }));
+    assert.equal(loadAdapterConfig(file).permissions, "follow");
+    updateAdapterConfig(file, { runtimeSource: "auto" });
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).permissions, "follow", "an invalid permission value is normalized before write");
     fs.writeFileSync(file, JSON.stringify({ runtimeSource: "invalid" }));
     assert.throws(() => loadAdapterConfig(file), /runtimeSource must be "auto", "cli", or "managed"/);
     assert.throws(() => loadRuntimeSourcePreference(directory), /runtimeSource must be "auto", "cli", or "managed"/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("follow mode reads OMP tools.approvalMode with project overrides", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-follow-permission-"));
+  const agent = path.join(root, "agent");
+  const project = path.join(root, "project");
+  try {
+    fs.mkdirSync(agent, { recursive: true });
+    fs.mkdirSync(path.join(project, ".omp"), { recursive: true });
+    fs.writeFileSync(path.join(agent, "config.yml"), "tools:\n  approvalMode: yolo\n");
+    assert.equal(readOmpApprovalMode(agent, project), "yolo");
+    assert.equal(resolveAdapterPermissionMode("follow", agent, project), "yolo");
+    assert.equal(readOmpApprovalMode(agent, project, ["omp", "--approval-mode", "write"]), "write");
+    assert.equal(readOmpApprovalMode(agent, project, ["omp", "--auto-approve"]), "yolo");
+
+    fs.writeFileSync(path.join(project, ".omp", "config.yml"), "tools:\n  approvalMode: write\n");
+    assert.equal(resolveAdapterPermissionMode("follow", agent, project), "auto_edit");
+
+    fs.writeFileSync(path.join(agent, "config.yml"), "tools: { approvalMode: 'always-ask' }\n");
+    fs.rmSync(path.join(project, ".omp", "config.yml"));
+    assert.equal(resolveAdapterPermissionMode("follow", agent, project), "default");
+
+    assert.equal(resolveAdapterPermissionMode("default", agent, project), "default");
+    assert.equal(resolveAdapterPermissionMode("yolo", agent, project), "yolo");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -67,6 +101,10 @@ test("adapter startup preserves permissions from either legacy config location",
   const keys = ["HOME", "PI_CODING_AGENT_DIR", "PI_CONFIG_DIR", "GEMINI_HOME"] as const;
   const previousEnv = new Map(keys.map(key => [key, process.env[key]]));
   const previousKeychain = keychain.present;
+  const previousSecretPresent = secretService.present;
+  const previousSecretRemove = secretService.remove;
+  secretService.present = async () => false;
+  secretService.remove = async () => undefined;
   for (const pathOfLegacy of [resolveDefaultPiConfigPath, resolveLegacyGeminiConfigPath]) {
     const state = path.join(root, String(pathOfLegacy.name), "agent", "antigravity-acp-provider");
     const hooks = new Map<string, (event: unknown, ctx: OmpCommandContext) => unknown>();
@@ -100,6 +138,8 @@ test("adapter startup preserves permissions from either legacy config location",
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
       keychain.present = previousKeychain;
+      secretService.present = previousSecretPresent;
+      secretService.remove = previousSecretRemove;
     }
   }
   fs.rmSync(root, { recursive: true, force: true });

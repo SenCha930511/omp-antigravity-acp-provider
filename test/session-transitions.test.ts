@@ -149,7 +149,7 @@ async function fixture(maxIdleEntries = 2) {
               connection.emit({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "REAL_THOUGHT" } });
             }
             connection.emit({ sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: `ACK:${connection.id}:${connection.prompts.length}` } });
+              content: { type: "text", text: current(request).endsWith("Reply only with: OK") ? "OK" : `ACK:${connection.id}:${connection.prompts.length}` } });
             return okResponse();
           } finally { connection.activePrompts--; }
         },

@@ -1,14 +1,12 @@
-import { describeCredentialStorage, inspectAntigravityAuth } from "./runtime.mjs";
+import { describeCredentialStorage } from "./runtime.mjs";
 import { saveAdapterPermissionMode, updateAdapterConfig, type AdapterPermissionMode } from "./adapter-config.ts";
-import { antigravityAccountEmail, authReady, formatLogoutSummary, keychain, ompCredentialSummary, type OmpAuthCoordinator, type OmpCommandContext } from "./auth-sync.ts";
+import { antigravityAccountEmail, authReady, formatLogoutSummary, inspectAcpAuth, keychain, ompCredentialSummary, type OmpAuthCoordinator, type OmpCommandContext } from "./auth-sync.ts";
 import { parseNativeToolMode, type NativeToolMode } from "./tool-routing.ts";
 import { saveToolPolicy, type ToolPolicy } from "./tool-policy.ts";
 import { DEFAULT_USAGE_MODE, updateContextSettings, resolveContextOptions, saveContextSettings, type ContextSettings } from "./context-settings.ts";
 import type { CatalogStore, ConfiguredCatalogModel } from "./catalog-store.ts";
 import type { SessionCleanup, CleanupMode } from "./session-cleanup.ts";
-import type { Diagnostics } from "./diagnostics.ts";
 import type { TierConnection } from "./tier-connection.ts";
-import type { AntigravityQuotaSnapshot } from "./usage-accounting.ts";
 
 export interface RuntimeSnapshotProcess {
   mcpHttp: boolean;
@@ -40,7 +38,6 @@ export interface StreamEventLike {
 export interface RuntimeBundleView {
   runtime: {
     snapshot: () => Promise<RuntimeSnapshotView>;
-    quota: (apiKey: string | undefined, signal?: AbortSignal) => Promise<AntigravityQuotaSnapshot>;
     setPermissionMode: (mode: string) => Promise<void>;
     logout: () => Promise<void>;
     close: () => Promise<void>;
@@ -74,7 +71,6 @@ export interface CommandControllerDeps {
   contextPath: string;
   toolPolicyPath: string;
   cleanup: SessionCleanup;
-  diagnostics?: Diagnostics;
   connections: Set<TierConnection>;
   auth: OmpAuthCoordinator;
   catalog: CatalogStore;
@@ -84,12 +80,12 @@ export interface CommandControllerDeps {
   getToolPolicy: () => ToolPolicy;
   setToolPolicy: (next: ToolPolicy) => void;
   setPermissionModeState: (mode: string) => void;
-  getLastToolAudit: () => ToolAuditSummary | undefined;
   getRuntimeForSession: (sessionId?: string) => RuntimeBundleView;
   acquireRuntimeForSession?: (sessionId?: string) => { value: RuntimeBundleView; release: () => void };
   peekRuntimeForSession: (sessionId?: string) => RuntimeBundleView | undefined;
   getSavedSessionCount: () => number;
   getPermissionMode: () => string;
+  getPermissionPreference?: () => string;
   getAllRuntimes: () => RuntimeBundleView[];
   closeAllRuntimes: () => Promise<void>;
   onModelsUpdated: (models: ConfiguredCatalogModel[]) => void;
@@ -131,14 +127,12 @@ const SUBCOMMANDS: SubcommandSpec[] = [
   { name: "account", description: "Signed-in Google account and credential state" },
   { name: "login", description: "Start a fresh Antigravity Google authorization" },
   { name: "logout", description: "Clear Antigravity credentials, saved sessions and the OMP marker" },
-  { name: "tools", description: "Inspect the OMP↔ACP tool bridge" },
   {
     name: "usage",
     description: "Usage accounting and connection state",
     usage: "[auto|off]",
     values: [["auto", "Query usage after each reply"], ["off", "Skip supplemental usage queries"]],
   },
-  { name: "quota", description: "Live model quota groups and reset times" },
   {
     name: "context",
     description: "Context window and transfer settings",
@@ -158,22 +152,6 @@ const SUBCOMMANDS: SubcommandSpec[] = [
     ],
   },
   {
-    name: "diagnostics",
-    description: "Diagnostics collection status",
-    usage: "[on|off|reset]",
-    values: [
-      ["on", "Enable diagnostics collection"],
-      ["off", "Disable diagnostics collection"],
-      ["reset", "Clear collected diagnostics"],
-    ],
-  },
-  {
-    name: "debug",
-    description: "Raw ACP tool-status display",
-    usage: "on|off",
-    values: [["on", "Show raw tool-status updates"], ["off", "Hide raw tool-status updates"]],
-  },
-  {
     name: "native-tools",
     description: "Native ACP tool exposure",
     usage: "prefer|disabled",
@@ -182,8 +160,9 @@ const SUBCOMMANDS: SubcommandSpec[] = [
   {
     name: "permissions",
     description: "Requested ACP permission mode",
-    usage: "default|auto-edit|yolo",
+    usage: "default|auto-edit|yolo|follow",
     values: [
+      ["follow", "Follow OMP tools.approvalMode"],
       ["default", "Confirm edits and commands"],
       ["auto-edit", "Auto-accept edits"],
       ["yolo", "Auto-accept everything"],
@@ -291,22 +270,6 @@ function formatLatestQuota(quota: NonNullable<RuntimeSnapshotView["metrics"]["la
   return parts.length ? parts.join(" · ") : undefined;
 }
 
-interface DiagnosticsStatusView {
-  enabled: boolean;
-  samples: number;
-  capacity: number;
-  stages: Record<string, { count: number; medianMs: number; maxMs: number }>;
-}
-
-function formatDiagnostics(status: DiagnosticsStatusView | undefined): string {
-  const fields: DisplayField[] = [["Collection", status?.enabled ? "on" : "off"]];
-  if (status?.samples) fields.push(["Samples", `${formatNumber(status.samples)} / ${formatNumber(status.capacity)}`]);
-  for (const [stage, sample] of Object.entries(status?.stages ?? {})) {
-    fields.push([stage, `count ${formatNumber(sample.count)} · median ${formatNumber(sample.medianMs)} ms · max ${formatNumber(sample.maxMs)} ms`]);
-  }
-  return section("ACP diagnostics", fields);
-}
-
 interface CleanupStatusView {
   mode: CleanupMode;
   idleDays: number;
@@ -354,19 +317,6 @@ function formatCleanup(status: CleanupStatusView, removed: number): string {
   return section("ACP session cleanup", fields);
 }
 
-function formatQuota(snapshot: AntigravityQuotaSnapshot): string {
-  const groups = snapshot.groups.map(group => {
-    const width = Math.max(0, ...group.buckets.map(bucket => bucket.window.length));
-    return [
-      `  ${group.displayName}`,
-      ...(group.buckets.length ? group.buckets.map(bucket =>
-        `    ${bucket.window.padEnd(width)}  ${Math.round(bucket.remainingFraction * 100)}% remaining${bucket.resetTime ? ` · reset ${bucket.resetTime}` : ""}`)
-        : ["    no percentage limits reported"]),
-    ].join("\n");
-  });
-  return ["Antigravity quota", ...groups].join("\n");
-}
-
 export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
   const sessionIdOf = (ctx: OmpCommandContext | undefined): string | undefined => ctx?.sessionManager?.getSessionId?.();
 
@@ -374,17 +324,6 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     deps.auth.watchOmpCredentials(ctx);
     const parts = args.trim().split(/\s+/);
     const [command, value] = parts;
-    if (command === "diagnostics") {
-      if (parts.length > 2 || (value !== undefined && !["on", "off", "reset"].includes(value))) throw new Error("Usage: /antigravity-acp diagnostics [on|off|reset]");
-      if (value === "reset") deps.diagnostics?.reset();
-      else if (value) {
-        updateAdapterConfig(deps.configPath, { diagnostics: value === "on" });
-        deps.diagnostics?.configure(value === "on");
-      }
-      ctx.ui.notify(formatDiagnostics(deps.diagnostics?.status()), "info");
-      return;
-    }
-
     if (command === "cleanup") {
       if (value === "budget") {
         if (parts.length !== 4) throw new Error("Usage: /antigravity-acp cleanup budget MAX_SESSIONS MAX_MIB (0 disables a limit)");
@@ -458,18 +397,6 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       return;
     }
 
-    if (command === "debug") {
-      if (parts.length !== 2 || (value !== "on" && value !== "off")) throw new Error("Usage: /antigravity-acp debug on|off");
-      const enabled = value === "on";
-      const next = { ...deps.getToolPolicy(), debugToolUpdates: enabled };
-      saveToolPolicy(deps.toolPolicyPath, next);
-      updateAdapterConfig(deps.configPath, { debugToolUpdates: enabled });
-      deps.setToolPolicy(next);
-      for (const connection of deps.connections) connection.debugToolUpdates = enabled;
-      ctx.ui.notify(`ACP tool-status debug display: ${value}. Normal OMP tool results and thought summaries are preserved.`, "info");
-      return;
-    }
-
     if (command === "native-tools") {
       if (parts.length !== 2) throw new Error("Usage: /antigravity-acp native-tools prefer|disabled");
       const mode: NativeToolMode = parseNativeToolMode(value);
@@ -485,29 +412,34 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     if (command === "login") {
       if (value) throw new Error("Usage: /antigravity-acp login");
       await deps.prepareRuntime();
-      await deps.auth.beginFreshGoogleLogin();
+      const loginAttempt = await deps.auth.beginFreshGoogleLogin();
       // Direct Antigravity Google login through the command UI. OMP's /login
       // runs the same flow and additionally stores the provider marker.
-      const lease = deps.acquireRuntimeForSession ? deps.acquireRuntimeForSession() : { value: deps.getRuntimeForSession(), release: () => {} };
       try {
-        await lease.value.provider.auth.oauth.login({
-          signal: undefined,
-          notify(event) {
-            const link = event.links?.[0];
-            if (link) ctx.ui.notify(`${event.message ?? "Open this URL to authorize:"}\n${link.url}`, "info");
-            else if (event.message) ctx.ui.notify(event.message, "info");
-          },
-          prompt: async (request) => {
-            const answer = await ctx.ui.input?.(request.message, request.placeholder);
-            if (!answer?.trim()) throw new Error("Antigravity OAuth login cancelled");
-            return answer;
-          },
-        });
-      } finally {
-        lease.release();
+        const lease = deps.acquireRuntimeForSession ? deps.acquireRuntimeForSession() : { value: deps.getRuntimeForSession(), release: () => {} };
+        try {
+          await lease.value.provider.auth.oauth.login({
+            signal: undefined,
+            notify(event) {
+              const link = event.links?.[0];
+              if (link) ctx.ui.notify(`${event.message ?? "Open this URL to authorize:"}\n${link.url}`, "info");
+              else if (event.message) ctx.ui.notify(event.message, "info");
+            },
+            prompt: async (request) => {
+              const answer = await ctx.ui.input?.(request.message, request.placeholder);
+              if (!answer?.trim()) throw new Error("Antigravity OAuth login cancelled");
+              return answer;
+            },
+          });
+        } finally {
+          lease.release();
+        }
+        deps.auth.noteLoginSucceeded(loginAttempt);
+      } catch (error) {
+        deps.auth.cancelFreshGoogleLogin(loginAttempt);
+        throw error;
       }
-      deps.auth.noteLoginSucceeded?.();
-      const auth = inspectAntigravityAuth();
+      const auth = await inspectAcpAuth();
       const email = antigravityAccountEmail();
       ctx.ui.notify(`Antigravity Google login finished${email ? ` as ${email}` : ""} — fresh sign-in; ACP auth: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}.`, "info");
       return;
@@ -515,15 +447,15 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
 
     if (command === "logout") {
       if (value) throw new Error("Usage: /antigravity-acp logout");
-      const { keychainRemoved, ompMarker } = await deps.auth.performCommandLogout(ctx);
+      const { keychainRemoved, keyringRemoved, ompMarker } = await deps.auth.performCommandLogout(ctx);
       // Keep the confirmation terse; /antigravity-acp account shows the details.
-      ctx.ui.notify(formatLogoutSummary({ keychainRemoved, ompMarker }), "info");
+      ctx.ui.notify(formatLogoutSummary({ keychainRemoved, keyringRemoved, ompMarker }), "info");
       return;
     }
 
     if (command === "account") {
       if (value) throw new Error("Usage: /antigravity-acp account");
-      const auth = inspectAntigravityAuth();
+      const auth = await inspectAcpAuth();
       let ompSource: string | undefined;
       try { ompSource = ctx?.modelRegistry?.authStorage?.keys?.describe?.("antigravity-acp", sessionIdOf(ctx)); } catch { /* host version dependent */ }
       // Reading saved state needs no live runtime; show live numbers only
@@ -533,17 +465,24 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       const permissionMode = deps.getPermissionMode();
       const omp = ompCredentialSummary(ctx);
       const accountEmail = antigravityAccountEmail();
+      const googleAccount = accountEmail
+        ?? (auth.keyring === true ? "signed in · system keyring entry; email unavailable"
+          : (await keychain.present()) === true ? "signed in · keychain token; email unavailable"
+          : "not signed in");
       const marker = omp.present === undefined ? "unknown; host did not expose the credential store"
         : omp.present ? `present · ${omp.record} · authorized ${omp.authorizedAt ?? "unknown time"}${omp.email && omp.email !== accountEmail ? ` · account ${omp.email}` : ""}`
         : "not stored; run /login or /antigravity-acp login";
       const fields: DisplayField[] = [
-        ["Google account", accountEmail ?? ((await keychain.present()) === true ? "signed in · keychain token; email unavailable" : "not signed in")],
+        ["Google account", googleAccount],
         ["ACP authentication", `${auth.status}${auth.authType ? ` · ${auth.authType}` : ""}`],
         ["Credential storage", describeCredentialStorage()],
         ["OMP login marker", marker],
         ["OMP auth source", ompSource],
         ["Saved ACP sessions", deps.getSavedSessionCount()],
-        ["Permission", permissionMode === "auto_edit" ? "auto-edit" : permissionMode],
+        ["Permission", (() => {
+          const label = permissionMode === "auto_edit" ? "auto-edit" : permissionMode;
+          return deps.getPermissionPreference?.() === "follow" ? `${label} (follow OMP)` : label;
+        })()],
         ["Active sessions", snapshot?.bindings ?? 0],
         ["Token ownership", "Google OAuth tokens stay in Antigravity-owned storage; OMP stores only a non-secret marker."],
         ["Logout", "/antigravity-acp logout clears both sides; OMP /logout also finishes Antigravity-side cleanup."],
@@ -555,25 +494,6 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         fields.push(["Account warning", "The OMP marker and Antigravity token identify different accounts."]);
       }
       ctx.ui.notify(section("Antigravity ACP account", fields), "info");
-      return;
-    }
-
-    if (command === "quota") {
-      if (value !== undefined) throw new Error("Usage: /antigravity-acp quota");
-      await deps.prepareRuntime();
-      const lease = deps.acquireRuntimeForSession
-        ? deps.acquireRuntimeForSession(sessionIdOf(ctx))
-        : { value: deps.getRuntimeForSession(sessionIdOf(ctx)), release: () => {} };
-      try {
-        const quota = await lease.value.runtime.quota(undefined).then(formatQuota,
-          (error: unknown) => section("Antigravity quota", [
-            ["Status", "unavailable"],
-            ["Reason", error instanceof Error ? error.message : String(error)],
-          ]));
-        ctx.ui.notify(quota, "info");
-      } finally {
-        lease.release();
-      }
       return;
     }
 
@@ -616,69 +536,47 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     }
 
     if (command === "permissions") {
-      if (!value || !["default", "auto-edit", "yolo"].includes(value) || parts.length > 2) {
-        throw new Error("Usage: /antigravity-acp permissions default|auto-edit|yolo");
+      if (!value || !["default", "auto-edit", "yolo", "follow"].includes(value) || parts.length > 2) {
+        throw new Error("Usage: /antigravity-acp permissions default|auto-edit|yolo|follow");
       }
       const mode = value.replace("-", "_");
-      if (mode !== deps.getPermissionMode()) {
+      const current = deps.getPermissionPreference?.() ?? deps.getPermissionMode();
+      if (mode !== current) {
         saveAdapterPermissionMode(mode as AdapterPermissionMode, deps.configPath);
         deps.setPermissionModeState(mode);
         await deps.closeAllRuntimes();
       }
     }
-    const usageError = "Usage: /antigravity-acp [status|account|login|logout|tools|usage|quota|context|cleanup|diagnostics|debug|native-tools|permissions|refresh]";
-    if (command && command !== "status" && command !== "tools" && command !== "permissions") {
+    const usageError = "Usage: /antigravity-acp [status|account|login|logout|usage|context|cleanup|native-tools|permissions|refresh]";
+    if (command && command !== "status" && command !== "permissions") {
       throw new Error(usageError);
     }
     if (command === "status" && value !== undefined) throw new Error(usageError);
-    if (command === "tools" && value !== undefined) throw new Error("Usage: /antigravity-acp tools");
 
-    // Tools and status inspect a runtime snapshot. Quota owns a separate
-    // query lifecycle above; the other earlier commands stay offline.
+    // Status inspects a runtime snapshot; the earlier commands stay offline.
     const lease = deps.acquireRuntimeForSession
       ? deps.acquireRuntimeForSession(sessionIdOf(ctx))
       : { value: deps.getRuntimeForSession(sessionIdOf(ctx)), release: () => {} };
     try {
       const snapshot = await lease.value.runtime.snapshot();
-      if (command === "tools") {
-        const lastToolAudit = deps.getLastToolAudit();
-        if (!lastToolAudit) {
-          ctx.ui.notify("No model request yet. Send a message with this ACP model to inspect its offered OMP tools.", "info");
-          return;
-        }
-        const sections = [section("OMP ACP tool bridge", [
-          ["Offered", lastToolAudit.offered.length],
-          ["Available", lastToolAudit.available.join(", ") || "none"],
-          ["Omitted", lastToolAudit.omitted.length || undefined],
-        ])];
-        if (lastToolAudit.omitted.length) {
-          sections.push(section("Omitted OMP tools", lastToolAudit.omitted.map((tool): DisplayField => [tool.name, tool.reason])));
-        }
-        snapshot.processes.forEach((process, index) => {
-          const name = process.modelId ?? process.key ?? `Runtime ${index + 1}`;
-          sections.push(section(name, [
-            ["MCP over HTTP", process.mcpHttp ? "yes" : "no"],
-            ...process.omittedTools.map(tool => [`Omitted ${tool.name}`, tool.reason] as DisplayField),
-          ]));
-        });
-        ctx.ui.notify(sections.join("\n\n"), "info");
-        return;
-      }
-
       const policy = deps.getToolPolicy();
       const requestedPermission = deps.getPermissionMode();
       const requestedLabel = requestedPermission === "auto_edit" ? "auto-edit" : requestedPermission;
+      const requestedDisplay = deps.getPermissionPreference?.() === "follow"
+        ? `${requestedLabel} (follow OMP)` : requestedLabel;
       const wireLabel = snapshot.permissionMode === "auto_edit" ? "auto-edit" : snapshot.permissionMode;
       const versions = [...new Set(snapshot.processes.map(process => process.agentVersion).filter((version): version is string => Boolean(version)))];
       const channels = [...new Set([...deps.connections].map(connection => connection.toolRouting?.channel).filter((channel): channel is "pending" | "system-append" | "legacy-prompt" => Boolean(channel)))];
       const thinking = [...deps.connections].map(connection => connection.confirmedThinking).filter((value): value is { model: string; effort: string } => Boolean(value));
       const stopped = snapshot.processes.filter(process => process.alive === false).length;
       const ignoredNoise = snapshot.processes.reduce((total, process) => total + (process.ignoredStdoutNoiseLines ?? 0), 0);
+      const ready = await authReady();
+      const login = ready ? "ready" : `not ready · ${(await inspectAcpAuth()).status}`;
       ctx.ui.notify(section("Antigravity ACP (OMP adapter)", [
-        ["Login", (await authReady()) ? "ready" : `not ready · ${inspectAntigravityAuth().status}`],
+        ["Login", login],
         ["Runtime", versions.join(", ") || undefined],
         ["Native channel", channels.join(", ") || undefined],
-        ["Permission", requestedLabel === wireLabel ? requestedLabel : `requested ${requestedLabel} → wire ${wireLabel}`],
+        ["Permission", requestedDisplay === wireLabel ? requestedDisplay : `requested ${requestedDisplay} → wire ${wireLabel}`],
         ["Native tools", policy.nativeTools],
         ["Tool debug", policy.debugToolUpdates ? "on" : undefined],
         ["Thinking", thinking.map(value => `${value.model}=${value.effort}`).join(", ") || undefined],

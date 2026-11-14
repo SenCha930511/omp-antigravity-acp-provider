@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { lock } from "proper-lockfile";
 import { releaseAfter } from "./lock-release.ts";
-import { resolvePiAgentDir } from "./vendor/pi-antigravity-acp-provider/src/config.ts";
+import { resolvePiAgentDir } from "./runtime/config.ts";
 
 interface SavedSessionRecord {
   piSessionId: string; acpSessionId: string; acpModelId: string; cwd: string;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -10,12 +10,13 @@ import { randomUUID } from "node:crypto";
 const execute = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temporary = await fs.mkdtemp(path.join(tmpdir(), "omp-marketplace-integration-"));
-const profiles = path.join(homedir(), ".omp/profiles");
+const home = await fs.mkdtemp(path.join(tmpdir(), "omp-marketplace-home-"));
+const profiles = path.join(home, ".omp/profiles");
 await fs.mkdir(profiles, { recursive: true });
 const profile = `acp-marketplace-test-${randomUUID()}`;
 const profileRoot = path.join(profiles, profile);
 await fs.mkdir(profileRoot);
-const env = { ...process.env, OMP_PROFILE: profile,
+const env = { ...process.env, HOME: home, USERPROFILE: home, OMP_PROFILE: profile,
   AGY_ACP_BIN: process.platform === "win32" ? "missing-acp-runtime.exe" : "/usr/bin/false" };
 delete env.PI_CODING_AGENT_DIR;
 delete env.PI_CONFIG_DIR;
@@ -49,5 +50,6 @@ try {
 } finally {
   await fs.rm(profileRoot, { recursive: true, force: true });
   await fs.rm(temporary, { recursive: true, force: true });
-  console.log("Removed isolated OMP profile, adapter dependencies and test workspace");
+  await fs.rm(home, { recursive: true, force: true });
+  console.log("Removed isolated OMP profile, HOME, adapter dependencies and test workspace");
 }

@@ -230,28 +230,47 @@ try {
   console.log("Actual OMP command: permission-mode change applies to the next dispatch exactly once: PASS");
 
   const mainBeforeSide = prompts(await trace()).at(-1).id;
+  const mainRoutingId = (await trace()).filter(e => e.kind === "stream").at(-1).sessionId;
+  const sidePromptStart = prompts(await trace()).length;
+  const sideNewStart = (await trace()).filter(e => e.kind === "new").length;
   await prompt("/fixture-one-shot");
   const sideLog = await trace();
-  const sideStream = sideLog.filter(e => e.kind === "stream").at(-1);
-  const sideAcp = prompts(sideLog).at(-1).id;
-  assert.ok(sideStream.sessionId.includes(":side:"));
-  assert.notEqual(sideAcp, mainBeforeSide);
-  assert.ok(sideLog.some(e => e.kind === "one-shot-complete"));
+  const sideStreams = sideLog.filter(e => e.kind === "stream" && String(e.sessionId).includes(":side:")).slice(-2);
+  assert.equal(sideStreams.length, 2, "both ephemeral turns must reach the provider");
+  const sideParent = (stream: any) => stream.parentSessionId ?? String(stream.sessionId).split(":side:")[0];
+  for (const stream of sideStreams) assert.equal(sideParent(stream), mainRoutingId, "each side request names its main owner");
+  assert.notEqual(sideStreams[0].sessionId, sideStreams[1].sessionId, "OMP gives each /btw its own routing id");
+  const sidePrompts = prompts(sideLog).slice(sidePromptStart);
+  assert.equal(sidePrompts.length, 2, "two side questions reach ACP");
+  const shadowAcps = new Set(sidePrompts.map(entry => entry.id));
+  assert.equal(shadowAcps.size, 1, "the second question reuses the first shadow ACP session");
+  const shadowAcp = [...shadowAcps][0];
+  assert.notEqual(shadowAcp, mainBeforeSide);
+  assert.equal(sideLog.filter(e => e.kind === "new").length, sideNewStart + 1, "the second question creates no new ACP session");
+  assert.equal(sideLog.filter(e => e.kind === "one-shot-complete").length, 2);
+  assert.match(current(sidePrompts[0]), /REQ_ONE_SHOT_RELEASE/);
+  assert.match(current(sidePrompts[1]), /REQ_ONE_SHOT_SECOND/);
+  assert.doesNotMatch(current(sidePrompts[1]), /REQ_ONE_SHOT_RELEASE/);
+  assert.ok(JSON.stringify(sidePrompts[1].prompt).length < JSON.stringify(sidePrompts[0].prompt).length,
+    "the second question sends only the new question, not the main history");
   let saved: any[] = [];
   for (let i = 0; i < 200; i++) {
     saved = JSON.parse(await fs.readFile(path.join(state, "sessions.json"), "utf8"));
-    if (!saved.some(record => record.piSessionId === sideStream.sessionId)) break;
+    if (!saved.some(record => record.acpSessionId === shadowAcp)) break;
     await delay(10);
   }
-  assert.ok(!saved.some(record => record.piSessionId === sideStream.sessionId), "Final one-shot release must remove its saved mapping");
+  assert.ok(!saved.some(record => record.acpSessionId === shadowAcp), "a shadow never persists a sessions.json row");
+  for (const stream of sideStreams) {
+    assert.ok(!saved.some(record => record.piSessionId === stream.sessionId), "a side routing id never owns a saved mapping");
+  }
   assert.ok(saved.some(record => record.acpSessionId === mainBeforeSide), "One-shot cleanup must preserve the main conversation");
-  await fs.access(path.join(temporary, "gemini/antigravity-acp/conversations", sideAcp + ".db"));
+  await fs.access(path.join(temporary, "gemini/antigravity-acp/conversations", shadowAcp + ".db"));
   await prompt("REQ_AFTER_ONE_SHOT_RELEASE");
   const afterSide = prompts(await trace()).at(-1);
   assert.equal(afterSide.id, mainBeforeSide);
-  assert.doesNotMatch(JSON.stringify(afterSide.prompt), /REQ_ONE_SHOT_RELEASE/);
+  assert.doesNotMatch(JSON.stringify(afterSide.prompt), /REQ_ONE_SHOT_RELEASE|REQ_ONE_SHOT_SECOND/);
   assert.equal((current(afterSide).match(/REQ_AFTER_ONE_SHOT_RELEASE/g) ?? []).length, 1);
-  console.log("Actual OMP ephemeral turn: final release unmaps only the side request, retains its recovery copy and preserves the main session: PASS");
+  console.log("Actual OMP ephemeral turns: two /btw ids reuse one parent-owned shadow ACP session, persist no row and never replay main history: PASS");
 
   log = await trace();
   const firstInstructions = prompts(log)[0].prompt.find((block: any) => block.resource?.uri.endsWith(":instructions"))?.resource.text;

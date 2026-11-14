@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { projectCatalog, readModels, thoughtRoute, parseThoughtRoute, selectRuntimeModel } from "../extension/model-catalog.ts";
+import { PARTNER_FALLBACK_MODELS, knownModelMetadata, projectCatalog, readModels, thoughtRoute, parseThoughtRoute, selectRuntimeModel } from "../extension/model-catalog.ts";
+import { offlineFallbackModels } from "../extension/index.ts";
 import { advertisedRecord, choices, resolveSelection } from "../extension/selectors.ts";
 
 const state = (models: string[], levels = ["low", "medium", "high"]) => ({ configOptions: [
@@ -77,6 +78,65 @@ test("unversioned or older Gemini aliases keep conservative limits", () => {
     assert.equal(model.contextWindow, 32_768, `${model.id} must not claim a 1M window without a known version`);
     assert.equal(model.maxTokens, 8192);
   }
+});
+
+test("advertised Claude and GPT-OSS models carry conservative known limits", () => {
+  const models = projectCatalog([
+    "claude-sonnet-5-5", "claude-opus-5-5", "claude-sonnet-4-6", "claude-opus-4-6", "gpt-oss-120b",
+  ].map(modelId => ({ modelId, name: modelId, selector: true })));
+  const byId = new Map(models.map(model => [model.id, model]));
+  for (const id of ["claude-sonnet-5-5", "claude-opus-5-5"]) {
+    assert.equal(byId.get(id)?.contextWindow, 1_000_000, id);
+    assert.equal(byId.get(id)?.maxTokens, 64_000, id);
+  }
+  for (const id of ["claude-sonnet-4-6", "claude-opus-4-6"]) {
+    assert.equal(byId.get(id)?.contextWindow, 200_000, id);
+    assert.equal(byId.get(id)?.maxTokens, 64_000, id);
+  }
+  assert.equal(byId.get("gpt-oss-120b")?.contextWindow, 131_072);
+  assert.equal(byId.get("gpt-oss-120b")?.maxTokens, 65_536);
+  assert.equal(byId.get("gpt-oss-120b")?.reasoning, false);
+  assert.deepEqual(knownModelMetadata("claude-opus-5-5-high"), { contextWindow: 1_000_000, maxTokens: 64_000 });
+  assert.deepEqual(knownModelMetadata("models/claude-opus-5-5"), { contextWindow: 1_000_000, maxTokens: 64_000 });
+});
+
+test("unknown partner IDs keep the generic floor instead of inheriting Claude limits", () => {
+  for (const id of ["claude-sonnet-5-6", "claude-opus-4-7", "gpt-oss-20b", "claude-example"]) {
+    const [model] = projectCatalog([{ modelId: id, name: id, selector: true }]);
+    assert.equal(model?.contextWindow, 32_768, id);
+    assert.equal(model?.maxTokens, 8_192, id);
+    assert.equal(knownModelMetadata(id), undefined, id);
+  }
+});
+
+test("partner fallback models mirror the advertised catalog and current limits", () => {
+  assert.deepEqual(PARTNER_FALLBACK_MODELS.map(model => model.id),
+    ["claude-sonnet-5-5", "claude-opus-5-5", "gpt-oss-120b"]);
+  const sonnet = PARTNER_FALLBACK_MODELS[0]!;
+  assert.deepEqual(sonnet.thinking?.efforts, ["low", "medium", "high"]);
+  assert.equal(sonnet.thinkingLevelMap?.high, "claude-sonnet-5-5-high");
+  assert.equal(sonnet.contextWindow, 1_000_000);
+  assert.equal(sonnet.maxTokens, 64_000);
+  const gpt = PARTNER_FALLBACK_MODELS[2]!;
+  assert.equal(gpt.reasoning, false);
+  assert.equal(gpt.contextWindow, 131_072);
+  for (const model of PARTNER_FALLBACK_MODELS) assert.equal(model.api, "antigravity-acp");
+});
+
+test("offline fallback exposes Hydrogen with xhigh and the partner models", () => {
+  const fallback = offlineFallbackModels();
+  const byId = new Map(fallback.map(model => [model.id, model]));
+  assert.ok(byId.has("gemini-4-hydrogen"), "a fresh install must see Hydrogen without a refresh");
+  assert.ok(byId.has("gemini-4-argon"));
+  assert.deepEqual(byId.get("gemini-4-hydrogen")?.thinking?.efforts, ["low", "medium", "high", "xhigh"]);
+  assert.equal(byId.get("gemini-4-hydrogen")?.contextWindow, 1_000_000);
+  assert.equal(byId.get("gemini-4-hydrogen")?.maxTokens, 65_536);
+  assert.equal(selectRuntimeModel(byId.get("gemini-4-hydrogen")!, "xhigh").thinkingLevelMap?.high, "gemini-4-hydrogen-xhigh");
+  assert.deepEqual(byId.get("gemini-4-argon")?.thinking?.efforts, ["low", "medium", "high"]);
+  assert.ok(byId.has("claude-sonnet-5-5"));
+  assert.ok(byId.has("claude-opus-5-5"));
+  assert.ok(byId.has("gpt-oss-120b"));
+  assert.equal(byId.get("claude-sonnet-5-5")?.contextWindow, 1_000_000);
 });
 
 test("cache validation accepts all vendors and rejects malformed data", () => {

@@ -9,7 +9,8 @@ if (!process.argv.includes("--live")) throw new Error("Pass --live explicitly; t
 
 const wrapper = path.join(os.homedir(), ".omp/plugins/node_modules/omp-antigravity-acp-provider");
 const version = JSON.parse(fs.readFileSync(path.join(wrapper, "package.json"), "utf8")).version;
-const { TierConnection, ensureAntigravityAcpReady } = await import(pathToFileURL(path.join(wrapper, "extension/runtime.mjs")).href);
+const root = path.join(wrapper, ".runtime", version, "node_modules/omp-antigravity-acp-provider");
+const { TierConnection, ensureAntigravityAcpReady } = await import(pathToFileURL(path.join(root, "extension/runtime.mjs")).href);
 
 const report: any = { installedVersion: version, answer: "", rawEvents: {}, setModel: {}, stateAfter: {}, promptResult: null };
 await ensureAntigravityAcpReady();

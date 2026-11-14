@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { McpServer } from "@agentclientprotocol/sdk";
-import { PiMcpBridge } from "../extension/vendor/pi-antigravity-acp-provider/src/mcp/bridge.ts";
-import { resolveAntigravityAcpDirectory } from "../extension/vendor/pi-antigravity-acp-provider/src/acp/antigravity.ts";
-import { selectorValues, sessionModes } from "../extension/vendor/pi-antigravity-acp-provider/src/acp/session-state.ts";
+import { PiMcpBridge } from "../extension/runtime/tools/bridge.ts";
+import { resolveAntigravityAcpDirectory } from "../extension/runtime/acp/antigravity.ts";
+import { selectorValues, sessionModes } from "../extension/runtime/acp/session-state.ts";
 
 if (!process.argv.includes("--live")) {
   throw new Error("Pass --live explicitly; this probe creates ACP sessions but sends no model prompt.");

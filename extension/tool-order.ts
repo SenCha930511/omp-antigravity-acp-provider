@@ -1,4 +1,6 @@
+// OMP supplies tools in its own declaration order. ACP projections, the MCP
+// tools/list response and every omission report keep that order; sorting here
+// would silently reorder both the bridge and the task-reservation boundary.
 export function stableTools<T extends { name: string }>(tools: readonly T[]): T[] {
-  // Preserve declarations and executable fields; normalize ordering only.
-  return [...tools].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  return [...tools];
 }

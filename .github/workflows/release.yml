@@ -75,6 +75,7 @@ jobs:
         run: |
           npm run check:versions
           node --test scripts/test-check-release-versions.mjs
+          node --test scripts/test-bump-release.mjs
 
       - name: Set the release commit as gitHead
         run: npm pkg set gitHead="$(git rev-parse HEAD)"
