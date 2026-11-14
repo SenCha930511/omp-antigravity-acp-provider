@@ -8,13 +8,14 @@ const VERSION_PATTERN = new RegExp(`^${STABLE_VERSION}(?![\\s\\S])`);
 const CHANGELOG_HEADING = new RegExp(`^## (${STABLE_VERSION}) — (\\d{4}-\\d{2}-\\d{2})$`);
 const ADAPTER_DECLARATION = /^[ \t]*export const ADAPTER_VERSION = "([^"\r\n]*)";[ \t]*$/gm;
 const ANY_ADAPTER_DECLARATION = /^[ \t]*export\s+const\s+ADAPTER_VERSION\b[^\r\n]*/gm;
-const USAGE = "Usage: node scripts/check-release-versions.mjs [--root <dir>] [--release --tag <tag>]";
+const USAGE = "Usage: node scripts/check-release-versions.mjs [--root <dir>] [--release --tag <tag> [--notes-output <file>]]";
 
 function parseArgs(argv) {
   const options = {
     root: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
     release: false,
     tag: undefined,
+    notesOutput: undefined,
   };
   const seen = new Set();
   for (let index = 0; index < argv.length; index += 1) {
@@ -25,17 +26,21 @@ function parseArgs(argv) {
       options.release = true;
       continue;
     }
-    if (argument !== "--root" && argument !== "--tag") throw new Error(`unknown argument: ${argument}`);
+    if (argument !== "--root" && argument !== "--tag" && argument !== "--notes-output") {
+      throw new Error(`unknown argument: ${argument}`);
+    }
     if (seen.has(argument)) throw new Error(`${argument} may be supplied only once`);
     seen.add(argument);
     const value = argv[index + 1];
     if (!value || value.startsWith("--")) throw new Error(`${argument} requires a nonempty value`);
     index += 1;
     if (argument === "--root") options.root = path.resolve(value);
-    else options.tag = value;
+    else if (argument === "--tag") options.tag = value;
+    else options.notesOutput = path.resolve(value);
   }
   if (options.release && options.tag === undefined) throw new Error("--release requires --tag");
   if (!options.release && options.tag !== undefined) throw new Error("--tag requires --release");
+  if (!options.release && options.notesOutput !== undefined) throw new Error("--notes-output requires --release");
   return options;
 }
 
@@ -132,9 +137,11 @@ function checkRelease(root, options, expected, problems) {
   }
   const text = readText(root, "CHANGELOG.md", problems);
   if (text === undefined) return;
+  const rawLines = text.replace(/<!--[\s\S]*?-->/g, "").split(/\r?\n/);
   const lines = [];
   let fence;
-  for (const line of text.replace(/<!--[\s\S]*?-->/g, "").split(/\r?\n/)) {
+  for (let index = 0; index < rawLines.length; index += 1) {
+    const line = rawLines[index];
     const opening = line.trimStart();
     if (fence !== undefined) {
       if (opening.startsWith(fence)) fence = undefined;
@@ -144,10 +151,10 @@ function checkRelease(root, options, expected, problems) {
       fence = opening.slice(0, 3);
       continue;
     }
-    lines.push(line);
+    lines.push({ line, rawIndex: index });
   }
-  if (lines[0] !== "# Changelog") problems.push("CHANGELOG.md: must start with # Changelog");
-  const headings = lines.map((line, index) => ({ line, index })).filter(({ line }) => /^##(?!#)/.test(line));
+  if (lines[0]?.line !== "# Changelog") problems.push("CHANGELOG.md: must start with # Changelog");
+  const headings = lines.filter(({ line }) => /^##(?!#)/.test(line));
   const first = headings[0];
   if (!first) {
     problems.push("CHANGELOG.md: missing a ## version heading");
@@ -171,6 +178,17 @@ function checkRelease(root, options, expected, problems) {
     if (headings.slice(1).some(({ line }) => targetHeading.test(line))) {
       problems.push(`CHANGELOG.md: duplicate heading for target version ${expected}`);
     }
+  }
+  const sectionLines = rawLines.slice(first.rawIndex + 1, headings[1]?.rawIndex);
+  while (sectionLines.length > 0 && sectionLines[0].trim() === "") sectionLines.shift();
+  while (sectionLines.length > 0 && sectionLines[sectionLines.length - 1].trim() === "") sectionLines.pop();
+  const body = sectionLines.join("\n");
+  if (!body) {
+    problems.push(`CHANGELOG.md: release section for ${expected} must not be empty`);
+  }
+  if (problems.length === 0 && options.notesOutput) {
+    fs.mkdirSync(path.dirname(options.notesOutput), { recursive: true });
+    fs.writeFileSync(options.notesOutput, `${body}\n`);
   }
 }
 

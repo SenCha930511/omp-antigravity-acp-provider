@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, access, readdir } from "node:fs/promises";
+import { mkdtemp, rm, access, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -18,21 +18,56 @@ const runNpm = (args, options) => {
     windowsVerbatimArguments: process.platform === "win32",
   });
 };
+async function measureUnpackedSize(directory) {
+  let total = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) total += await measureUnpackedSize(fullPath);
+    else total += (await stat(fullPath)).size;
+  }
+  return total;
+}
+
+const tarballArgIndex = process.argv.indexOf("--tarball");
+assert.ok(tarballArgIndex === -1 || Boolean(process.argv[tarballArgIndex + 1]), "--tarball requires a tarball path");
+const suppliedTarball = tarballArgIndex === -1 ? undefined : path.resolve(process.argv[tarballArgIndex + 1]);
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temporary = await mkdtemp(path.join(tmpdir(), "omp-acp-packed-"));
 try {
-  const packed = JSON.parse((await runNpm(["pack", "--ignore-scripts", "--json", "--pack-destination", temporary], {
-    cwd: root,
-  })).stdout);
-  const artifact = Array.isArray(packed) ? packed[0] : Object.values(packed)[0];
-  const files = artifact.files.map(file => file.path);
+  let tarballPath;
+  let files;
+  let packedSize;
+  let unpackedSize;
+  if (suppliedTarball) {
+    tarballPath = suppliedTarball;
+    packedSize = (await stat(tarballPath)).size;
+    const listed = await execute("tar", ["-tzf", path.basename(tarballPath)], { cwd: path.dirname(tarballPath) });
+    files = listed.stdout
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line.length > 0 && !line.endsWith("/"))
+      .map(line => line.replace(/^package\//, ""));
+  } else {
+    const packed = JSON.parse((await runNpm(["pack", "--ignore-scripts", "--json", "--pack-destination", temporary], {
+      cwd: root,
+    })).stdout);
+    const artifact = Array.isArray(packed) ? packed[0] : Object.values(packed)[0];
+    tarballPath = path.join(temporary, artifact.filename);
+    files = artifact.files.map(file => file.path);
+    packedSize = artifact.size;
+    unpackedSize = artifact.unpackedSize;
+  }
   assert.ok(files.includes("extension/runtime.mjs"));
   assert.ok(files.includes("THIRD_PARTY_LICENSES.txt"));
+  assert.ok(files.includes("extension/ambient.d.ts"));
+  assert.ok(files.includes("extension/runtime.d.mts"));
+  assert.ok(files.includes("extension/tool-relay-protocol.d.mts"));
   assert.ok(!files.some(file => /(?:^|\/)(?:\.env|node_modules|sessions)(?:\/|$)/.test(file)));
-  console.log(`Packed ${artifact.filename}: ${artifact.size} bytes`);
+  console.log(`Packed ${path.basename(tarballPath)}: ${packedSize} bytes`);
 
   const install = path.join(temporary, "consumer");
-  await runNpm(["install", "--prefix", install, path.join(temporary, artifact.filename),
+  await runNpm(["install", "--prefix", install, tarballPath,
     "--omit=dev", "--ignore-scripts", "--legacy-peer-deps=false", "--no-audit", "--no-fund"], {
     cwd: temporary,
     timeout: 240_000,
@@ -49,9 +84,10 @@ try {
   await access(path.join(installed, "extension/assets/src/acp/supervisor.mjs"));
   await access(path.join(installed, "extension/assets/runtime-manifest.json"));
   assert.deepEqual((await readdir(path.join(install, "node_modules"))).filter(name => !name.startsWith(".")), ["omp-antigravity-acp-provider"]);
-  assert.ok(artifact.unpackedSize < 8 * 1024 * 1024, "Standalone adapter must stay below the tested 8 MiB package budget");
+  unpackedSize ??= await measureUnpackedSize(installed);
+  assert.ok(unpackedSize < 8 * 1024 * 1024, "Standalone adapter must stay below the tested 8 MiB package budget");
   await execute(process.execPath, [path.join(installed, "extension/assets/src/acp/supervisor.mjs"), "--command", process.execPath, "-e", "process.exit(0)"], { timeout: 10_000 });
-  console.log(`Standalone install: ${artifact.unpackedSize} unpacked bytes, no production dependencies`);
+  console.log(`Standalone install: ${unpackedSize} unpacked bytes, no production dependencies`);
   if (process.platform !== "win32") console.log("Allocated installation KiB:", (await execute("du", ["-sk", installed])).stdout.trim().split(/\s+/)[0]);
   console.log("Clean production install and portable runtime assets: PASS");
 
@@ -63,7 +99,7 @@ try {
   const catalog = await execute(catalogLaunch.command, catalogLaunch.args, {
     cwd: temporary,
     env: { ...process.env, AGY_ACP_BIN: process.execPath, GEMINI_API_KEY: "offline-fixture", HOME: temporary,
-      PI_CODING_AGENT_DIR: path.join(temporary, "agent") },
+      USERPROFILE: temporary, PI_CODING_AGENT_DIR: path.join(temporary, "agent") },
     timeout: 120_000,
     maxBuffer: 1024 * 1024,
     windowsHide: true,

@@ -11,3 +11,5 @@ THIRD_PARTY_LICENSES.txt
 !.env.example
 coverage/
 docs/
+dist/
+release/
