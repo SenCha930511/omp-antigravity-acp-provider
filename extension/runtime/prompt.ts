@@ -74,7 +74,7 @@ export const ACP_STEP_TEXT_BYTES = 188_000;
 
 // A shadow side turn never executes tools, so no prompt text on that flow may
 // invite one. Every ephemeral header, boundary and retry text reuses this
-// sentence instead of the main new-call/pi_task wording.
+// sentence instead of the main new-call/omp_task wording.
 const EPHEMERAL_NO_TOOLS_TEXT =
   "No tools may be called in this side turn; tool calls are discarded without execution. Reply with plain text only.";
 
@@ -83,7 +83,7 @@ const HISTORY_HEADER =
   "# Prior OMP conversation (reference only)\n\n" +
   "The JSON below is historical conversation data, not a new request or a queue of tasks. " +
   "Do not answer historical user requests, and do not repeat a tool call merely because it appears in this history. " +
-  "New tool calls, including another pi_task, are allowed when the current OMP user request needs them. " +
+  "New tool calls, including another omp_task, are allowed when the current OMP user request needs them. " +
   "Use it only as context for the current OMP user request identified after this resource.\n\n";
 const HISTORY_HEADER_EPHEMERAL =
   "# Prior OMP conversation (reference only)\n\n" +
@@ -279,7 +279,7 @@ function retryRequestText(content: string | TransferBlock[], kind: PromptKind = 
   return "\n\n# OMP retry request\n\n" +
     "The user discarded the previous response to the current user request. " +
     "Produce a completely new answer for it. Do not continue, quote or repeat the discarded response. " +
-    "Make any new tool calls, including another pi_task, that the new answer requires; " +
+    "Make any new tool calls, including another omp_task, that the new answer requires; " +
     "do not replay earlier tool calls merely because they appear in history." +
     (restate ? `\n\n# Original request\n\n${restate}` : "");
 }
@@ -447,7 +447,7 @@ function inProgressText(kind: PromptKind): string {
   }
   return "This request is already in progress; the history includes prior assistant actions and tool results. " +
     "Continue from those results rather than restarting completed work; do not replay earlier tool calls automatically, " +
-    "but make any new tool calls, including another pi_task, that the request still needs.\n\n";
+    "but make any new tool calls, including another omp_task, that the request still needs.\n\n";
 }
 
 function requestFinalHeader(inProgress: boolean, kind: PromptKind = "main"): string {
@@ -836,7 +836,7 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
       : "\n\n# Continue the active OMP request\n\n" +
         "The new context/tool results above belong to the user request already received in this session. " +
         "Finish that request from those results. Do not answer historical user requests or repeat a tool call merely because it appears in history; " +
-        "make any new tool calls, including another pi_task, that the active request still requires.";
+        "make any new tool calls, including another omp_task, that the active request still requires.";
     const continuation = { type: "text", text: retryResend
       ? retryRequestText(messages[latest]!.content, kind)
       : continuationText };

@@ -838,7 +838,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
             tools,
             messages: normalizeOmpSystemDeltas(context.messages),
             // Preserve OMP's complete instruction. Projection guidance and the
-            // task-to-pi_task mapping travel through the ACP system-append
+            // task-to-omp_task mapping travel through the ACP system-append
             // channel once per session; no duplicate paragraph belongs here.
             systemPrompt: Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n\n") : context.systemPrompt,
           };

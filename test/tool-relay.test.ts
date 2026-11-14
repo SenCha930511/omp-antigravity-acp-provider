@@ -254,7 +254,7 @@ test("relay config accepts only 0 or 5000 through 165000", () => {
 });
 
 test("the relay control name is reserved from projected user tools", () => {
-  assert.equal(projectedMcpName("read"), "pi_read");
-  assert.equal(projectedMcpName("omp_await_result"), TOOL_RELAY_CONTROL_NAME);
-  assert.equal(projectedMcpName("bad name!"), "pi_bad_name_");
+  assert.equal(projectedMcpName("read"), "omp_read");
+  assert.equal(projectedMcpName("await_result"), TOOL_RELAY_CONTROL_NAME);
+  assert.equal(projectedMcpName("bad name!"), "omp_bad_name_");
 });

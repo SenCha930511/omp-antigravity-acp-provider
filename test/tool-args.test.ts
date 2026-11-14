@@ -110,8 +110,8 @@ test("renders required parameters first, then optional ones in declaration order
     required: ["file_path", "offset"],
   };
   assert.equal(
-    renderToolSignature("pi_read", schema),
-    "pi_read(file_path: string, offset: number, limit?: number, dry?: boolean)",
+    renderToolSignature("omp_read", schema),
+    "omp_read(file_path: string, offset: number, limit?: number, dry?: boolean)",
   );
 });
 
@@ -121,9 +121,9 @@ test("renders enums capped at six values", () => {
     properties: { mode: { enum: ["a", "b", "c", "d", "e", "f", "g"] } },
     required: ["mode"],
   };
-  assert.equal(renderToolSignature("pi_set", schema), "pi_set(mode: a|b|c|d|e|f|...)");
+  assert.equal(renderToolSignature("omp_set", schema), "omp_set(mode: a|b|c|d|e|f|...)");
   const short = { type: "object", properties: { mode: { enum: ["read", "write"] } }, required: ["mode"] };
-  assert.equal(renderToolSignature("pi_set", short), "pi_set(mode: read|write)");
+  assert.equal(renderToolSignature("omp_set", short), "omp_set(mode: read|write)");
 });
 
 test("renders arrays and unions, degrading past the depth cap", () => {
@@ -138,12 +138,12 @@ test("renders arrays and unions, degrading past the depth cap", () => {
     },
   };
   assert.equal(
-    renderToolSignature("pi_x", schema),
-    "pi_x(lines?: string[], target?: string|number, nested?: any[][], wide?: string|number|boolean|null, blob?: any)",
+    renderToolSignature("omp_x", schema),
+    "omp_x(lines?: string[], target?: string|number, nested?: any[][], wide?: string|number|boolean|null, blob?: any)",
   );
 });
 
 test("tolerates an undefined schema", () => {
-  assert.equal(renderToolSignature("pi_x", undefined), "pi_x()");
-  assert.equal(renderToolSignature("pi_x", { type: "object", required: ["file_path"] }), "pi_x(file_path: any)");
+  assert.equal(renderToolSignature("omp_x", undefined), "omp_x()");
+  assert.equal(renderToolSignature("omp_x", { type: "object", required: ["file_path"] }), "omp_x(file_path: any)");
 });

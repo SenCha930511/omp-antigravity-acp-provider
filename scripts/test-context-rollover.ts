@@ -166,11 +166,11 @@ try {
   assert.deepEqual(hostTools.map((tool: { name: string }) => tool.name).sort(), ["context_notes", "new_context"],
     "the real OMP CLI must declare both requested host tools");
   const projectedTools = declarationLog.filter(entry => entry.kind === "mcp-tools").flatMap(entry => entry.tools)
-    .filter(tool => tool.name === "pi_context_notes" || tool.name === "pi_new_context");
-  assert.deepEqual(projectedTools.map(tool => tool.name).sort(), ["pi_context_notes", "pi_new_context"],
+    .filter(tool => tool.name === "omp_context_notes" || tool.name === "omp_new_context");
+  assert.deepEqual(projectedTools.map(tool => tool.name).sort(), ["omp_context_notes", "omp_new_context"],
     "the real loopback MCP bridge must expose both projected tools");
   for (const hostTool of hostTools) {
-    const projected = projectedTools.find(tool => tool.name === `pi_${hostTool.name}`);
+    const projected = projectedTools.find(tool => tool.name === `omp_${hostTool.name}`);
     assert.ok(projected?.inputSchema, `${hostTool.name} must have an observed MCP input schema`);
     const raw = projectToolSchema(hostTool.parameters);
     assert.ok("schema" in raw, `${hostTool.name}'s raw host declaration must be projectable`);
@@ -204,9 +204,9 @@ try {
   ], "both supplied intent and missing-intent arguments must survive restoration without invented fields");
   const mcpCalls = witnessLog.filter(entry => entry.kind === "mcp-call");
   assert.deepEqual(mcpCalls.map(entry => ({ purpose: entry.purpose, name: entry.name, arguments: entry.arguments, activePrompts: entry.activePrompts })), [
-    { purpose: "supplied-intent", name: "pi_context_notes", arguments: notesArguments, activePrompts: 1 },
-    { purpose: "save-no-intent", name: "pi_context_notes", arguments: { text: noIntentText }, activePrompts: 1 },
-    { purpose: "read-no-arguments", name: "pi_context_notes", arguments: {}, activePrompts: 1 },
+    { purpose: "supplied-intent", name: "omp_context_notes", arguments: notesArguments, activePrompts: 1 },
+    { purpose: "save-no-intent", name: "omp_context_notes", arguments: { text: noIntentText }, activePrompts: 1 },
+    { purpose: "read-no-arguments", name: "omp_context_notes", arguments: {}, activePrompts: 1 },
   ], "all three MCP invocations must occur sequentially during the active ACP prompt");
   const mcpResults = witnessLog.filter(entry => entry.kind === "mcp-result");
   assert.deepEqual(mcpResults.map(entry => entry.isError), [false, false, false],
@@ -242,7 +242,7 @@ try {
     events: log.filter(entry => entry.kind === "event").map(entry => ({ event: entry.event, details: entry.details })),
     ompTools: log.findLast(entry => entry.kind === "stream")?.tools ?? [],
     projectedTools: log.filter(entry => entry.kind === "mcp-tools").flatMap(entry => entry.tools)
-      .filter(tool => tool.name === "pi_context_notes" || tool.name === "pi_new_context"),
+      .filter(tool => tool.name === "omp_context_notes" || tool.name === "omp_new_context"),
     mcpCalls: log.filter(entry => entry.kind === "mcp-call"),
     mcpResults: log.filter(entry => entry.kind === "mcp-result"),
     restoredToolCalls: log.filter(entry => entry.kind === "tool-call").map(entry => entry.toolCall),

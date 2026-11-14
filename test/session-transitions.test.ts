@@ -665,12 +665,12 @@ test("mid-session tool changes and volatile system-reminder/tool-name updates ke
     const writeTool = { name: "write", description: "Write", parameters: { type: "object", properties: {} } };
     const first = user("REQ_TOOLS_FIRST");
     const answer = await f.turn("warm-tools", [first], {
-      systemPrompt: "CORE_POLICY\n\nOMP tool names: pi_read",
+      systemPrompt: "CORE_POLICY\n\nOMP tool names: omp_read",
       tools: [readTool],
     });
     const sessionId = (await f.store.get("warm-tools"))!.acpSessionId;
     await f.turn("warm-tools", [first, answer, user("REQ_TOOLS_SECOND")], {
-      systemPrompt: "CORE_POLICY\n\n<system-reminder>\nToday: 2026-11-08\n</system-reminder>\n\nOMP tool names: pi_read, pi_write",
+      systemPrompt: "CORE_POLICY\n\n<system-reminder>\nToday: 2026-11-08\n</system-reminder>\n\nOMP tool names: omp_read, omp_write",
       tools: [readTool, writeTool],
     });
     assert.equal(f.connections.length, 1, "tool and reminder updates must not tear down the warm session");

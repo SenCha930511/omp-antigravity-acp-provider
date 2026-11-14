@@ -36,7 +36,7 @@ TierConnection.prototype.initialize = async function(signal) {
       active.sessionRouting.push({
         method,
         nativeInstructionPresent: append?.includes("DIAGNOSTIC_SYSTEM_MARKER") === true,
-        piTaskMappingPresent: append?.includes("guidance about task maps to pi_task") === true,
+        piTaskMappingPresent: append?.includes("guidance about task maps to omp_task") === true,
         schemaGuidancePresent: append?.includes("supplied tool schema") === true,
         legacyApprovalTextPresent: append?.includes("obtain explicit approval") === true,
         append,

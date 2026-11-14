@@ -167,7 +167,7 @@ try {
   assert.equal(rejected.message.stopReason, "stop", "a call missing a required key must not park as an OMP tool call");
   const rejection = messageText(rejected);
   assert.match(rejection, /missing required path/);
-  assert.match(rejection, /Expected signature: pi_read\(path: string\)/);
+  assert.match(rejection, /Expected signature: omp_read\(path: string\)/);
   console.log("Wire tool-argument guard (alias rename, missing-key signature): PASS");
 } finally {
   await guardRuntime.close();

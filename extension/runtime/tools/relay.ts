@@ -263,7 +263,7 @@ export function relayNoticeResult(callId: string): CallToolResult {
   return { content: [{ type: "text", text: relayNotice(callId) }], isError: false };
 }
 export function projectedMcpName(name: string): string {
-  return `pi_${name}`.replace(/[^a-zA-Z0-9_-]/gu, "_").slice(0, 64);
+  return `omp_${name}`.replace(/[^a-zA-Z0-9_-]/gu, "_").slice(0, 64);
 }
 
 export function canonicalArguments(value: unknown): string {

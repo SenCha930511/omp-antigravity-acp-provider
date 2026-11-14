@@ -19,12 +19,12 @@ This is an independent adaptation, **NOT** an official Google or OMP integration
 - All server-advertised models, including Claude, GPT-OSS and future IDs when the ACP endpoint advertises them.
 - CLI-first selection. When a usable `agy` CLI is on `PATH`, the adapter launches it through a generated `AGY_ACP_BIN` wrapper. The managed runtime is the fallback. An explicit `AGY_ACP_BIN` always wins.
 - Per-model thinking levels, exposed only when the server confirms them. The offline catalog includes Gemini 4 Hydrogen through `xhigh` and known partner models; the first inference after an empty cache attempts real server discovery.
-- OMP tools through an authenticated loopback MCP bridge.
+- OMP tools through an authenticated loopback MCP bridge, exposed to ACP as `omp_*` names.
 - ACP-native tools are disabled by default for strict OMP-only sessions; `/antigravity-acp native-tools prefer` restores them.
 - Standby ACP initialization coordinated with discovery, plus warm session reuse and guarded oldest-image history continuity.
 - `/login` plus `/antigravity-acp` account, usage and cleanup commands.
 - API-equivalent cost estimates from a model-ID rate table, not subscription billing. Native response usage takes precedence, with a read-only SQLite fallback for completed model steps when no supplemental usage query runs.
-- Long-running OMP tools survive the MCP request window through a relay. The model resumes the same result with `pi_omp_await_result`; the control tool is a separate MCP server and never appears in OMP's tool list.
+- Long-running OMP tools survive the MCP request window through a relay. The model resumes the same result with `omp_await_result`; the control tool is a separate MCP server and never appears in OMP's tool list.
 - Permission requests are tied to the originating session, turn and tool call. Forged, conflicting or previous-turn identities fail closed, while normal requests still use OMP's human review.
 - The MCP `tools/list` reflects the current OMP tool set. The offline wire test covers add, remove and restore on one warm ACP session.
 - Tool-argument hardening on the MCP bridge. Habitual alias mistakes such as `path` for `file_path` are corrected only when the tool schema makes the mapping unambiguous, and rejected calls return the missing required keys plus the tool's expected signature instead of a bare schema failure.
@@ -125,7 +125,7 @@ To remove the installed plugin, use `omp plugin uninstall omp-antigravity-acp-pr
 | Login opens the wrong Google account | Both login paths always start a fresh sign-in. Choose the intended account (or "Use another account") on Google's consent screen. |
 | Default `disabled` native-tool mode rejects the session | The official runtime must advertise system-append support (1.4.1+). Upgrade the runtime or run `/antigravity-acp native-tools prefer`. |
 | The first request is slow | Runtime download and cold ACP start happen once; later turns reuse the warm session. |
-| A tool call returns a relay notice | The model should call `pi_omp_await_result` with the notice's `call_id`. Lower `OMP_ACP_TOOL_RELAY_MS` or set it to `0` to disable relay. |
+| A tool call returns a relay notice | The model should call `omp_await_result` with the notice's `call_id`. Lower `OMP_ACP_TOOL_RELAY_MS` or set it to `0` to disable relay. |
 
 ## Install: for agents
 
@@ -268,7 +268,7 @@ Inference and `/antigravity-acp refresh` refuse to start ACP when no local Googl
 
 ## Long tools and relay
 
-A tool call that outlives `OMP_ACP_TOOL_RELAY_MS` (default 85000, `0` disables, otherwise 5000 through 165000) returns a relay notice instead of holding the MCP request open. The model calls `pi_omp_await_result` with the notice's `call_id`; the adapter returns the same original result, not a second execution. The control tool is a separate MCP server and is not added to OMP's tool list. If the ACP turn ends before the result arrives, the adapter retries the same result in a fresh ACP turn; it never delivers a stale result to a new writer. If the model never calls the control tool, the next OMP turn carries the completed result as history or a bounded `<tool_result>` envelope; the adapter never re-executes the tool.
+A tool call that outlives `OMP_ACP_TOOL_RELAY_MS` (default 85000, `0` disables, otherwise 5000 through 165000) returns a relay notice instead of holding the MCP request open. The model calls `omp_await_result` with the notice's `call_id`; the adapter returns the same original result, not a second execution. The control tool is a separate MCP server and is not added to OMP's tool list. If the ACP turn ends before the result arrives, the adapter retries the same result in a fresh ACP turn; it never delivers a stale result to a new writer. If the model never calls the control tool, the next OMP turn carries the completed result as history or a bounded `<tool_result>` envelope; the adapter never re-executes the tool.
 
 Permission requests are correlated by session, turn and `toolCallId` with structured `mcpServerName`/`mcpToolName` metadata. A conflicting update, a previous-turn id, or a permission-before-update that claims MCP identity is rejected with `reject_once` when available, otherwise `cancelled`. Normal requests still go through OMP's human review.
 

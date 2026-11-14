@@ -347,12 +347,12 @@ async function prompt(state, id, params) {
       return;
     }
     if (text.includes("WIRE_EARLY_END_TEST")) {
-      await callTool(state, "pi_read", { path: "/early" });
+      await callTool(state, "omp_read", { path: "/early" });
       finishPrompt(state, id, { stopReason: "end_turn" });
       return;
     }
     if (text.includes("WIRE_COMPACTION_TEST")) {
-      const pending = callTool(state, "pi_read", { path: "/compaction" });
+      const pending = callTool(state, "omp_read", { path: "/compaction" });
       notify(state, {
         sessionUpdate: "compaction_update",
         compactionId: "compact-1",
@@ -365,8 +365,8 @@ async function prompt(state, id, params) {
     }
     if (text.includes("WIRE_TOOL_BATCH_TEST")) {
       const [first, second] = await Promise.all([
-        callToolWithRelay(state, "pi_read", { path: "/first" }),
-        callToolWithRelay(state, "pi_read", { path: "/second" }),
+        callToolWithRelay(state, "omp_read", { path: "/first" }),
+        callToolWithRelay(state, "omp_read", { path: "/second" }),
       ]);
       notify(state, message(`FIRST:${textOf(first)}`));
       notify(state, message(`SECOND:${textOf(second)}`));
@@ -374,7 +374,7 @@ async function prompt(state, id, params) {
       return;
     }
     if (text.includes("WIRE_TOOL_ONLY_TEST")) {
-      const result = await callTool(state, "pi_read", { path: "/tool-only" });
+      const result = await callTool(state, "omp_read", { path: "/tool-only" });
       notify(state, message(textOf(result)));
       finishPrompt(state, id, { stopReason: "end_turn" });
       return;
@@ -388,19 +388,19 @@ async function prompt(state, id, params) {
       return;
     }
     if (text.includes("WIRE_TOOL_TEST")) {
-      const result = await callToolWithRelay(state, "pi_read", { path: "/wire" });
+      const result = await callToolWithRelay(state, "omp_read", { path: "/wire" });
       notify(state, message(`TOOL:${textOf(result)}`));
       finishPrompt(state, id, { stopReason: "end_turn" });
       return;
     }
     if (text.includes("WIRE_TOOL_ALIAS_TEST")) {
-      const result = await callToolWithRelay(state, "pi_read", { file_path: "/wire-alias" });
+      const result = await callToolWithRelay(state, "omp_read", { file_path: "/wire-alias" });
       notify(state, message(`TOOL:${textOf(result)}`));
       finishPrompt(state, id, { stopReason: "end_turn" });
       return;
     }
     if (text.includes("WIRE_TOOL_MISSING_TEST")) {
-      const result = await callTool(state, "pi_read", {});
+      const result = await callTool(state, "omp_read", {});
       notify(state, message(`TOOL:${textOf(result)}`));
       finishPrompt(state, id, { stopReason: "end_turn" });
       return;
