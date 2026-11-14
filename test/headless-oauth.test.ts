@@ -77,3 +77,9 @@ test("rejects missing redirect_uri or state", () => {
 test("rejects a malformed URL", () => {
   assert.throws(() => parseAuthorization("not-a-valid-url"), /invalid OAuth authorization URL/);
 });
+
+test("trims surrounding whitespace around the authorization URL", () => {
+  const url = "  https://accounts.google.com/o/oauth2/auth?client_id=123&redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Fcallback&state=TRIMMED  ";
+  const result = parseAuthorization(url);
+  assert.equal(result.state, "TRIMMED");
+});
