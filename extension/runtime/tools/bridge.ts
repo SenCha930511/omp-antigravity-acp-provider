@@ -14,11 +14,43 @@ import { Value } from "typebox/value";
 
 import { AntigravityAcpError } from "../acp/errors.ts";
 import { PACKAGE_VERSION, PERMISSION_TOOL_NAME } from "../constants.ts";
+import { projectedMcpName } from "./relay.ts";
 import { projectToolSchema } from "./schema.ts";
 
 const BODY_LIMIT = 1024 * 1024;
 const MAX_TOOLS = 64;
 export const OMP_TASK_TOOL_NAME = "task";
+
+const CONTEXT_CONTROL_TOOLS = new Set(["context_notes", "new_context"]);
+
+export function bridgeExecutionSchema(tool: Pick<Tool, "name" | "parameters">): Tool["parameters"] {
+	const parameters = tool.parameters;
+	if (!CONTEXT_CONTROL_TOOLS.has(tool.name) || parameters === null || typeof parameters !== "object" || Array.isArray(parameters)) {
+		return parameters;
+	}
+	const schema = parameters as unknown as Record<string, unknown>;
+	const properties = schema.properties;
+	const required = schema.required;
+	if (schema.type !== "object" || schema.additionalProperties !== false ||
+		properties === null || typeof properties !== "object" || Array.isArray(properties) ||
+		!Array.isArray(required) || !required.includes("i")) {
+		return parameters;
+	}
+	const expectedKeys = tool.name === "context_notes" ? ["i", "text"] : ["i"];
+	if (Object.keys(properties).length !== expectedKeys.length ||
+		!expectedKeys.every(key => Object.hasOwn(properties, key))) {
+		return parameters;
+	}
+	const intent = Reflect.get(properties, "i");
+	const text = Reflect.get(properties, "text");
+	if (intent === null || typeof intent !== "object" || Array.isArray(intent) || Reflect.get(intent, "type") !== "string" ||
+		(tool.name === "context_notes" && (text === null || typeof text !== "object" || Array.isArray(text) || Reflect.get(text, "type") !== "string"))) {
+		return parameters;
+	}
+	// These two native tools receive OMP's injected intent as call metadata,
+	// not as an execute argument. Keep the property and supplied value intact.
+	return { ...schema, required: required.filter(key => key !== "i") } as Tool["parameters"];
+}
 
 interface BridgeTool {
 	mcpName: string;
@@ -60,6 +92,10 @@ export function planToolProjection(tools: readonly Tool[]): ToolOmission[] {
 	return omissions;
 }
 
+export function planProjectedToolNames(tools: readonly Tool[]): readonly string[] {
+	return projectTools(tools, []).map(tool => tool.piName);
+}
+
 export class PiMcpBridge {
 	fingerprint: string;
 	readonly omissions: ToolOmission[] = [];
@@ -82,6 +118,10 @@ export class PiMcpBridge {
 
 	get empty(): boolean {
 		return this.tools.length === 0;
+	}
+
+	get projectedToolNames(): readonly string[] {
+		return this.tools.map(tool => tool.piName);
 	}
 
 	async start(): Promise<AcpMcpServer | undefined> {
@@ -140,7 +180,17 @@ export class PiMcpBridge {
 			response.writeHead(401).end();
 			return;
 		}
-		const body = await readJson(request);
+		let body: unknown;
+		try {
+			body = await readJson(request);
+		} catch (error) {
+			if (error instanceof SyntaxError) {
+				response.writeHead(400, { "content-type": "application/json" });
+				response.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }));
+				return;
+			}
+			throw error;
+		}
 		const protocol = new Server(
 			{ name: "pi-antigravity-acp-tools", version: PACKAGE_VERSION },
 			{ capabilities: { tools: {} } },
@@ -186,11 +236,12 @@ export class PiMcpBridge {
 }
 
 function projectTool(tool: Tool, names: Set<string>): BridgeTool | ToolOmission {
-	const mcpName = `pi_${tool.name}`.replace(/[^a-zA-Z0-9_-]/gu, "_").slice(0, 64);
+	const mcpName = projectedMcpName(tool.name);
 	if (!mcpName || names.has(mcpName)) {
 		return { name: tool.name, reason: "duplicate or invalid projected name" };
 	}
-	const projected = projectToolSchema(tool.parameters);
+	const originalSchema = bridgeExecutionSchema(tool);
+	const projected = projectToolSchema(originalSchema);
 	if ("reason" in projected) {
 		return { name: tool.name, reason: `schema omitted (${projected.reason})` };
 	}
@@ -200,7 +251,7 @@ function projectTool(tool: Tool, names: Set<string>): BridgeTool | ToolOmission 
 		piName: tool.name,
 		description: tool.description,
 		inputSchema: projected.schema,
-		originalSchema: tool.parameters,
+		originalSchema,
 	};
 }
 

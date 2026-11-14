@@ -14,8 +14,10 @@ import {
   logoutFollow,
   runSecurity,
   secretService,
+  type FreshGoogleLoginAttempt,
   type OmpCommandContext,
 } from "../extension/auth-sync.ts";
+import { createSecretService } from "../extension/secret-service.ts";
 
 const settle = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 // These tests exercise the macOS keychain path on every host. Keep the Linux
@@ -34,6 +36,7 @@ interface AuthFixture {
   removeMarker: () => void;
   fireGeneration: () => void;
   followedNotices: () => string[];
+  emit: (name: string, event: unknown) => void;
 }
 
 function authCoordinatorFixture(overrides: {
@@ -41,8 +44,10 @@ function authCoordinatorFixture(overrides: {
   closeAllRuntimes?: () => Promise<void>;
   isPoolBusy?: () => boolean;
   deferGeneration?: boolean;
+  watchableCredentials?: boolean;
 } = {}): AuthFixture {
   const generationListeners: (() => void)[] = [];
+  const piHandlers = new Map<string, ((event: unknown, ctx: OmpCommandContext) => unknown)[]>();
   const ompCredentials = new Map<string, { refresh?: string; email?: string; authorizedAt?: number }>();
   const notices: string[] = [];
   const logouts: string[] = [];
@@ -56,13 +61,21 @@ function authCoordinatorFixture(overrides: {
             ompCredentials.delete(provider);
             if (!overrides.deferGeneration) for (const listener of generationListeners) listener();
           },
-          onGeneration: (listener: () => void) => { generationListeners.push(listener); return () => {}; },
+          ...(overrides.watchableCredentials === false ? {} : {
+            onGeneration: (listener: () => void) => { generationListeners.push(listener); return () => {}; },
+          }),
         },
       },
     },
   };
   const coordinator = new OmpAuthCoordinator({
-    pi: { on: () => {} },
+    pi: {
+      on: (name, handler) => {
+        const handlers = piHandlers.get(name) ?? [];
+        handlers.push(handler);
+        piHandlers.set(name, handlers);
+      },
+    },
     connections: new Set(),
     isPoolBusy: overrides.isPoolBusy ?? (() => false),
     logoutAllRuntimes: overrides.logoutAllRuntimes ?? (async () => { logouts.push("logout"); }),
@@ -70,6 +83,9 @@ function authCoordinatorFixture(overrides: {
     onSyncProvider: () => {},
   });
   const fireGeneration = () => { for (const listener of generationListeners) listener(); };
+  const emit = (name: string, event: unknown) => {
+    for (const handler of piHandlers.get(name) ?? []) handler(event, ctx);
+  };
   return {
     coordinator,
     ctx,
@@ -82,7 +98,22 @@ function authCoordinatorFixture(overrides: {
     removeMarker: () => { ompCredentials.delete("antigravity-acp"); fireGeneration(); },
     fireGeneration,
     followedNotices: () => notices.filter(text => text.includes("finished the logout OMP started")),
+    emit,
   };
+}
+
+// beginFreshGoogleLogin deletes files from the ACP directory; keep that inside
+// a throwaway GEMINI_HOME so no test can reach the real login.
+async function withTempGeminiHome(run: () => Promise<void>): Promise<void> {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-sync-"));
+  const savedHome = process.env.GEMINI_HOME;
+  process.env.GEMINI_HOME = home;
+  try {
+    await run();
+  } finally {
+    if (savedHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = savedHome;
+    await fs.rm(home, { recursive: true, force: true });
+  }
 }
 
 test("keychain classification separates confirmed absence from failures", async () => {
@@ -110,6 +141,60 @@ test("keychain classification separates confirmed absence from failures", async 
   const present = createKeychain(async () => undefined, "darwin");
   assert.equal(await present.present(), true);
   assert.equal(await present.remove(), true);
+});
+
+test("macOS keychain accepts the CLI account and removes both accounts", async () => {
+  const calls: string[][] = [];
+  const present = new Set(["antigravity"]);
+  const kc = createKeychain(async args => {
+    calls.push(args);
+    const account = args[args.indexOf("-a") + 1];
+    if (args[0] === "find-generic-password" && present.has(account)) return;
+    if (args[0] === "delete-generic-password" && present.delete(account)) return;
+    throw { code: 44, killed: false, signal: null, stderr: NOT_FOUND_STDERR };
+  }, "darwin");
+
+  assert.equal(await kc.present(), true);
+  assert.deepEqual(calls.slice(0, 2), [
+    ["find-generic-password", "-s", "gemini", "-a", "antigravity-acp"],
+    ["find-generic-password", "-s", "gemini", "-a", "antigravity"],
+  ]);
+
+  calls.length = 0;
+  assert.equal(await kc.remove(), true);
+  assert.deepEqual(calls, [
+    ["delete-generic-password", "-s", "gemini", "-a", "antigravity-acp"],
+    ["delete-generic-password", "-s", "gemini", "-a", "antigravity"],
+  ]);
+  assert.equal(present.size, 0);
+});
+
+test("authReady accepts a CLI-only keychain login", async () => {
+  const originalPresent = keychain.present;
+  const savedApiKey = process.env.GEMINI_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  const missing = { code: 44, killed: false, signal: null, stderr: NOT_FOUND_STDERR };
+  let lookedUpCli = false;
+  keychain.present = createKeychain(async args => {
+    const account = args[args.indexOf("-a") + 1];
+    if (account === "antigravity") {
+      lookedUpCli = true;
+      return;
+    }
+    throw missing;
+  }, "darwin").present;
+  try {
+    await withTempGeminiHome(async () => {
+      assert.equal(await authReady(), true);
+      assert.equal(lookedUpCli, true, "authReady must consult the CLI keychain account");
+      assert.equal(await authReady({ allowKeychain: false }), false,
+        "the managed channel must not trust a CLI-only keychain login");
+    });
+  } finally {
+    keychain.present = originalPresent;
+    if (savedApiKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = savedApiKey;
+  }
 });
 
 test("non-darwin platforms skip the subprocess entirely", async () => {
@@ -282,16 +367,20 @@ test("api-key and token-file logins keep priority over the keyring", async () =>
 test("fresh login clears a present keyring entry only after runtime shutdown", async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-keyring-"));
   const savedHome = process.env.GEMINI_HOME;
+  const originalKeychainApplicable = keychain.applicable;
   const originalKeychainPresent = keychain.present;
   const originalKeychainRemove = keychain.remove;
+  const originalSecretApplicable = secretService.applicable;
   const originalSecretRemove = secretService.remove;
   const originalRetryMs = logoutFollow.removalRetryMs;
   const order: string[] = [];
   let present = true, keyringRemoves = 0, keychainRemoves = 0, closed = false;
   process.env.GEMINI_HOME = home;
   logoutFollow.removalRetryMs = 0;
+  keychain.applicable = false;
   keychain.present = async () => undefined;
   keychain.remove = async () => { keychainRemoves++; return undefined; };
+  secretService.applicable = true;
   secretService.present = async () => present;
   secretService.remove = async () => {
     assert.equal(closed, true, "adapter runtimes must exit before the keyring is cleared");
@@ -317,8 +406,10 @@ test("fresh login clears a present keyring entry only after runtime shutdown", a
     await fixture.coordinator.beginFreshGoogleLogin();
     assert.equal(keyringRemoves, 1, "an absent keyring entry is not removed again");
   } finally {
+    keychain.applicable = originalKeychainApplicable;
     keychain.present = originalKeychainPresent;
     keychain.remove = originalKeychainRemove;
+    secretService.applicable = originalSecretApplicable;
     secretService.present = noSecretService;
     secretService.remove = originalSecretRemove;
     logoutFollow.removalRetryMs = originalRetryMs;
@@ -394,6 +485,75 @@ test("a failing keyring removal cannot certify a fresh login", async () => {
     await fs.rm(home, { recursive: true, force: true });
   }
   assert.equal(process.env.GEMINI_HOME, savedHome);
+});
+
+test("an unreachable Linux Secret Service refuses a fresh login", async () => {
+  const originalKeychainApplicable = keychain.applicable;
+  const originalKeychainPresent = keychain.present;
+  const originalKeychainRemove = keychain.remove;
+  const originalSecretApplicable = secretService.applicable;
+  const originalSecretPresent = secretService.present;
+  const originalSecretRemove = secretService.remove;
+  const inapplicableKeychain = createKeychain(async () => undefined, "linux");
+  const unreachable = createSecretService(async () => {
+    throw Object.assign(new Error("synthetic unavailable Secret Service"), { code: "ENOENT" });
+  }, "linux");
+  keychain.applicable = inapplicableKeychain.applicable;
+  keychain.present = inapplicableKeychain.present;
+  keychain.remove = inapplicableKeychain.remove;
+  secretService.applicable = unreachable.applicable;
+  secretService.present = unreachable.present;
+  secretService.remove = unreachable.remove;
+  try {
+    await withTempGeminiHome(async () => {
+      const fixture = authCoordinatorFixture();
+      assert.equal(await secretService.present(), undefined,
+        "the Linux fixture is applicable but its keyring cannot be reached");
+      await assert.rejects(fixture.coordinator.beginFreshGoogleLogin(),
+        /Unable to confirm removal of the Antigravity credentials/);
+    });
+  } finally {
+    keychain.applicable = originalKeychainApplicable;
+    keychain.present = originalKeychainPresent;
+    keychain.remove = originalKeychainRemove;
+    secretService.applicable = originalSecretApplicable;
+    secretService.present = originalSecretPresent;
+    secretService.remove = originalSecretRemove;
+  }
+});
+
+test("a fresh login ignores truly inapplicable credential stores", async () => {
+  const originalKeychainApplicable = keychain.applicable;
+  const originalKeychainPresent = keychain.present;
+  const originalKeychainRemove = keychain.remove;
+  const originalSecretApplicable = secretService.applicable;
+  const originalSecretPresent = secretService.present;
+  const originalSecretRemove = secretService.remove;
+  let runnerCalls = 0;
+  const unsupportedKeychain = createKeychain(async () => { runnerCalls++; }, "linux");
+  const unsupportedSecretService = createSecretService(async () => { runnerCalls++; return ""; }, "darwin");
+  keychain.applicable = unsupportedKeychain.applicable;
+  keychain.present = unsupportedKeychain.present;
+  keychain.remove = unsupportedKeychain.remove;
+  secretService.applicable = unsupportedSecretService.applicable;
+  secretService.present = unsupportedSecretService.present;
+  secretService.remove = unsupportedSecretService.remove;
+  try {
+    await withTempGeminiHome(async () => {
+      const fixture = authCoordinatorFixture();
+      const attempt = await fixture.coordinator.beginFreshGoogleLogin();
+      fixture.coordinator.cancelFreshGoogleLogin(attempt);
+      assert.equal(fixture.logoutCallCount(), 1, "ordinary file cleanup still runs");
+      assert.equal(runnerCalls, 0, "unsupported platform stores never execute their runners");
+    });
+  } finally {
+    keychain.applicable = originalKeychainApplicable;
+    keychain.present = originalKeychainPresent;
+    keychain.remove = originalKeychainRemove;
+    secretService.applicable = originalSecretApplicable;
+    secretService.present = originalSecretPresent;
+    secretService.remove = originalSecretRemove;
+  }
 });
 
 test("the logout summary names the system keyring without exposing a token", () => {
@@ -578,5 +738,513 @@ test("credential watcher sends followed-logout notices to the latest OMP context
     keychain.present = originalPresent;
     keychain.remove = originalRemove;
     logoutFollow.delayMs = originalDelayMs;
+  }
+});
+
+test("a stale marker removed during a fresh login schedules no followed logout", async () => {
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  keychain.present = async () => false;
+  keychain.remove = async () => true;
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  let releaseClose: () => void = () => {};
+  const closing = new Promise<void>(resolve => { releaseClose = resolve; });
+  try {
+    await withTempGeminiHome(async () => {
+      const fixture = authCoordinatorFixture({ closeAllRuntimes: () => closing });
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      const login = fixture.coordinator.beginFreshGoogleLogin();
+      // OMP removes the stale marker while the browser sign-in is still running.
+      fixture.removeMarker();
+      await settle(30);
+      assert.equal(fixture.logoutCallCount(), 0, "the stale marker removal must not finish a logout");
+      assert.equal(fixture.followedNotices().length, 0);
+      releaseClose();
+      await login;
+      assert.equal(fixture.logoutCallCount(), 1, "the fresh login logs out exactly once");
+    });
+  } finally {
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("a stale marker removed while the sign-in runs schedules no followed logout", async () => {
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  keychain.present = async () => false;
+  keychain.remove = async () => true;
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  try {
+    await withTempGeminiHome(async () => {
+      const fixture = authCoordinatorFixture();
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      const attempt = await fixture.coordinator.beginFreshGoogleLogin();
+      const baseline = fixture.logoutCallCount();
+      // OMP drops the stale marker while the browser sign-in is still running.
+      fixture.removeMarker();
+      await settle(30);
+      assert.equal(fixture.logoutCallCount(), baseline, "the sign-in must not be cancelled");
+      assert.equal(fixture.followedNotices().length, 0);
+      // The completed sign-in clears the suppression: a later explicit logout follows.
+      fixture.coordinator.noteLoginSucceeded(attempt);
+      fixture.storeMarker();
+      fixture.removeMarker();
+      await settle(30);
+      assert.equal(fixture.logoutCallCount(), baseline + 1);
+      assert.equal(fixture.followedNotices().length, 1);
+    });
+  } finally {
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("cancel after command logout preserves the known absent marker without a watcher", async () => {
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  keychain.present = async () => false;
+  keychain.remove = async () => true;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  logoutFollow.removalRetryMs = 0;
+  try {
+    await withTempGeminiHome(async () => {
+      const fixture = authCoordinatorFixture({ watchableCredentials: false });
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      await fixture.coordinator.performCommandLogout(fixture.ctx);
+      assert.equal(fixture.coordinator.apiKeyFallback, false);
+      const attempt = await fixture.coordinator.beginFreshGoogleLogin();
+      fixture.coordinator.cancelFreshGoogleLogin(attempt);
+      assert.equal(fixture.coordinator.apiKeyFallback, false,
+        "the command's own confirmed logout must survive a later cancelled login");
+    });
+  } finally {
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("a soft-disable with a retained marker expires before a later real logout", async () => {
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  keychain.present = async () => false;
+  keychain.remove = async () => true;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalDisabledMs = logoutFollow.disabledSuppressionMs;
+  logoutFollow.delayMs = 5;
+  logoutFollow.disabledSuppressionMs = 10;
+  try {
+    const fixture = authCoordinatorFixture();
+    fixture.coordinator.watchOmpCredentials(fixture.ctx);
+    fixture.storeMarker();
+    fixture.emit("credential_disabled", { provider: "antigravity-acp" });
+    await settle(20);
+    fixture.removeMarker();
+    await settle(30);
+    assert.equal(fixture.coordinator.apiKeyFallback, false);
+    assert.equal(fixture.followedNotices().length, 1,
+      "an unrelated automatic disable must not permanently disable real logout handling");
+  } finally {
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.disabledSuppressionMs = originalDisabledMs;
+  }
+});
+
+test("cancelling an external login permits a later real logout", async () => {
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  keychain.present = async () => false;
+  keychain.remove = async () => true;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  try {
+    await withTempGeminiHome(async () => {
+      const fixture = authCoordinatorFixture();
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      const attempt = await fixture.coordinator.beginFreshGoogleLogin();
+      fixture.coordinator.cancelFreshGoogleLogin(attempt);
+      fixture.removeMarker();
+      await settle(30);
+      assert.equal(fixture.coordinator.apiKeyFallback, false);
+      assert.equal(fixture.followedNotices().length, 1);
+      assert.equal(fixture.logoutCallCount(), 2);
+    });
+  } finally {
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("a stale login cancellation preserves the active attempt's suppression", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => { t.mock.timers.reset(); });
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  keychain.present = async () => false;
+  keychain.remove = async () => true;
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  let releaseSecondClose: () => void = () => {};
+  const secondClosing = new Promise<void>(resolve => { releaseSecondClose = resolve; });
+  let secondLogin: Promise<FreshGoogleLoginAttempt> | undefined;
+  try {
+    await withTempGeminiHome(async () => {
+      let closeCalls = 0;
+      const fixture = authCoordinatorFixture({
+        closeAllRuntimes: async () => {
+          closeCalls++;
+          if (closeCalls === 2) await secondClosing;
+        },
+      });
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      // Attempt A finished preparing but its browser flow has not settled.
+      const firstAttempt = await fixture.coordinator.beginFreshGoogleLogin();
+      // Attempt B is now the active fresh login, waiting in its own teardown.
+      secondLogin = fixture.coordinator.beginFreshGoogleLogin();
+      // A late rejection from A must not cancel B's marker-removal suppression.
+      fixture.coordinator.cancelFreshGoogleLogin(firstAttempt);
+      fixture.removeMarker();
+      for (let iteration = 0; iteration < 16; iteration++) {
+        t.mock.timers.tick(1);
+        await Promise.resolve();
+      }
+      assert.equal(fixture.logoutCallCount(), 1,
+        "the stale cancellation must not start a followed logout during attempt B");
+      assert.equal(fixture.followedNotices().length, 0);
+      releaseSecondClose();
+      await secondLogin;
+      assert.equal(fixture.logoutCallCount(), 2, "attempt B still performs its own logout");
+    });
+  } finally {
+    releaseSecondClose();
+    await secondLogin?.catch(() => undefined);
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("a stale login success and duplicate terminal preserve the active attempt's suppression", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => { t.mock.timers.reset(); });
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  keychain.present = async () => false;
+  keychain.remove = async () => true;
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  let releaseSecondClose: () => void = () => {};
+  const secondClosing = new Promise<void>(resolve => { releaseSecondClose = resolve; });
+  let secondLogin: Promise<FreshGoogleLoginAttempt> | undefined;
+  try {
+    await withTempGeminiHome(async () => {
+      let closeCalls = 0;
+      const fixture = authCoordinatorFixture({
+        closeAllRuntimes: async () => {
+          closeCalls++;
+          if (closeCalls === 2) await secondClosing;
+        },
+      });
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      const firstAttempt = await fixture.coordinator.beginFreshGoogleLogin();
+      secondLogin = fixture.coordinator.beginFreshGoogleLogin();
+      fixture.coordinator.noteLoginSucceeded(firstAttempt);
+      fixture.coordinator.cancelFreshGoogleLogin(firstAttempt);
+      fixture.removeMarker();
+      for (let iteration = 0; iteration < 16; iteration++) {
+        t.mock.timers.tick(1);
+        await Promise.resolve();
+      }
+      assert.equal(fixture.logoutCallCount(), 1,
+        "late success and a duplicate terminal must not expose attempt B to a stale logout");
+      assert.equal(fixture.followedNotices().length, 0);
+      releaseSecondClose();
+      const secondAttempt = await secondLogin;
+      assert.equal(fixture.logoutCallCount(), 2, "attempt B still performs its own logout");
+      fixture.coordinator.noteLoginSucceeded(secondAttempt);
+      fixture.storeMarker();
+      fixture.removeMarker();
+      for (let iteration = 0; iteration < 16; iteration++) {
+        t.mock.timers.tick(1);
+        await Promise.resolve();
+      }
+      assert.equal(fixture.logoutCallCount(), 3, "the real final success re-enables later logout handling");
+      assert.equal(fixture.followedNotices().length, 1);
+    });
+  } finally {
+    releaseSecondClose();
+    await secondLogin?.catch(() => undefined);
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("a failed preparation keeps a newer attempt's flags intact", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => { t.mock.timers.reset(); });
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  let failFirstPreparation = false;
+  keychain.present = async () => {
+    if (failFirstPreparation) throw new Error("synthetic first preparation failure");
+    return false;
+  };
+  keychain.remove = async () => true;
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  let releaseFirstClose: () => void = () => {};
+  const firstClosing = new Promise<void>(resolve => { releaseFirstClose = resolve; });
+  let firstLogin: Promise<FreshGoogleLoginAttempt> | undefined;
+  let secondLogin: Promise<FreshGoogleLoginAttempt> | undefined;
+  try {
+    await withTempGeminiHome(async () => {
+      let closeCalls = 0;
+      const fixture = authCoordinatorFixture({
+        closeAllRuntimes: async () => {
+          closeCalls++;
+          if (closeCalls === 1) await firstClosing;
+        },
+      });
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      firstLogin = fixture.coordinator.beginFreshGoogleLogin();
+      for (let iteration = 0; iteration < 64 && closeCalls !== 1; iteration++) {
+        t.mock.timers.tick(1);
+        await Promise.resolve();
+      }
+      assert.equal(closeCalls, 1, "attempt A is inside preparation");
+      secondLogin = fixture.coordinator.beginFreshGoogleLogin();
+      const secondAttempt = await secondLogin;
+      failFirstPreparation = true;
+      releaseFirstClose();
+      await assert.rejects(firstLogin!, /synthetic first preparation failure/);
+      fixture.removeMarker();
+      for (let iteration = 0; iteration < 16; iteration++) {
+        t.mock.timers.tick(1);
+        await Promise.resolve();
+      }
+      assert.equal(fixture.logoutCallCount(), 2,
+        "the failed older preparation must leave only the two begin logouts");
+      assert.equal(fixture.followedNotices().length, 0);
+      fixture.coordinator.noteLoginSucceeded(secondAttempt);
+    });
+  } finally {
+    failFirstPreparation = false;
+    releaseFirstClose();
+    await firstLogin?.catch(() => undefined);
+    await secondLogin?.catch(() => undefined);
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("an earlier success prevents a later cancellation from restoring stale suppression", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => { t.mock.timers.reset(); });
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  keychain.present = async () => false;
+  keychain.remove = async () => true;
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  try {
+    await withTempGeminiHome(async () => {
+      const fixture = authCoordinatorFixture();
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      fixture.emit("credential_disabled", { provider: "antigravity-acp" });
+      const firstAttempt = await fixture.coordinator.beginFreshGoogleLogin();
+      const secondAttempt = await fixture.coordinator.beginFreshGoogleLogin();
+      fixture.coordinator.noteLoginSucceeded(firstAttempt);
+      fixture.coordinator.cancelFreshGoogleLogin(secondAttempt);
+      fixture.removeMarker();
+      for (let iteration = 0; iteration < 16; iteration++) {
+        t.mock.timers.tick(1);
+        await Promise.resolve();
+      }
+      assert.equal(fixture.logoutCallCount(), 3,
+        "success followed by cancellation must not restore the pre-login suppression");
+      assert.equal(fixture.followedNotices().length, 1);
+    });
+  } finally {
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("an earlier success prevents a later preparation failure from restoring stale suppression", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => { t.mock.timers.reset(); });
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  let failSecondPreparation = false;
+  keychain.present = async () => {
+    if (failSecondPreparation) throw new Error("synthetic second preparation failure");
+    return false;
+  };
+  keychain.remove = async () => true;
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  let releaseSecondClose: () => void = () => {};
+  const secondClosing = new Promise<void>(resolve => { releaseSecondClose = resolve; });
+  let secondLogin: Promise<FreshGoogleLoginAttempt> | undefined;
+  try {
+    await withTempGeminiHome(async () => {
+      let closeCalls = 0;
+      const fixture = authCoordinatorFixture({
+        closeAllRuntimes: async () => {
+          closeCalls++;
+          if (closeCalls === 2) await secondClosing;
+        },
+      });
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      fixture.emit("credential_disabled", { provider: "antigravity-acp" });
+      const firstAttempt = await fixture.coordinator.beginFreshGoogleLogin();
+      secondLogin = fixture.coordinator.beginFreshGoogleLogin();
+      for (let iteration = 0; iteration < 64 && closeCalls !== 2; iteration++) {
+        t.mock.timers.tick(1);
+        await Promise.resolve();
+      }
+      assert.equal(closeCalls, 2, "attempt B is inside preparation");
+      fixture.coordinator.noteLoginSucceeded(firstAttempt);
+      failSecondPreparation = true;
+      releaseSecondClose();
+      await assert.rejects(secondLogin!, /synthetic second preparation failure/);
+      failSecondPreparation = false;
+      fixture.removeMarker();
+      for (let iteration = 0; iteration < 16; iteration++) {
+        t.mock.timers.tick(1);
+        await Promise.resolve();
+      }
+      assert.equal(fixture.logoutCallCount(), 3,
+        "success followed by failed preparation must not restore the pre-login suppression");
+      assert.equal(fixture.followedNotices().length, 1);
+    });
+  } finally {
+    failSecondPreparation = false;
+    releaseSecondClose();
+    await secondLogin?.catch(() => undefined);
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("a refused fresh login restores suppression so a later logout still follows", async () => {
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  let entry = true;
+  let failing = true;
+  keychain.present = async () => entry;
+  keychain.remove = async () => {
+    if (failing) throw new Error("Unable to remove the Antigravity keychain entry");
+    entry = false;
+    return true;
+  };
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  try {
+    await withTempGeminiHome(async () => {
+      const fixture = authCoordinatorFixture();
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      await assert.rejects(fixture.coordinator.beginFreshGoogleLogin(),
+        /Unable to remove the Antigravity keychain entry/);
+      assert.equal(fixture.logoutCallCount(), 1, "the refused login still tore down the runtimes");
+      // An explicit OMP logout after the refused login must still be followed.
+      failing = false;
+      fixture.removeMarker();
+      await settle(30);
+      assert.equal(fixture.logoutCallCount(), 2);
+      assert.equal(entry, false, "the followed logout cleared the keychain entry");
+      assert.equal(fixture.followedNotices().length, 1);
+    });
+  } finally {
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
+  }
+});
+
+test("a refused fresh login keeps an unrelated suppression instead of clearing it", async () => {
+  const originalPresent = keychain.present;
+  const originalRemove = keychain.remove;
+  const originalDelayMs = logoutFollow.delayMs;
+  const originalRetryMs = logoutFollow.removalRetryMs;
+  keychain.present = async () => true;
+  keychain.remove = async () => undefined;
+  logoutFollow.delayMs = 5;
+  logoutFollow.removalRetryMs = 0;
+  try {
+    await withTempGeminiHome(async () => {
+      const fixture = authCoordinatorFixture();
+      fixture.coordinator.watchOmpCredentials(fixture.ctx);
+      fixture.storeMarker();
+      // OMP soft-disabled the provider (for example invalid_grant) before the login.
+      fixture.emit("credential_disabled", { provider: "antigravity-acp" });
+      await assert.rejects(fixture.coordinator.beginFreshGoogleLogin(),
+        /Unable to confirm removal of the Antigravity credentials/);
+      fixture.removeMarker();
+      await settle(30);
+      assert.equal(fixture.followedNotices().length, 0,
+        "a blanket reset would erase the pre-existing suppression");
+      assert.equal(fixture.logoutCallCount(), 1);
+      // That suppression is single-use; the next explicit logout is followed.
+      fixture.storeMarker();
+      fixture.removeMarker();
+      await settle(30);
+      assert.equal(fixture.logoutCallCount(), 2);
+      assert.equal(fixture.followedNotices().length, 1);
+    });
+  } finally {
+    keychain.present = originalPresent;
+    keychain.remove = originalRemove;
+    logoutFollow.delayMs = originalDelayMs;
+    logoutFollow.removalRetryMs = originalRetryMs;
   }
 });

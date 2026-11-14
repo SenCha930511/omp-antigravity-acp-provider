@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { resolveLaunchSpawn, resolveLaunchTarget, resolveManagedAcpCommand, writeCliWrapper, type RuntimeLaunchPlan } from "../extension/runtime/launch.ts";
+import { resolveAntigravityAcpLaunch } from "../extension/runtime/acp/antigravity.ts";
 import { resolveProcessSpawn, resolveSupervisorEntry } from "../extension/runtime/process.ts";
 
 const cwd = process.cwd();
@@ -34,6 +35,28 @@ function wrapperPlan(wrapper: string): RuntimeLaunchPlan {
     cliVersion: "1.5.3",
   };
 }
+
+test("the user-bin runtime follows the same direct-or-wrapper policy", { skip: process.platform === "win32" }, () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "acp-user-bin-"));
+  const previousHome = process.env.HOME;
+  const previousBin = process.env.AGY_ACP_BIN;
+  try {
+    const bin = path.join(home, ".local", "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    const par = path.join(bin, "agy_acp_server.par");
+    fs.writeFileSync(par, "native runtime");
+    fs.chmodSync(par, 0o755);
+    process.env.HOME = home;
+    delete process.env.AGY_ACP_BIN;
+    const launch = resolveAntigravityAcpLaunch();
+    assert.equal(launch.source, "user-bin");
+    assert.deepEqual(launch.args, process.platform === "linux" ? ["--uid="] : []);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    if (previousBin === undefined) delete process.env.AGY_ACP_BIN; else process.env.AGY_ACP_BIN = previousBin;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("Windows managed runtime selection uses the native exe, not an unrelated POSIX par", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "acp-windows-command-"));

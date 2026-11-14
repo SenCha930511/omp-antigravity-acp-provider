@@ -49,6 +49,21 @@ test("quota groups preserve percentages and turn UTC reset labels into ISO times
   });
 });
 
+test("CRLF quota reports and exhaustion notices parse like LF", () => {
+  const now = Date.UTC(2026, 10, 10, 12);
+  const report = [
+    "### Quota Limits",
+    "- **Gemini 4 Argon**",
+    "  - **Five hour limit:** 42% remaining (resets Nov 10, 2026, 18:30 UTC)",
+  ].join("\r\n");
+  const parsed = parseUsageQuota(report, now);
+  assert.equal(parsed.groups[0]!.buckets[0]!.remainingFraction, 0.42);
+  assert.equal(parsed.groups[0]!.buckets[0]!.resetTime, "2026-11-10T18:30:00.000Z");
+  assert.deepEqual(quotaExhaustion("Usage Limit Reached\r\n\r\nYou have reached your current quota for this period. Your limit will reset in 2 hours.", now), {
+    resetAt: new Date(now + 2 * 3_600_000).toISOString(),
+  });
+});
+
 test("quota reset timestamps reject impossible dates and times while retaining legitimate leap days", () => {
   const report = (reset: string) => [
     "### Quota Limits", "- **Gemini 4 Argon**",

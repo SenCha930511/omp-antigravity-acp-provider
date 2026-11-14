@@ -171,13 +171,16 @@ test("account, status and login read keyring health instead of a Promise", async
     assert.doesNotMatch(status, /not ready|undefined|\[object Promise\]/);
 
     let freshLogins = 0;
+    const attempt = Object.freeze({ fixture: "fresh-login-attempt" });
+    let successfulAttempt: unknown;
     fixture.deps.auth = {
       watchOmpCredentials() {},
-      beginFreshGoogleLogin: async () => { freshLogins++; },
-      noteLoginSucceeded: () => {},
+      beginFreshGoogleLogin: async () => { freshLogins++; return attempt; },
+      noteLoginSucceeded: (received: unknown) => { successfulAttempt = received; },
     } as unknown as CommandControllerDeps["auth"];
     await fixture.handler("login", fixture.ctx);
     assert.equal(freshLogins, 1, "login must still run a fresh Google sign-in");
+    assert.equal(successfulAttempt, attempt, "success must settle the identity returned by begin");
     const login = fixture.notices.at(-1)!;
     assert.match(login, /Antigravity Google login finished/);
     assert.match(login, /ACP auth: oauth-refreshable \(oauth-personal\)/);
@@ -205,6 +208,40 @@ test("account, status and login read keyring health instead of a Promise", async
   assert.equal(process.env.GEMINI_API_KEY, savedKey);
 });
 
+test("the login command clears fresh-login suppression when authorization is cancelled", async t => {
+  const fixture = makeHandler();
+  t.after(() => fs.rmSync(fixture.state, { recursive: true, force: true }));
+  let cancellations = 0;
+  let successfulLogins = 0;
+  const attempt = Object.freeze({ fixture: "cancelled-login-attempt" });
+  let cancelledAttempt: unknown;
+  fixture.deps.auth = {
+    watchOmpCredentials() {},
+    beginFreshGoogleLogin: async () => attempt,
+    cancelFreshGoogleLogin: (received: unknown) => { cancellations++; cancelledAttempt = received; },
+    noteLoginSucceeded: () => { successfulLogins++; },
+  } as unknown as CommandControllerDeps["auth"];
+  fixture.ctx.ui.input = async () => undefined;
+  fixture.deps.getRuntimeForSession = (): RuntimeBundleView => ({
+    ...bundle,
+    provider: {
+      auth: { oauth: {
+        login: async callbacks => {
+          await callbacks.prompt({ message: "Authorization code", placeholder: "" });
+          return {};
+        },
+        refresh: async () => ({}),
+      } },
+      streamSimple: () => (async function* () {})(),
+    },
+    isBusy: () => false,
+  });
+  await assert.rejects(fixture.handler("login", fixture.ctx), /Antigravity OAuth login cancelled/);
+  assert.equal(cancellations, 1);
+  assert.equal(cancelledAttempt, attempt, "cancellation must settle the identity returned by begin");
+  assert.equal(successfulLogins, 0);
+});
+
 test("removed quota, tools, diagnostics and debug subcommands reject without a runtime or settings", async () => {
   const fixture = makeHandler();
   let prepared = 0;
@@ -227,7 +264,7 @@ test("removed quota, tools, diagnostics and debug subcommands reject without a r
 test("unknown subcommands and stray arguments fail with usage errors, not a runtime", async () => {
   const fixture = makeHandler();
   await assert.rejects(fixture.handler("unknown", fixture.ctx), /Usage: \/antigravity-acp \[status\|account\|/);
-  await assert.rejects(fixture.handler("permissions invalid", fixture.ctx), /Usage: \/antigravity-acp permissions default\|auto-edit\|yolo/);
+  await assert.rejects(fixture.handler("permissions invalid", fixture.ctx), /Usage: \/antigravity-acp permissions default\|auto-edit\|yolo\|follow/);
   await assert.rejects(fixture.handler("permissions", fixture.ctx), /Usage: \/antigravity-acp permissions/);
   await assert.rejects(fixture.handler("permissions default extra", fixture.ctx), /Usage: \/antigravity-acp permissions/);
   await assert.rejects(fixture.handler("refresh extra", fixture.ctx), /Usage: \/antigravity-acp refresh/);
@@ -470,6 +507,7 @@ test("argument completions filter by prefix, ignore case, and chain fixed values
   assert.equal(items("usage a")[0]!.value, "usage auto ");
   assert.deepEqual(items("native-tools p").map(item => item.label), ["prefer"]);
   assert.deepEqual(items("permissions auto-e").map(item => item.label), ["auto-edit"]);
+  assert.deepEqual(items("permissions f").map(item => item.label), ["follow"]);
   assert.deepEqual(items("permissions y").map(item => item.label), ["yolo"]);
   assert.equal(complete("usage x"), null);
   assert.equal(complete("status x"), null);

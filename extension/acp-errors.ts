@@ -102,22 +102,49 @@ function isAntigravityAcpError(error: unknown): error is AntigravityAcpErrorLike
     && typeof (error as { code?: unknown }).code === "string";
 }
 
+function sanitizedCause(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const sanitized = new Error(redactSensitiveText(message));
+  if (error instanceof Error) {
+    sanitized.name = error.name;
+    if (error.stack) sanitized.stack = redactSensitiveText(error.stack);
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string") Object.assign(sanitized, { code });
+  }
+  return sanitized;
+}
+
+function needsSanitization(error: unknown): boolean {
+  return error instanceof Error
+    && (error.cause !== undefined || Boolean(error.stack && redactSensitiveText(error.stack) !== error.stack));
+}
+
+function sanitizedError(error: unknown): Error {
+  const sanitized = sanitizedCause(error);
+  if (error instanceof Error && error.cause !== undefined) sanitized.cause = sanitizedCause(error.cause);
+  return sanitized;
+}
+
 export function classifyAcpFailure(error: unknown): Error {
   if (isAntigravityAcpError(error)) {
     if (error.code === "aborted") return error;
-    if (error.code === "auth") return new AcpFailure("auth", redactSensitiveText(appendHint(error.message, AUTH_RULE)), { cause: error });
-    if (error.code === "quota") return new AcpFailure("quota", redactSensitiveText(appendHint(error.message, QUOTA_RULE)), { cause: error });
-    if (error.code === "timeout") return new AcpFailure("timeout", redactSensitiveText(appendHint(error.message, TIMEOUT_RULE)), { cause: error });
-    if (error.code === "spawn" || error.code === "process_exit") return new AcpFailure("transport", redactSensitiveText(appendHint(error.message, TRANSPORT_RULE)), { cause: error });
-    if (error.code === "invalid_input") return new AcpFailure("protocol", redactSensitiveText(appendHint(error.message, PROTOCOL_RULE)), { cause: error });
-    if (error.code === "model") return new AcpFailure("model", redactSensitiveText(error.message), { cause: error });
+    const cause = { cause: sanitizedCause(error) };
+    if (error.code === "auth") return new AcpFailure("auth", redactSensitiveText(appendHint(error.message, AUTH_RULE)), cause);
+    if (error.code === "quota") return new AcpFailure("quota", redactSensitiveText(appendHint(error.message, QUOTA_RULE)), cause);
+    if (error.code === "timeout") return new AcpFailure("timeout", redactSensitiveText(appendHint(error.message, TIMEOUT_RULE)), cause);
+    if (error.code === "spawn" || error.code === "process_exit") return new AcpFailure("transport", redactSensitiveText(appendHint(error.message, TRANSPORT_RULE)), cause);
+    if (error.code === "protocol" || error.code === "invalid_input") return new AcpFailure("protocol", redactSensitiveText(appendHint(error.message, PROTOCOL_RULE)), cause);
+    if (error.code === "model") return new AcpFailure("model", redactSensitiveText(error.message), cause);
   }
   const message = error instanceof Error ? error.message : String(error);
-  if (!message.trim()) return error instanceof Error ? error : new Error(message);
+  if (!message.trim()) return needsSanitization(error) ? sanitizedError(error) : error instanceof Error ? error : new Error(message);
   for (const rule of RULES) {
-    if (rule.match.test(message)) return new AcpFailure(rule.code, redactSensitiveText(appendHint(message, rule)), { cause: error });
+    if (rule.match.test(message)) {
+      return new AcpFailure(rule.code, redactSensitiveText(appendHint(message, rule)), { cause: sanitizedCause(error) });
+    }
   }
   const redacted = redactSensitiveText(message);
-  if (redacted === message) return error instanceof Error ? error : new Error(message);
-  return new Error(redacted);
+  const needs = needsSanitization(error);
+  if (redacted === message && !needs) return error instanceof Error ? error : new Error(message);
+  return redacted === message ? sanitizedError(error) : new Error(redacted);
 }

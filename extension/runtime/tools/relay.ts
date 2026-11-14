@@ -212,9 +212,14 @@ export class ToolRelay {
   }
 
   private prune(): void {
+    const oldestAwaitableTurn = this.turn - 1;
     for (const [callId, record] of this.records) {
-      if (record.turn >= this.turn) continue;
-      if (record.state === "pending" || record.state === "relayed") continue;
+      if (record.turn >= oldestAwaitableTurn) continue;
+      if (record.state === "pending" || record.state === "relayed") {
+        record.state = "cancelled";
+        record.result = relayError("Relay call id belongs to an expired turn");
+        record.cancel(record.result);
+      }
       this.records.delete(callId);
     }
   }

@@ -85,6 +85,7 @@ export interface CommandControllerDeps {
   peekRuntimeForSession: (sessionId?: string) => RuntimeBundleView | undefined;
   getSavedSessionCount: () => number;
   getPermissionMode: () => string;
+  getPermissionPreference?: () => string;
   getAllRuntimes: () => RuntimeBundleView[];
   closeAllRuntimes: () => Promise<void>;
   onModelsUpdated: (models: ConfiguredCatalogModel[]) => void;
@@ -159,8 +160,9 @@ const SUBCOMMANDS: SubcommandSpec[] = [
   {
     name: "permissions",
     description: "Requested ACP permission mode",
-    usage: "default|auto-edit|yolo",
+    usage: "default|auto-edit|yolo|follow",
     values: [
+      ["follow", "Follow OMP tools.approvalMode"],
       ["default", "Confirm edits and commands"],
       ["auto-edit", "Auto-accept edits"],
       ["yolo", "Auto-accept everything"],
@@ -410,28 +412,33 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     if (command === "login") {
       if (value) throw new Error("Usage: /antigravity-acp login");
       await deps.prepareRuntime();
-      await deps.auth.beginFreshGoogleLogin();
+      const loginAttempt = await deps.auth.beginFreshGoogleLogin();
       // Direct Antigravity Google login through the command UI. OMP's /login
       // runs the same flow and additionally stores the provider marker.
-      const lease = deps.acquireRuntimeForSession ? deps.acquireRuntimeForSession() : { value: deps.getRuntimeForSession(), release: () => {} };
       try {
-        await lease.value.provider.auth.oauth.login({
-          signal: undefined,
-          notify(event) {
-            const link = event.links?.[0];
-            if (link) ctx.ui.notify(`${event.message ?? "Open this URL to authorize:"}\n${link.url}`, "info");
-            else if (event.message) ctx.ui.notify(event.message, "info");
-          },
-          prompt: async (request) => {
-            const answer = await ctx.ui.input?.(request.message, request.placeholder);
-            if (!answer?.trim()) throw new Error("Antigravity OAuth login cancelled");
-            return answer;
-          },
-        });
-      } finally {
-        lease.release();
+        const lease = deps.acquireRuntimeForSession ? deps.acquireRuntimeForSession() : { value: deps.getRuntimeForSession(), release: () => {} };
+        try {
+          await lease.value.provider.auth.oauth.login({
+            signal: undefined,
+            notify(event) {
+              const link = event.links?.[0];
+              if (link) ctx.ui.notify(`${event.message ?? "Open this URL to authorize:"}\n${link.url}`, "info");
+              else if (event.message) ctx.ui.notify(event.message, "info");
+            },
+            prompt: async (request) => {
+              const answer = await ctx.ui.input?.(request.message, request.placeholder);
+              if (!answer?.trim()) throw new Error("Antigravity OAuth login cancelled");
+              return answer;
+            },
+          });
+        } finally {
+          lease.release();
+        }
+        deps.auth.noteLoginSucceeded(loginAttempt);
+      } catch (error) {
+        deps.auth.cancelFreshGoogleLogin(loginAttempt);
+        throw error;
       }
-      deps.auth.noteLoginSucceeded?.();
       const auth = await inspectAcpAuth();
       const email = antigravityAccountEmail();
       ctx.ui.notify(`Antigravity Google login finished${email ? ` as ${email}` : ""} — fresh sign-in; ACP auth: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}.`, "info");
@@ -472,7 +479,10 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         ["OMP login marker", marker],
         ["OMP auth source", ompSource],
         ["Saved ACP sessions", deps.getSavedSessionCount()],
-        ["Permission", permissionMode === "auto_edit" ? "auto-edit" : permissionMode],
+        ["Permission", (() => {
+          const label = permissionMode === "auto_edit" ? "auto-edit" : permissionMode;
+          return deps.getPermissionPreference?.() === "follow" ? `${label} (follow OMP)` : label;
+        })()],
         ["Active sessions", snapshot?.bindings ?? 0],
         ["Token ownership", "Google OAuth tokens stay in Antigravity-owned storage; OMP stores only a non-secret marker."],
         ["Logout", "/antigravity-acp logout clears both sides; OMP /logout also finishes Antigravity-side cleanup."],
@@ -526,11 +536,12 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     }
 
     if (command === "permissions") {
-      if (!value || !["default", "auto-edit", "yolo"].includes(value) || parts.length > 2) {
-        throw new Error("Usage: /antigravity-acp permissions default|auto-edit|yolo");
+      if (!value || !["default", "auto-edit", "yolo", "follow"].includes(value) || parts.length > 2) {
+        throw new Error("Usage: /antigravity-acp permissions default|auto-edit|yolo|follow");
       }
       const mode = value.replace("-", "_");
-      if (mode !== deps.getPermissionMode()) {
+      const current = deps.getPermissionPreference?.() ?? deps.getPermissionMode();
+      if (mode !== current) {
         saveAdapterPermissionMode(mode as AdapterPermissionMode, deps.configPath);
         deps.setPermissionModeState(mode);
         await deps.closeAllRuntimes();
@@ -551,6 +562,8 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       const policy = deps.getToolPolicy();
       const requestedPermission = deps.getPermissionMode();
       const requestedLabel = requestedPermission === "auto_edit" ? "auto-edit" : requestedPermission;
+      const requestedDisplay = deps.getPermissionPreference?.() === "follow"
+        ? `${requestedLabel} (follow OMP)` : requestedLabel;
       const wireLabel = snapshot.permissionMode === "auto_edit" ? "auto-edit" : snapshot.permissionMode;
       const versions = [...new Set(snapshot.processes.map(process => process.agentVersion).filter((version): version is string => Boolean(version)))];
       const channels = [...new Set([...deps.connections].map(connection => connection.toolRouting?.channel).filter((channel): channel is "pending" | "system-append" | "legacy-prompt" => Boolean(channel)))];
@@ -563,7 +576,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
         ["Login", login],
         ["Runtime", versions.join(", ") || undefined],
         ["Native channel", channels.join(", ") || undefined],
-        ["Permission", requestedLabel === wireLabel ? requestedLabel : `requested ${requestedLabel} → wire ${wireLabel}`],
+        ["Permission", requestedDisplay === wireLabel ? requestedDisplay : `requested ${requestedDisplay} → wire ${wireLabel}`],
         ["Native tools", policy.nativeTools],
         ["Tool debug", policy.debugToolUpdates ? "on" : undefined],
         ["Thinking", thinking.map(value => `${value.model}=${value.effort}`).join(", ") || undefined],

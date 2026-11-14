@@ -493,3 +493,31 @@ test("shadow: seed, warm delta and retry prompts never authorize a discarded too
     } finally { await f.close(); }
   }
 });
+
+test("main and shadow prompts invalidate dead connections and report session closed instead of permission mismatch", async () => {
+  const f = await fixture();
+  try {
+    const firstReply = f.reply(await f.turn([user("MAIN_ASK")], { sessionId: "MAIN" }));
+    assert.ok(firstReply);
+    const main = [user("MAIN_ASK"), firstReply];
+    assert.ok(f.reply(await f.side(main, "BTW_ONE")));
+    assert.equal(f.connections.length, 2);
+
+    f.connections[0].process.alive = false;
+    f.connections[1].process.alive = false;
+
+    const mainFailed = await f.turn([...main, user("MAIN_TWO")], { sessionId: "MAIN" });
+    assert.match(f.failure(mainFailed) ?? "", /ACP session closed before prompt dispatch/);
+    assert.doesNotMatch(f.failure(mainFailed) ?? "", /Permission mode changed/);
+
+    const sideFailed = await f.side(main, "BTW_DEAD", { sessionId: "MAIN:side:conversation:btw:b:0" });
+    assert.match(f.failure(sideFailed) ?? "", /ACP session closed before prompt dispatch/);
+    assert.doesNotMatch(f.failure(sideFailed) ?? "", /Permission mode changed/);
+
+    assert.ok(f.reply(await f.turn([...main, user("MAIN_RECOVER")], { sessionId: "MAIN" })),
+      "invalidated dead main binding recovers cleanly on the next turn");
+    assert.ok(f.reply(await f.side(main, "BTW_RECOVER", { sessionId: "MAIN:side:conversation:btw:c:0" })),
+      "invalidated dead shadow binding recovers cleanly on the next side turn");
+    assert.equal(f.connections.length, 4);
+  } finally { await f.close(); }
+});

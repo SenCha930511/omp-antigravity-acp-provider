@@ -104,6 +104,9 @@ function collectVersions(root) {
   if (rootPackage !== undefined && rootPackage?.name !== PACKAGE_NAME) {
     problems.push(`package.json name: expected ${PACKAGE_NAME}`);
   }
+  if (marketplacePackage !== undefined && marketplacePackage?.name !== PACKAGE_NAME) {
+    problems.push(`marketplace/antigravity-acp/package.json name: expected ${PACKAGE_NAME}`);
+  }
   const rootVersion = versionObservation("package.json version", rootPackage?.version, problems);
   const observations = [
     rootVersion,

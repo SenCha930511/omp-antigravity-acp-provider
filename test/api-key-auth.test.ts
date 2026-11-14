@@ -34,7 +34,7 @@ function discoveryConnection(authRequests: AuthRequest[]) {
 }
 
 function inferenceConnection(authRequests: AuthRequest[]) {
-  const modes = { currentModeId: "yolo", availableModes: [{ id: "yolo", name: "Yolo" }] };
+  const modes = { currentModeId: "default", availableModes: [{ id: "default", name: "Default" }, { id: "yolo", name: "Yolo" }] };
   const models = { currentModelId: "gemini-3.8-flash", availableModels: [{ modelId: "gemini-3.8-flash", name: "Gemini 3.8 Flash" }] };
   let sessionId = "";
   const connection = {
@@ -172,8 +172,84 @@ test("an OMP-stored key authenticates inference with no local ACP auth", async (
   try {
     const events = await stream(harness, "  AIza-stored  ");
     assert.equal(events.some(event => event.type === "error"), false, JSON.stringify(events));
-    assert.equal(harness.spawns(), 1);
-    assert.deepEqual(requests, [{ methodId: "api-key", _meta: { "api-key": "AIza-stored" } }]);
+    assert.equal(harness.spawns(), 2, "fresh catalog discovery and inference each need one authenticated connection");
+    assert.deepEqual(requests, [
+      { methodId: "api-key", _meta: { "api-key": "AIza-stored" } },
+      { methodId: "api-key", _meta: { "api-key": "AIza-stored" } },
+    ]);
+  } finally { await harness.restore(); }
+});
+
+test("CatalogStore does not coalesce an explicit API key refresh onto an unauthenticated flight", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-api-key-coalesce-"));
+  const requests: AuthRequest[] = [];
+  const gate = Promise.withResolvers<void>();
+  try {
+    const store = new CatalogStore(path.join(root, "models.json"), {} as unknown as SessionCleanup,
+      async () => {},
+      () => [],
+      async apiKey => {
+        if (!usableApiKey(apiKey)) {
+          await gate.promise;
+          throw new Error("not signed in");
+        }
+      },
+      () => discoveryConnection(requests));
+    const unauthRefresh = store.refresh({ defaults: {}, models: {} });
+    const keyRefresh = store.refresh({ defaults: {}, models: {} }, "  AIza-stored  ");
+    await Promise.resolve();
+    gate.resolve();
+    const [unauthResult, keyResult] = await Promise.allSettled([unauthRefresh, keyRefresh]);
+    assert.equal(unauthResult.status, "rejected");
+    assert.equal(keyResult.status, "fulfilled");
+    assert.equal(keyResult.value[0]?.id, "gemini-3.8-flash");
+
+    // Different explicit credentials also avoid cross-coalescing in discoverModels.
+    const d1 = store.discoverModels("AIza-first");
+    const d2 = store.discoverModels("AIza-second");
+    await Promise.all([d1, d2]);
+    assert.deepEqual(requests.slice(-2), [
+      { methodId: "api-key", _meta: { "api-key": "AIza-first" } },
+      { methodId: "api-key", _meta: { "api-key": "AIza-second" } },
+    ]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("streamSimple cancels cleanly if aborted during initial catalog refresh without spawning inference", async () => {
+  const requests: AuthRequest[] = [];
+  const gate = Promise.withResolvers<void>();
+  let index = 0;
+  const harness = await adapterHarness(requests, () => {
+    const conn = (++index === 1 ? discoveryConnection(requests) : inferenceConnection(requests)) as unknown as Record<string, unknown>;
+    const originalInitialize = conn.initialize as () => Promise<unknown>;
+    conn.initialize = async () => {
+      await gate.promise;
+      return originalInitialize();
+    };
+    return conn as unknown as TierConnection;
+  });
+  try {
+    const controller = new AbortController();
+    const events: Array<{ type: string; reason?: string; error?: { errorMessage?: string } }> = [];
+    const pending = (async () => {
+      for await (const event of (harness.provider as { streamSimple: Function }).streamSimple(
+        harness.provider.models[0]!,
+        { messages: [{ role: "user", content: "synthetic", timestamp: 1 }], tools: [] },
+        { apiKey: "  AIza-stored  ", signal: controller.signal },
+      )) {
+        events.push(event);
+      }
+    })();
+    while (harness.spawns() === 0) await new Promise(resolve => setTimeout(resolve, 5));
+    controller.abort();
+    gate.resolve();
+    await pending;
+    assert.equal(harness.spawns(), 1, "aborted discovery must not proceed to inference spawn");
+    const err = events.find(event => event.type === "error");
+    assert.ok(err, JSON.stringify(events));
+    assert.equal(err.reason, "aborted");
   } finally { await harness.restore(); }
 });
 

@@ -75,8 +75,11 @@ function fixture(leaseStore?: any) {
                 options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] }), closed.promise]);
             }
           }
+          // A hidden seed step only acknowledges; the final prompt answers.
+          const seedStep = request.prompt.filter((block: any) => block.type === "text")
+            .at(-1)?.text?.endsWith("Reply only with: OK") === true;
           if (action !== "empty") options.handlers.onUpdate({ sessionId: c.id,
-            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ANSWER" } } });
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: seedStep ? "OK" : "ANSWER" } } });
           if (action === "fail") throw new Error("synthetic prompt failure after output");
           return { stopReason: "end_turn" };
         },

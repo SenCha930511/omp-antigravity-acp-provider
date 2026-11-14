@@ -44,12 +44,14 @@ PR validation and releases are separate. Never create a tag or publish a package
 ### Prepare a version
 
 1. Choose a new version and a new `v*` tag. Never reuse, move, or retarget a tag after a bad or partial publish. Ship corrections under a new version and tag.
-2. Set the same unprefixed version in all release metadata.
+2. Run `npm run release:bump X.Y.Z` to set the same unprefixed stable version in all six release declarations:
    - Root `package.json`.
    - Both root version fields in `package-lock.json`.
    - `marketplace/antigravity-acp/package.json`.
    - `ADAPTER_VERSION` in `marketplace/antigravity-acp/provision.ts`.
    - The plugin entry in `.omp-plugin/marketplace.json`.
+
+   The helper runs `scripts/check-release-versions.mjs` first and refuses a malformed, inconsistent, or partially bumped tree before writing. It edits only the version values, so surrounding formatting and line endings survive, writes through same-directory temporary files, and restores every file changed by the invocation if any write or the post-write check fails. It rejects malformed or already-current target versions and does not edit `CHANGELOG.md`.
 3. Add the release notes to `CHANGELOG.md`. The first visible `##` version heading after `# Changelog` must be `## X.Y.Z — YYYY-MM-DD` with the actual version and a valid calendar date. Fenced code and HTML comments are not release headings.
 4. Run `npm run check` and `npm run check:versions`, then review the package contents. Confirm that no generated runtime, credentials, or session data will be released. The version check compares all six declarations without reading the changelog.
 5. Before an intended tag, run `node scripts/check-release-versions.mjs --release --tag vX.Y.Z`. Release mode additionally requires the exact tag and a matching first visible `## X.Y.Z — YYYY-MM-DD` changelog heading; fenced examples, HTML comments, later historical entries, and duplicate target-version headings do not satisfy that boundary.
@@ -57,12 +59,12 @@ PR validation and releases are separate. Never create a tag or publish a package
 
 ### Protected tag workflow
 
-Configure the protected `v*` tag workflow with separate `release-verify`, `publish`, and `github-release` jobs. Keep the release verification name distinct from the pull request `verify` check. The publish job depends on successful verification. The GitHub release job depends on successful publication.
+The tag workflow in `.github/workflows/release.yml` runs only for pushed `v*` tags; it has no pull-request or manual trigger. It keeps three jobs. `release-verify` checks the exact tag and release metadata, runs the full offline `npm run check`, runs both release-version test files, and packs one tarball. `publish` downloads that exact artifact, verifies its name, version, and `gitHead`, and runs under the protected `npm-publish` environment with `id-token: write`. `github-release` depends on publication and creates or reuses the release for the tag.
 
-Restrict `npm-publish` deployments to `v*` tags. Set the release commit as `gitHead` before packing. Verify and publish the exact same package artifact so later steps cannot silently pack different contents. A tarball publish does not run `prepublishOnly`; the release verification job's full check is the publishing gate.
+Restrict `npm-publish` deployments to `v*` tags. The verification job sets the release commit as `gitHead` before packing and verifies that the checked-out `HEAD` is the tag commit. The publish and release jobs consume the uploaded tarball instead of repacking, so later steps cannot silently publish different contents. A tarball publish does not run `prepublishOnly`; the release verification job's full check is the publishing gate.
 
-Configure npm trusted publishing for the exact `.github/workflows/release.yml` workflow and the `npm-publish` GitHub environment. Use direct `npm publish` with GitHub OIDC and npm provenance. Do not substitute a long-lived npm token or an indirect publishing action.
+Configure npm trusted publishing for the exact `.github/workflows/release.yml` workflow and the `npm-publish` GitHub environment. Use direct `npm publish --provenance` with GitHub OIDC. Do not add a long-lived `NPM_TOKEN` secret or an indirect publishing action.
 
-Make workflow re-runs safe. Detect an already published exact npm package version and verify it instead of publishing a duplicate. Detect an existing GitHub release for the tag and verify or reuse it instead of creating a duplicate.
+Make workflow re-runs safe. When the exact npm version already exists, compare the local tarball integrity with the registry `dist.integrity`; fail on a mismatch and skip only when the bytes match. For GitHub releases, upload the exact tarball to an existing tag release or create the release with `--verify-tag`.
 
 OIDC authentication, npm provenance, registry publication, and GitHub release creation can be proven only by a real protected-tag release. A green pull request does not verify any of them. Record their actual results during the release and never claim release validation from PR CI alone.

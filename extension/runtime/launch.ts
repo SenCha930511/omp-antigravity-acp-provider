@@ -7,7 +7,7 @@
 // `AGY_ACP_BIN` is only ever read. Spawning uses the plan's target, so a later
 // change to shared process state cannot redirect an already selected runtime.
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -79,11 +79,15 @@ export interface LaunchOptions {
 interface AgyCli {
   path: string;
   version: string;
+  // Identity of the exact executable the version came from. Windows reports
+  // dev/ino 0 for every file, so the stamp also carries mtime, ctime and size.
+  stamp?: string;
 }
 
 interface RecordedCliRuntime {
   cliPath: string;
   cliVersion: string;
+  cliStamp?: string;
   managedVersion?: string;
 }
 
@@ -188,29 +192,30 @@ async function buildLaunchPlan(
   }
   const runtimeSource = loadRuntimeSourcePreference(stateDir);
   const managedVersion = readManagedVersion(home);
+  const recorded = readRuntimeSourceRecord(stateDir);
   if (runtimeSource === "cli") {
-    const cli = await findAgyCli(env, platform, options.signal);
+    const cli = await findAgyCli(env, platform, recorded, options.signal);
     if (!cli) throw new Error('runtimeSource is "cli" in config.json, but no usable agy CLI was found. Install the CLI or set runtimeSource to "auto".');
-    return cliPlan(stateDir, platform, cli, managedVersion, persist);
+    return cliPlan(stateDir, platform, cli, managedVersion, persist, recorded);
   }
   if (runtimeSource === "managed") {
     const managed = resolveManagedAcpCommand(home, platform);
     if (!managed) throw new Error('runtimeSource is "managed" in config.json, but the managed ACP runtime is missing. Install it or set runtimeSource to "auto".');
     return managedPlan(managed, managedVersion);
   }
-  const cli = await findAgyCli(env, platform, options.signal);
+  const cli = await findAgyCli(env, platform, recorded, options.signal);
   if (cli) {
     try {
-      return cliPlan(stateDir, platform, cli, managedVersion, persist);
+      return cliPlan(stateDir, platform, cli, managedVersion, persist, recorded);
     } catch {
       // Fall through to the recorded CLI or the managed runtime when wrapper persistence fails.
     }
   }
   if (configuredIsWrapper) {
-    const recorded = readRuntimeSourceRecord(stateDir);
-    if (recorded && isExecutableFile(recorded.cliPath)) {
+    const recordedCli = await recordedCliRuntime(recorded, env, platform, options.signal);
+    if (recordedCli) {
       try {
-        return cliPlan(stateDir, platform, { path: recorded.cliPath, version: recorded.cliVersion }, managedVersion, persist);
+        return cliPlan(stateDir, platform, recordedCli, managedVersion, persist, recorded);
       } catch {
         // Fall through to the managed runtime when wrapper persistence fails.
       }
@@ -234,18 +239,24 @@ function cliPlan(
   cli: AgyCli,
   managedVersion: string | undefined,
   persist: boolean,
+  recorded?: RecordedCliRuntime,
 ): RuntimeLaunchPlan {
   const wrapper = cliWrapperPath(stateDir, platform);
   const script = cliWrapperScript(cli.path, platform);
   const sha256 = sha256Text(script);
   if (persist) {
     writeCliWrapper(wrapper, script);
-    writeRuntimeSourceRecord(stateDir, {
-      source: "cli",
+    const next: RecordedCliRuntime = {
       cliPath: cli.path,
       cliVersion: cli.version,
+      ...(cli.stamp !== undefined ? { cliStamp: cli.stamp } : {}),
       ...(managedVersion !== undefined ? { managedVersion } : {}),
-    });
+    };
+    // The stamp is what lets the next launch skip `agy acp --version`; an
+    // unchanged decision must not rewrite the record (or refresh decidedAt).
+    if (!sameCliRecord(recorded, next, platform)) {
+      writeRuntimeSourceRecord(stateDir, { source: "cli", ...next });
+    }
   }
   return {
     source: "cli",
@@ -304,17 +315,59 @@ function readRuntimeSourceRecord(stateDir: string): RecordedCliRuntime | undefin
   const cliVersion = "cliVersion" in parsed ? parsed.cliVersion : undefined;
   if (source !== "cli" || typeof cliPath !== "string" || !cliPath) return undefined;
   if (typeof cliVersion !== "string" || !cliVersion) return undefined;
+  const cliStamp = "cliStamp" in parsed ? parsed.cliStamp : undefined;
   const managedVersion = "managedVersion" in parsed ? parsed.managedVersion : undefined;
   return {
     cliPath,
     cliVersion,
+    ...(typeof cliStamp === "string" && cliStamp ? { cliStamp } : {}),
     ...(typeof managedVersion === "string" ? { managedVersion } : {}),
   };
+}
+
+function sameCliRecord(
+  recorded: RecordedCliRuntime | undefined,
+  next: RecordedCliRuntime,
+  platform: NodeJS.Platform,
+): boolean {
+  return recorded !== undefined
+    && pathsEqual(recorded.cliPath, next.cliPath, platform)
+    && recorded.cliVersion === next.cliVersion
+    && recorded.cliStamp === next.cliStamp
+    && recorded.managedVersion === next.managedVersion;
+}
+
+// Identity of the exact executable a version was probed from. Windows reports
+// dev/ino 0 for every file, so mtime, ctime and size carry the identity there
+// while the full stamp still separates two files with equal timestamps.
+function binaryStamp(file: string): string | undefined {
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) return undefined;
+    return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`;
+  } catch {
+    return undefined;
+  }
+}
+
+// A recorded version may only stand in for a probe when it describes this
+// exact file: the path alone is not enough, and a missing stamp (an older
+// record) or a changed binary must be probed again.
+function recordedCli(
+  recorded: RecordedCliRuntime | undefined,
+  file: string,
+  platform: NodeJS.Platform,
+): AgyCli | undefined {
+  if (recorded === undefined || !pathsEqual(recorded.cliPath, file, platform)) return undefined;
+  const stamp = binaryStamp(file);
+  if (stamp === undefined || recorded.cliStamp !== stamp) return undefined;
+  return { path: file, version: recorded.cliVersion, stamp };
 }
 
 async function findAgyCli(
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform = process.platform,
+  recorded?: RecordedCliRuntime,
   signal?: AbortSignal,
 ): Promise<AgyCli | undefined> {
   // Windows cannot execute npm's extensionless POSIX shim directly. Prefer an
@@ -325,25 +378,51 @@ async function findAgyCli(
   for (const name of names) {
     const agy = findExecutableOnPath(name, env);
     if (!agy) continue;
-    try {
-      // `acp --version` both proves the subcommand exists and reports the
-      // bundled server version; a CLI without it must not be selected.
-      const launch = resolveCommandProbe(agy, ["acp", "--version"]);
-      const { stdout } = await execFileAsync(launch.command, launch.args, {
-        encoding: "utf8",
-        env,
-        timeout: CLI_VERSION_TIMEOUT_MS,
-        windowsHide: true,
-        windowsVerbatimArguments: process.platform === "win32",
-        ...(signal ? { signal } : {}),
-      });
-      const version = /\d+\.\d+\.\d+/.exec(stdout)?.[0];
-      if (version) return { path: agy, version };
-    } catch {
-      // A broken extensionless shim must not mask a usable native CLI or .cmd.
-    }
+    const known = recordedCli(recorded, agy, platform);
+    if (known) return known;
+    const probed = await probeAgyCli(agy, env, signal);
+    if (probed) return probed;
   }
   return undefined;
+}
+
+async function recordedCliRuntime(
+  recorded: RecordedCliRuntime | undefined,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  signal?: AbortSignal,
+): Promise<AgyCli | undefined> {
+  if (recorded === undefined || !isExecutableFile(recorded.cliPath)) return undefined;
+  const known = recordedCli(recorded, recorded.cliPath, platform);
+  if (known) return known;
+  // The recorded binary is off PATH, so a missing or stale stamp is resolved
+  // by probing that exact file; a CLI that lost `acp` must not be reselected.
+  return probeAgyCli(recorded.cliPath, env, signal);
+}
+
+async function probeAgyCli(
+  file: string,
+  env: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+): Promise<AgyCli | undefined> {
+  try {
+    // `acp --version` both proves the subcommand exists and reports the
+    // bundled server version; a CLI without it must not be selected.
+    const launch = resolveCommandProbe(file, ["acp", "--version"]);
+    const { stdout } = await execFileAsync(launch.command, launch.args, {
+      encoding: "utf8",
+      env,
+      timeout: CLI_VERSION_TIMEOUT_MS,
+      windowsHide: true,
+      windowsVerbatimArguments: process.platform === "win32",
+      ...(signal ? { signal } : {}),
+    });
+    const version = /\d+\.\d+\.\d+/.exec(stdout)?.[0];
+    return version ? { path: file, version, stamp: binaryStamp(file) } : undefined;
+  } catch {
+    // A broken extensionless shim must not mask a usable native CLI or .cmd.
+    return undefined;
+  }
 }
 
 function pathsEqual(left: string, right: string, platform: NodeJS.Platform): boolean {
@@ -441,7 +520,7 @@ export function writeCliWrapper(file: string, script: string): void {
     return;
   }
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${process.pid}.tmp`;
+  const temporary = `${file}.${randomUUID()}.tmp`;
   try {
     fs.writeFileSync(temporary, script, { mode: 0o755 });
     fs.renameSync(temporary, file);
@@ -452,7 +531,7 @@ export function writeCliWrapper(file: string, script: string): void {
 
 function writeRuntimeSourceRecord(
   stateDir: string,
-  record: { source: "cli"; cliPath: string; cliVersion: string; managedVersion?: string },
+  record: { source: "cli"; cliPath: string; cliVersion: string; cliStamp?: string; managedVersion?: string },
 ): void {
   writeJsonAtomic(path.join(stateDir, RUNTIME_SOURCE_RECORD), { ...record, decidedAt: new Date().toISOString() });
 }

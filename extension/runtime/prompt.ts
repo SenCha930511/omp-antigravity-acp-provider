@@ -469,12 +469,18 @@ function takeTextChunk(text: string, maxBytes: number): string {
   return chunk;
 }
 
-function splitOversizedRequest(blocks: TransferBlock[], inProgress: boolean, kind: PromptKind = "main"): RequestSplit {
+function splitOversizedRequest(
+  blocks: TransferBlock[],
+  inProgress: boolean,
+  kind: PromptKind = "main",
+  leadingBlocks: TransferBlock[] = [],
+): RequestSplit {
   const seedPrefix: TransferBlock = { type: "text", text: REQUEST_SEED_PREFIX };
   const seedSuffix: TransferBlock = { type: "text", text: REQUEST_SEED_SUFFIX };
   const finalHeader: TransferBlock = { type: "text", text: requestFinalHeader(inProgress, kind) };
+  const finalLead: TransferBlock[] = [...leadingBlocks, finalHeader];
   const seedOverhead = promptTextBytes([seedPrefix, seedSuffix]);
-  const finalOverhead = promptTextBytes([finalHeader]);
+  const finalOverhead = promptTextBytes(finalLead);
   const seedCapacity = ACP_STEP_TEXT_BYTES - seedOverhead - REQUEST_STEP_SAFETY_BYTES;
   const finalCapacity = ACP_STEP_TEXT_BYTES - finalOverhead - REQUEST_STEP_SAFETY_BYTES;
   if (seedCapacity <= 0 || finalCapacity <= 1) {
@@ -532,15 +538,34 @@ function splitOversizedRequest(blocks: TransferBlock[], inProgress: boolean, kin
   if (parts.length < 2) {
     // A non-text-only payload cannot be partitioned safely. Let the existing
     // hard guard report the exact size rather than silently dropping content.
-    checkStepTextBytes(promptTextBytes([finalHeader, ...blocks]));
-    return { seedSteps: [], tailBlocks: [finalHeader, ...blocks] };
+    checkStepTextBytes(promptTextBytes([...finalLead, ...blocks]));
+    return { seedSteps: [], tailBlocks: [...finalLead, ...blocks] };
   }
   const finalBlocks = parts.pop()!;
   const seedSteps = parts.map(part => [seedPrefix, ...part, seedSuffix]);
-  const tailBlocks = [finalHeader, ...finalBlocks];
+  const tailBlocks = [...finalLead, ...finalBlocks];
   for (const step of seedSteps) checkStepTextBytes(promptTextBytes(step));
   checkStepTextBytes(promptTextBytes(tailBlocks));
   return { seedSteps, tailBlocks };
+}
+
+const ACTIVE_CONTEXT_HEADER = "\n\n# Active OMP context-window reminder\n\n";
+const CONTEXT_WINDOW_REMINDER_RE = /^<context-window-reminder>[\s\S]*<\/context-window-reminder>$/u;
+
+function extractDeveloperContextReminder(content: string | TransferBlock[]): string | undefined {
+  let text: string | undefined;
+  if (typeof content === "string") {
+    text = content;
+  } else if (content.length === 1) {
+    const block = content[0]!;
+    if (block.type === "text" && typeof block.text === "string" &&
+      Object.keys(block).every(key => key === "type" || key === "text")) {
+      text = block.text;
+    }
+  }
+  if (text === undefined) return undefined;
+  const trimmed = text.trim();
+  return CONTEXT_WINDOW_REMINDER_RE.test(trimmed) ? trimmed : undefined;
 }
 
 function historyRecordItems(
@@ -702,16 +727,30 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
   if (instructionsBlock) checkStepTextBytes(promptTextBytes([instructionsBlock]));
   const recordItems: RecordItem[] = [];
   const images: TransferBlock[] = [];
+  let activeContextReminder: string | undefined;
+  let activeReminderIndex = -1;
+  if (kind !== "ephemeral") {
+    for (let index = 0; index < end; index++) {
+      const message = messages[index]!;
+      if (message.role !== "developer") continue;
+      const reminder = extractDeveloperContextReminder(message.content);
+      if (reminder) {
+        activeContextReminder = reminder;
+        activeReminderIndex = index;
+      }
+    }
+  }
   for (let index = start; index < end; index++) {
     const message = messages[index]!;
-    if (index === latest || message.role === "system") continue;
+    if (index === latest || index === activeReminderIndex || message.role === "system") continue;
+    const rawContent = message.content;
     const recordImages: TransferBlock[] = [];
     const recordImageAttachments: number[] = [];
     let content: string | TransferBlock[];
-    if (typeof message.content === "string") {
-      content = message.content;
+    if (typeof rawContent === "string") {
+      content = rawContent;
     } else {
-      const mapped = message.content
+      const mapped = rawContent
         .filter(block => ["text", "toolCall", "image"].includes(block.type))
         .map(block => {
           if (block.type === "image") {
@@ -742,6 +781,9 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
     };
     recordItems.push(...historyRecordItems(record, recordImages, recordImageAttachments, framing));
   }
+  const reminderBlocks: TransferBlock[] = activeContextReminder
+    ? [{ type: "text", text: `${ACTIVE_CONTEXT_HEADER}${activeContextReminder}` }]
+    : [];
   let tailBlocks: TransferBlock[] = [];
   let requestSeedSteps: TransferBlock[][] = [];
   if (!fresh && start > latest) {
@@ -757,7 +799,7 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
     const continuation = { type: "text", text: retryResend
       ? retryRequestText(messages[latest]!.content, kind)
       : continuationText };
-    tailBlocks.push(continuation);
+    tailBlocks.push(...reminderBlocks, continuation);
   } else {
     // Official ACP merges following text into an embedded-resource string with
     // a space. Explicit newlines/labels must survive that conversion; role
@@ -769,9 +811,9 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
     const content = messages[latest]!.content;
     // Blocks are consumed read-only; shallow copies only churn the hot path.
     const latestBlocks: TransferBlock[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
-    const normalTail: TransferBlock[] = [boundary, ...latestBlocks];
+    const normalTail: TransferBlock[] = [...reminderBlocks, boundary, ...latestBlocks];
     if (promptTextBytes(normalTail) > ACP_STEP_TEXT_BYTES) {
-      const split = splitOversizedRequest(latestBlocks, inProgress, kind);
+      const split = splitOversizedRequest(latestBlocks, inProgress, kind, reminderBlocks);
       requestSeedSteps = split.seedSteps;
       tailBlocks = split.tailBlocks;
     } else {

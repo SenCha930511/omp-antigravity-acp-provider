@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -621,9 +621,7 @@ export function adoptLegacyCurrentRelease(root: string, release: ResolvedRuntime
 			harnessBytes: release.harnessBytes,
 			installedAt: typeof legacy.installedAt === "string" ? legacy.installedAt : new Date().toISOString(),
 		};
-		const temporary = `${file}.${process.pid}.tmp`;
-		fs.writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-		fs.renameSync(temporary, file);
+		writeTextAtomic(file, `${JSON.stringify(record, null, 2)}\n`);
 	} catch {
 		// A legacy install is adopted only when every signed field can be proven.
 	}
@@ -652,16 +650,23 @@ function readCachedManifest(): CachedManifest | undefined {
 	}
 }
 
+function writeTextAtomic(file: string, content: string): void {
+	const temporary = `${file}.${randomUUID()}.tmp`;
+	try {
+		fs.writeFileSync(temporary, content, { mode: 0o600 });
+		fs.renameSync(temporary, file);
+	} finally {
+		fs.rmSync(temporary, { force: true });
+	}
+}
+
 function writeCachedManifest(manifest: TrustedRuntimeManifest): void {
 	const file = manifestCachePath();
 	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-	const temporary = `${file}.${process.pid}.tmp`;
-	fs.writeFileSync(
-		temporary,
+	writeTextAtomic(
+		file,
 		`${JSON.stringify({ checkedAt: Date.now(), manifest: JSON.stringify(manifest) }, null, 2)}\n`,
-		{ mode: 0o600 },
 	);
-	fs.renameSync(temporary, file);
 }
 
 function manifestCachePath(): string {
@@ -690,9 +695,7 @@ function readCachedOfficialRelease(key: string): CachedOfficialRelease | undefin
 function writeCachedOfficialRelease(key: string, release: OfficialRegistryRelease): void {
 	const file = officialCachePath(key);
 	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-	const temporary = `${file}.${process.pid}.tmp`;
-	fs.writeFileSync(temporary, `${JSON.stringify({ checkedAt: Date.now(), release }, null, 2)}\n`, { mode: 0o600 });
-	fs.renameSync(temporary, file);
+	writeTextAtomic(file, `${JSON.stringify({ checkedAt: Date.now(), release }, null, 2)}\n`);
 }
 
 function officialCachePath(key: string): string {

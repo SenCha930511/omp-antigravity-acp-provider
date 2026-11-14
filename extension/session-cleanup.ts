@@ -73,6 +73,11 @@ export class SessionCleanup {
     const relative = path.relative(root, file);
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative) || !file.endsWith(".jsonl")) return;
     const stat = await sourceRoot(root);
+    let current = root;
+    for (const part of relative.split(path.sep)) {
+      current = path.join(current, part);
+      if ((await afs.lstat(current)).isSymbolicLink()) throw new Error("Symlinked OMP session path");
+    }
     const headerId = await sourceId(file);
     if (!headerId) return;
     const rotated = id !== headerId;

@@ -5,10 +5,12 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node](https://img.shields.io/badge/node-%E2%89%A522.19-339933?logo=node.js&logoColor=white)](package.json)
 [![OMP marketplace](https://img.shields.io/badge/OMP-marketplace-7c3aed)](https://github.com/SenCha930511/omp-antigravity-acp-provider)
-[![ACP runtime](https://img.shields.io/badge/ACP%20runtime-%E2%89%A51.4.1-4285F4)](https://github.com/SenCha930511/omp-antigravity-acp-provider)
+[![ACP runtime](https://img.shields.io/badge/ACP%20runtime-%E2%89%A51.3.0-4285F4)](https://github.com/SenCha930511/omp-antigravity-acp-provider)
 [![GitHub stars](https://img.shields.io/github/stars/SenCha930511/omp-antigravity-acp-provider)](https://github.com/SenCha930511/omp-antigravity-acp-provider/stargazers)
 
 Google Antigravity's official ACP server, adapted for **Oh My Pi (OMP)**.
+
+Current version: `0.2.1`.
 
 **An OMP-focused derivative fork of [zacbemis/pi-antigravity-acp-provider](https://github.com/zacbemis/pi-antigravity-acp-provider).** Original project by [zacbemis](https://github.com/zacbemis) and contributors, licensed under MIT.
 
@@ -18,18 +20,19 @@ This is an independent adaptation, **NOT** an official Google or OMP integration
 
 - All server-advertised models, including Claude, GPT-OSS and future IDs when the ACP endpoint advertises them.
 - CLI-first selection. When a usable `agy` CLI is on `PATH`, the adapter launches it through a generated `AGY_ACP_BIN` wrapper. The managed runtime is the fallback. An explicit `AGY_ACP_BIN` always wins.
-- Per-model thinking levels, exposed only when the server confirms them.
+- Per-model thinking levels, exposed only when the server confirms them. The offline catalog includes Gemini 4 Hydrogen through `xhigh` and known partner models; the first inference after an empty cache attempts real server discovery.
 - OMP tools through an authenticated loopback MCP bridge.
 - Optional `disabled` native-tool mode for strict OMP-only sessions.
-- Lazy ACP startup and warm session reuse.
+- Standby ACP initialization coordinated with discovery, plus warm session reuse and guarded oldest-image history continuity.
 - `/login` plus `/antigravity-acp` account, usage and cleanup commands.
-- API-equivalent cost estimates from a model-ID rate table, not subscription billing. ACP model records do not include price fields.
+- API-equivalent cost estimates from a model-ID rate table, not subscription billing. Native response usage takes precedence, with a read-only SQLite fallback for completed model steps when no supplemental usage query runs.
 - Long-running OMP tools survive the MCP request window through a relay. The model resumes the same result with `pi_omp_await_result`; the control tool is a separate MCP server and never appears in OMP's tool list.
 - Permission requests are tied to the originating session, turn and tool call. Forged, conflicting or previous-turn identities fail closed, while normal requests still use OMP's human review.
 - The MCP `tools/list` reflects the current OMP tool set. The offline wire test covers add, remove and restore on one warm ACP session.
 - Tool-argument hardening on the MCP bridge. Habitual alias mistakes such as `path` for `file_path` are corrected only when the tool schema makes the mapping unambiguous, and rejected calls return the missing required keys plus the tool's expected signature instead of a bare schema failure.
 - Loopback traffic always bypasses proxied environments. When `HTTP(S)_PROXY` or `ALL_PROXY` is set for the ACP child process, the adapter appends `localhost`, `127.0.0.1` and `::1` to `NO_PROXY`/`no_proxy` so the loopback MCP bridge is never routed through an external proxy.
 - OAuth material is redacted from failure text. Authorization URLs, sensitive query values, `Bearer` tokens and OAuth pairs such as `code_challenge` or `access_token` are masked before messages reach OMP, while ordinary diagnostics like `exit code=1` stay intact.
+- Fresh-login and logout synchronization bounds credential-disable suppression and clears only the current login attempt's state, so a failed or cancelled login cannot suppress a later real logout.
 
 ## Supported platforms
 
@@ -77,6 +80,8 @@ Or install the published npm package directly:
 omp plugin install npm:omp-antigravity-acp-provider
 ```
 
+To pin this version, use `omp plugin install npm:omp-antigravity-acp-provider@0.2.1`.
+
 Do not install both. Remove or disable any older Antigravity ACP adapter first.
 
 ### 3. Restart OMP
@@ -104,6 +109,14 @@ Run `/login`, choose **Google Antigravity (ACP)**, and complete Google's consent
 
 This shows the runtime, native-tool mode and usage state. Send a short prompt to confirm inference.
 
+### Upgrade or remove
+
+```sh
+omp plugin upgrade omp-antigravity-acp-provider
+```
+
+To remove the installed plugin, use `omp plugin uninstall omp-antigravity-acp-provider`. Removing a plugin does not sign out Google or delete its ACP history. Handle logout and session cleanup separately before removal when that is desired; do not install both the npm and marketplace variants.
+
 ### Troubleshooting
 
 | Symptom | Check |
@@ -126,6 +139,7 @@ Google ships the same ACP server through two channels. The adapter chooses one a
 
 - **`agy` CLI.** Preferred whenever `agy` or `agy.exe` is on `PATH` and `agy acp --version` returns a semantic version. The adapter writes `agy-acp-cli.sh` or `agy-acp-cli.cmd` and points `AGY_ACP_BIN` at that wrapper.
 - **Managed runtime.** The registry-signed release in `~/.local/opt/agy-acp/`. It is the fallback when the CLI is missing or unusable.
+  The bundled signed manifest may select 1.3.0 until Google's newer release is approved. System-append routing and `native-tools disabled` require 1.4.1 or newer.
 
 Selection order:
 
@@ -137,13 +151,21 @@ Selection order:
 
 The adapter never installs the `agy` CLI. It downloads the managed runtime only in `auto` when no usable CLI is selected. Inference and quota use the same selection.
 
-On the first session start after OMP launches, the adapter attempts one background model refresh. A successful refresh re-registers the provider so newly advertised models and their API-equivalent rates become available. If login or ACP startup fails, the cached catalog remains usable and `/antigravity-acp refresh` still forces a refresh.
+On the first session start after OMP launches, the adapter attempts one background model refresh. A successful refresh re-registers the provider so newly advertised models and their API-equivalent rates become available. If login or ACP startup fails, the cached catalog remains usable and `/antigravity-acp refresh` still forces a refresh. Before a cache exists, the offline catalog advertises Hydrogen (`low`, `medium`, `high`, `xhigh`), Argon and known partner models rather than treating those unverified entries as a completed server discovery. The first real inference then attempts discovery and updates the registered catalog.
+
+### Standby warmup
+
+Warmup is enabled by default. Set `OMP_ACP_WARMUP=off` to keep every request on the cold path. With authentication and a usable runtime target, it creates one initialized, **session-less** standby after startup discovery closes, then lets the first matching inference rebind its handlers on that transport. It never creates a throwaway inference session.
+
+Runtime target, cwd, permission auto-approval, native-tool policy and usage mode must match before reuse. Policy changes, failed initialization, invalidation and shutdown close the standby; initialization or authentication failure is silent and leaves the normal inference path available. Synthetic tests cover invalidation and handler rebinding; [Supported platforms](#supported-platforms) distinguishes those from live platform validation.
+
+The CLI selection record caches binary stat metadata to avoid repeatedly querying an unchanged binary's version. This is a local cache optimization, not a claim that every CLI runtime is equally fast on every platform.
 
 Create or edit `~/.omp/agent/antigravity-acp-provider/config.json`:
 
 ```json
 {
-  "permissions": "yolo",
+  "permissions": "follow",
   "runtimeSource": "auto",
   "nativeTools": "prefer",
   "debugToolUpdates": false,
@@ -152,7 +174,7 @@ Create or edit `~/.omp/agent/antigravity-acp-provider/config.json`:
 }
 ```
 
-`permissions` accepts `default`, `auto_edit`, or `yolo`. `runtimeSource` accepts `auto`, `cli`, or `managed`. `nativeTools` accepts `prefer` or `disabled`. `usageMode` accepts `auto` or `off`. `debugToolUpdates` and `diagnostics` are config-only booleans. Missing fields use these defaults: `permissions: "yolo"`, `runtimeSource: "auto"`, `nativeTools: "prefer"`, `debugToolUpdates: false`, `usageMode: "off"`, and `diagnostics: false`. Slash commands write the command-backed fields and keep the legacy setting files in sync. Context budgets remain in `context.json`; cleanup policy remains in `cleanup.json`.
+`permissions` accepts `default`, `auto_edit`, `yolo`, or `follow`. `runtimeSource` accepts `auto`, `cli`, or `managed`. `nativeTools` accepts `prefer` or `disabled`. `usageMode` accepts `auto` or `off`. `debugToolUpdates` and `diagnostics` are config-only booleans. Missing fields use these defaults: `permissions: "follow"`, `runtimeSource: "auto"`, `nativeTools: "prefer"`, `debugToolUpdates: false`, `usageMode: "off"`, and `diagnostics: false`. `follow` reads OMP's effective approval mode at plugin startup: OMP CLI `--approval-mode` and `--auto-approve` take precedence, then the project `.omp` override, then the active agent config. It maps `yolo` to `yolo`, `write` to `auto_edit`, and both ask modes to `default`. Restart OMP after changing OMP's approval mode so the ACP process is recreated with the matching auto-approval policy. Slash commands write the command-backed fields and keep the legacy setting files in sync. Context budgets remain in `context.json`; cleanup policy remains in `cleanup.json`.
 
 - `auto` uses the CLI first and falls back to the managed runtime. If no usable CLI exists, it downloads the managed runtime.
 - `cli` requires a usable `agy` CLI. If the CLI is missing or unusable, the first ACP use fails and nothing is downloaded.
@@ -164,7 +186,7 @@ Session storage follows the server's own `--app_data_dir`. The generated wrapper
 
 The active channel and its versions are recorded in `~/.omp/agent/antigravity-acp-provider/acp-runtime-source.json` whenever the CLI is chosen.
 
-Permission IDs differ between the channels. Managed ACP 1.4.5 supports `default`, `auto_edit`, and `yolo` directly. CLI ACP 1.5.3 advertises `default`, `accept-edits`, and `plan` instead. The adapter maps `auto-edit` to `accept-edits`. For `yolo`, it selects wire mode `default` and passes the CLI's official `--dangerously-skip-permissions` flag. This preserves auto-approval instead of substituting `accept-edits`. Changing permission modes recreates the ACP runtime so a process with auto-approval cannot serve a later `default` or `auto-edit` request. An explicit `AGY_ACP_BIN` is left unchanged.
+Permission IDs differ between the channels. Managed ACP 1.4.5 supports `default`, `auto_edit`, and `yolo` directly. CLI ACP 1.5.3 advertises `default`, `accept-edits`, and `plan` instead. The adapter maps `auto-edit` to `accept-edits`. For `yolo`, it selects wire mode `default` and passes the CLI's official `--dangerously-skip-permissions` flag. This preserves auto-approval instead of substituting `accept-edits`. `follow` resolves OMP's effective approval mode first, with CLI `--approval-mode` and `--auto-approve` overrides taking precedence over project and agent config: `yolo` to `yolo`, `write` to `auto_edit`, and `always-ask` or `always-ask-cached` to `default`. Changing permission modes recreates the ACP runtime so a process with auto-approval cannot serve a later `default` or `auto-edit` request. An explicit `AGY_ACP_BIN` is left unchanged.
 
 CLI ACP 1.5.3 omits `mcpCapabilities` from its initialization response, but it still discovers HTTP MCP servers and calls `tools/list`. The adapter normalizes this capability for that server identity so OMP tools remain available. CLI 1.5.3 reports no audio input, while the adapter's model catalog already limits input to text and images.
 
@@ -175,6 +197,20 @@ ACP may report live occupancy with `usage_update`. When it does, the adapter for
 The estimate is a heuristic, not a server measurement. To use managed ACP when exact occupancy matters, set `AGY_ACP_BIN` to the managed binary. CLI-first selection does not switch automatically. In this source checkout, `scripts/with-managed-context.sh` starts OMP with the installed managed binary while preserving an explicit `AGY_ACP_BIN`. Run `/antigravity-acp refresh` afterward to inspect the models that runtime actually advertises.
 
 Keep `compaction.autoContinue` enabled for normal long-running work. The false context rollover was fixed at the occupancy signal, not by disabling automatic continuation.
+
+### Supplemental per-turn usage
+
+Native usage on the model response takes precedence. When there is none and no supplemental `/usage` query is running, the adapter may read the ACP server's own per-session SQLite store. It prefers `bun:sqlite` under OMP's Bun host and falls back to `node:sqlite`; both open the existing database read-only. Only completed model steps after a per-session cursor are counted, with two short WAL-consistency retries if the newest step has not committed yet.
+
+This fallback never creates a missing database and accepts only a UUID-shaped ACP session ID. It can enrich usage and estimated cost, but is not authoritative server billing. It does not replace `usage_update` context occupancy. `OMP_ACP_USAGE=off` disables both the supplemental `/usage` query and local-store accounting; the command setting `usage off` disables only the supplemental query. No extra model request is sent to collect local-store usage.
+
+Managed quota discovery waits up to 20 seconds for the official `/usage` advertisement. A brief 1.5-second grace before closing a successful or timed-out probe gives the server's background token refresh room to settle; cancellation still follows the bounded abort-safe process cleanup. This is cleanup protection, not a guarantee that a quota value or OAuth refresh will be available.
+
+### History continuity and seed safety
+
+When OMP removes the **oldest** image blocks to meet its image budget, the adapter recognizes the proven one-way eviction and can retain the warm ACP session. Checkpoints retain bounded positions and digests, not image bytes. Text edits, image substitutions, changed tool identities and unsupported message shapes force a clean rebuild instead of preserving a mismatched history.
+
+Large history transfers can use hidden seed steps. Each requires the exact response `OK` and has a 60-second deadline. Adapter-mediated tool and permission requests fail the step without dispatching bridged work; an unsafe partial ACP session is retired before retry. An already-executed native operation cannot be undone merely by rejecting its later notification, so this guard is not a rollback mechanism. Compact history before retrying after these explicit failures.
 
 ## Commands
 
@@ -214,6 +250,7 @@ OMP's built-in `omp usage`, interactive `/usage`, and the statusline `usage` seg
 | `native-tools prefer` | Let OMP tools shadow matching ACP-native tools. |
 | `native-tools disabled` | Disable ACP-native built-ins for strict OMP-tool sessions while retaining MCP configuration; connections are recreated on the next request. |
 | `permissions default` | Confirm edits and commands. |
+| `permissions follow` | Follow OMP's `tools.approvalMode`; this is the default. |
 | `permissions auto-edit` | Auto-accept edits. |
 | `permissions yolo` | Auto-accept everything; changing modes recreates runtimes to avoid reusing an unsafe process. |
 
@@ -258,9 +295,17 @@ A `refusal` stop reason is reported as an explicit provider refusal. An empty `e
 
 Detailed behavior, advanced settings and limitations: [docs/](docs/) and [CHANGELOG.md](CHANGELOG.md).
 
+## Release tooling
+
+For a prepared release, first update `CHANGELOG.md`, then run `npm run release:bump -- X.Y.Z`. The helper updates all six supported version declarations and runs the version consistency checker; it does not commit, tag, push or publish. `npm run check:versions` verifies the current metadata, and `node scripts/check-release-versions.mjs --release --tag vX.Y.Z` additionally checks the tag and changelog heading.
+
+The `Release` workflow runs only for pushed `v*` tags. It reruns the offline check, validates the packed tarball against the tag and commit, then uses npm trusted publishing with provenance before creating or reusing the GitHub release. The tag run is the only publishing path; do not publish from a local checkout.
+
 ## Contributors
 
-The Linux Secret Service credential handling is adapted from [Maddock (@notmaddock)](https://github.com/notmaddock)'s work in [PR #2](https://github.com/SenCha930511/omp-antigravity-acp-provider/pull/2). Upstream project attribution stays in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The Linux Secret Service credential handling and model metadata/fallback adaptations come from [Maddock (@notmaddock)](https://github.com/notmaddock)'s work, including [PR #2](https://github.com/SenCha930511/omp-antigravity-acp-provider/pull/2). Image-eviction continuity and hidden-seed guards are adapted from `ldfhhc/omp-antigravity-acp-provider`. Auth/discovery, Bun SQLite usage, CLI stat caching, quota timing, warmup and release-helper adaptations use work from `00lllooolll00/omp-antigravity-acp-provider`, with additional integration and lifecycle fixes in this repository.
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for links to all three fork projects and the separation between their adaptations and the upstream project attribution.
 
 GitHub counts a contributor when a commit that credits them, as author or through a `Co-authored-by:` trailer, reaches the default branch ([contributor list](https://docs.github.com/en/repositories/viewing-activity-and-data-for-your-repository/viewing-a-projects-contributors), [co-authored commits](https://docs.github.com/en/pull-requests/how-tos/commit-changes/creating-a-commit-with-multiple-authors)). Until commits carrying that credit are on the default branch of the public repository, its contributors page will not list the addition.
 

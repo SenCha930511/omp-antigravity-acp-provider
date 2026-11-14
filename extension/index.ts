@@ -16,7 +16,7 @@ import {
   resolveRuntimeLaunchPlan,
   type RuntimeLaunchPlan,
 } from "./runtime/launch.ts";
-import { loadAdapterConfig } from "./adapter-config.ts";
+import { loadAdapterConfig, resolveAdapterPermissionMode, type AdapterPermissionMode, type EffectivePermissionMode } from "./adapter-config.ts";
 import { SessionRuntimePool } from "./runtime-pool.ts";
 import { ownerRoutingId, sessionOwnerId } from "./runtime/routing.ts";
 import { createStructuredFingerprintMemo } from "./runtime/binding.ts";
@@ -24,11 +24,12 @@ import { Diagnostics, instrumentRuntime } from "./diagnostics.ts";
 import { stableTools } from "./tool-order.ts";
 import { toolDeclarations, normalizeOmpSystemDeltas, type OmpToolDeclaration } from "./omp-context.ts";
 import { OmpSessionLifecycle, type OmpProviderSessionState } from "./omp-session-lifecycle.ts";
-import { DEFAULT_USAGE_MODE, loadContextSettings } from "./context-settings.ts";
-import { projectCatalog, selectRuntimeModel, type PublicCatalogModel } from "./model-catalog.ts";
+import { DEFAULT_USAGE_MODE, loadContextSettings, type ContextSettings } from "./context-settings.ts";
+import { PARTNER_FALLBACK_MODELS, projectCatalog, selectRuntimeModel, type PublicCatalogModel } from "./model-catalog.ts";
 import { TranscriptRouting, type RoutingAttempt } from "./transcript-routing.ts";
 import { sourceId } from "./omp-session-source.ts";
 import { loadToolPolicy } from "./tool-policy.ts";
+import type { NativeToolMode } from "./tool-routing.ts";
 import {
   MARKER,
   OmpAuthCoordinator,
@@ -38,7 +39,7 @@ import {
   logoutFollow,
   type OmpCommandContext,
 } from "./auth-sync.ts";
-import { CatalogStore } from "./catalog-store.ts";
+import { CatalogStore, type ConfiguredCatalogModel } from "./catalog-store.ts";
 import { createAntigravityArgumentCompletions, createAntigravityCommandHandler, type AntigravityCompletionItem, type RuntimeBundleView, type ToolAuditSummary } from "./commands.ts";
 import { formatCompactionNotice } from "./acp-compaction.ts";
 import { classifyAcpFailure } from "./acp-errors.ts";
@@ -80,10 +81,63 @@ export function resolveAdapterStateDir(env: NodeJS.ProcessEnv = process.env, hom
   // OMP sets this to the active named profile's agent directory during CLI
   // bootstrap; it also honors an explicit default-profile override.
   const configured = env.PI_CODING_AGENT_DIR?.trim();
-  const agentDir = configured ? configured === "~" ? home : configured.startsWith("~/") ? path.join(home, configured.slice(2)) : path.resolve(configured)
+  const agentDir = configured ? configured === "~" ? home
+    : configured.startsWith("~/") || configured.startsWith("~\\") ? path.join(home, configured.slice(2))
+    : path.resolve(configured)
     : path.join(home, env.PI_CONFIG_DIR || ".omp", "agent");
   return path.join(agentDir, "antigravity-acp-provider");
 }
+
+// Offline catalog used before the first ACP discovery. Keep the newest
+// families here so a fresh install or an auth gap still exposes them; the
+// CatalogStore marks these entries as unverified until a real refresh lands.
+export function offlineFallbackModels(): PublicCatalogModel[] {
+  return [
+    ...(FALLBACK_MODELS as PublicCatalogModel[]),
+    ...projectCatalog([
+      { modelId: "gemini-4-argon-low", name: "Gemini 4 Argon (low)" },
+      { modelId: "gemini-4-argon-medium", name: "Gemini 4 Argon (medium)" },
+      { modelId: "gemini-4-argon-high", name: "Gemini 4 Argon (high)" },
+      { modelId: "gemini-4-hydrogen-low", name: "Gemini 4 Hydrogen (low)" },
+      { modelId: "gemini-4-hydrogen-medium", name: "Gemini 4 Hydrogen (medium)" },
+      { modelId: "gemini-4-hydrogen-high", name: "Gemini 4 Hydrogen (high)" },
+      { modelId: "gemini-4-hydrogen-xhigh", name: "Gemini 4 Hydrogen (xhigh)" },
+    ]),
+    ...PARTNER_FALLBACK_MODELS,
+  ];
+}
+
+const defaultConnectionFactory = (options: ConstructorParameters<typeof TierConnection>[0]): TierConnection =>
+  new TierConnection(options);
+
+export interface OmpAdapterOptions {
+  // An injected factory keeps fixtures offline, so warmup stays opt-in for it:
+  // a test exercises the real standby lifecycle without a network spawn.
+  warmup?: boolean;
+}
+
+// Standby warmup is a latency optimization, never a requirement. `off`, or any
+// value this adapter does not recognize, leaves every request on the cold path.
+function warmupSetting(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.OMP_ACP_WARMUP?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return true;
+  if (raw === "off" || raw === "0" || raw === "false" || raw === "no") return false;
+  return raw === "on" || raw === "1" || raw === "true" || raw === "yes" || raw === "auto";
+}
+
+// The identity a standby must share with a real request before it is reused.
+interface WarmupSignature {
+  cwd: string;
+  target: string;
+  autoApprove: boolean;
+  nativeTools: NativeToolMode;
+  debugToolUpdates: boolean;
+  usageMode: "auto" | "off";
+}
+
+// Discovery and install can outlive a shutdown request; the standby task stops
+// at its next generation check, so teardown only waits this long.
+const WARMUP_STOP_TIMEOUT_MS = 2_000;
 
 export default async function (pi: OmpHostApi) {
   return registerOmpAdapter(pi, resolveAdapterStateDir());
@@ -91,14 +145,21 @@ export default async function (pi: OmpHostApi) {
 
 // Explicit state injection keeps command integration tests away from user data.
 export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
-  createConnection = (options: ConstructorParameters<typeof TierConnection>[0]): TierConnection => new TierConnection(options)) {
+  createConnection: (options: ConstructorParameters<typeof TierConnection>[0]) => TierConnection = defaultConnectionFactory,
+  options: OmpAdapterOptions = {}) {
   const configPath = path.join(stateDir, "config.json");
   const cachePath = path.join(stateDir, "models-cache.json");
   const toolPolicyPath = path.join(stateDir, "omp-tools.json");
   const contextPath = path.join(stateDir, "context.json");
   // Preserve restrictive legacy permissions before merged defaults are derived.
   loadConfig(configPath);
-  const legacyContextSettings = loadContextSettings(contextPath);
+  let legacyContextSettings: ContextSettings;
+  try {
+    legacyContextSettings = loadContextSettings(contextPath);
+  } catch (error) {
+    console.warn("[antigravity-acp] Ignoring invalid context settings; using model defaults.", error instanceof Error ? error.message : String(error));
+    legacyContextSettings = { defaults: {}, models: {} };
+  }
   const legacyToolPolicy = loadToolPolicy(toolPolicyPath);
   const diagnosticsPath = path.join(stateDir, "diagnostics.json");
   const legacyDiagnostics = new Diagnostics(diagnosticsPath);
@@ -113,7 +174,9 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     defaults: { ...legacyContextSettings.defaults, usageMode: adapterConfig.usageMode },
   };
   let toolPolicy = { nativeTools: adapterConfig.nativeTools, debugToolUpdates: adapterConfig.debugToolUpdates };
-  let permissionMode = adapterConfig.permissions;
+  let permissionPreference: AdapterPermissionMode = adapterConfig.permissions;
+  let permissionMode: EffectivePermissionMode = resolveAdapterPermissionMode(
+    permissionPreference, path.dirname(stateDir), process.cwd());
   const sessionStorePath = path.join(stateDir, "sessions.json");
   const sessionStore = new AcpSessionStore(sessionStorePath);
   const cleanup = new SessionCleanup(stateDir);
@@ -170,7 +233,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   // managed marker is an OMP placeholder, never a substitute credential.
   async function requireAcpAuth(apiKey?: string): Promise<void> {
     if (usableApiKey(apiKey)) return;
-    if (await authReady()) return;
+    if (await authReady({ allowKeychain: selectedLaunchPlan?.source !== "managed" })) return;
     throw new Error("Antigravity ACP is not signed in. Run /login (or /antigravity-acp login) before sending a message.");
   }
 
@@ -191,7 +254,13 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     audit: ToolAuditSummary;
   } | undefined;
 
-  function spawnConnection(options: ConstructorParameters<typeof TierConnection>[0]): TierConnection {
+  // A spawn is described once so warmup and a real request can compare the
+  // exact target, cwd, permission process flag and tool policy before a
+  // standby is reused.
+  function prepareSpawn(options: ConstructorParameters<typeof TierConnection>[0]): {
+    options: ConstructorParameters<typeof TierConnection>[0];
+    signature: WarmupSignature;
+  } {
     const profile = currentPermissionProfile();
     const env = ensureLoopbackBypass({
       ...process.env,
@@ -199,12 +268,24 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     });
     if (profile.autoApproveProcess) env.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS = "1";
     else delete env.OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS;
+    const identity = {
+      cwd: path.resolve(options.cwd ?? process.cwd()),
+      autoApprove: profile.autoApproveProcess,
+      nativeTools: toolPolicy.nativeTools,
+      debugToolUpdates: toolPolicy.debugToolUpdates,
+      usageMode: contextSettings.defaults.usageMode ?? DEFAULT_USAGE_MODE,
+    } as const;
     // `command`/`entryPath` stay fixture-only direct spawns. An explicit
     // `launch` record comes from an inspected plan (quota) and is already the
     // verified target; inference never supplies it and still resolves and
     // verifies the selected plan below.
     if (options.command !== undefined || options.entryPath !== undefined || options.launch !== undefined) {
-      return createConnection({ ...options, env });
+      const target = options.launch !== undefined
+        ? `launch:${options.launch.command}\u0000${(options.launch.args ?? []).join("\u0000")}`
+        : options.command !== undefined
+          ? `command:${options.command}\u0000${(options.args ?? []).join("\u0000")}`
+          : `entry:${options.entryPath}`;
+      return { options: { ...options, env }, signature: { ...identity, target } };
     }
     // The plan owns the spawn target, so the runtime never has to resolve a
     // runtime from shared environment state.
@@ -213,7 +294,195 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     // The verified plan target is spawned through the owned supervisor, so the
     // process tree, Windows batch wrappers and node resolution stay owned.
     const launch = resolveLaunchTarget(plan);
-    return createConnection({ ...options, launch, env });
+    return {
+      options: { ...options, launch, env },
+      signature: { ...identity, target: `launch:${launch.command}\u0000${launch.args.join("\u0000")}` },
+    };
+  }
+
+  // Discovery, quota and fixture callers spawn directly; only the inference
+  // path below may consume a warmed standby.
+  function spawnConnection(options: ConstructorParameters<typeof TierConnection>[0]): TierConnection {
+    const connection = createConnection(prepareSpawn(options).options);
+    if (connection.process?.exited) {
+      connections.add(connection);
+      void connection.process.exited.finally(() => {
+        connections.delete(connection);
+      });
+    }
+    return connection;
+  }
+
+  // Standby warmup keeps one initialized, session-less ACP connection for the
+  // next real binding. It is published only after initialize resolves, is
+  // never given a throwaway session, and is closed whenever its target or
+  // policy identity changes.
+  // An injected factory keeps fixtures offline, so warmup needs the explicit
+  // adapter opt-in there; production uses the default factory and the env flag.
+  const warmupEnabled = warmupSetting()
+    && (createConnection === defaultConnectionFactory || options.warmup === true);
+  let warmupStandby: { connection: TierConnection; signature: WarmupSignature } | undefined;
+  let warmupTask: Promise<void> | undefined;
+  let warmupTaskKey: string | undefined;
+  let warmupStarting: TierConnection | undefined;
+  let warmupAbort: AbortController | undefined;
+  let warmupGeneration = 0;
+  // A refresh that settles after shutdown must not restart warmup.
+  let warmupEpoch = 0;
+  const warmupClosings = new Set<Promise<void>>();
+
+  function closeWarmupConnection(connection: TierConnection): Promise<void> {
+    const closing = Promise.resolve().then(() => connection.close()).catch(() => undefined);
+    warmupClosings.add(closing);
+    void closing.then(() => { warmupClosings.delete(closing); });
+    return closing;
+  }
+
+  const warmupKeyOf = (signature: Omit<WarmupSignature, "target">): string =>
+    [signature.cwd, signature.autoApprove ? "1" : "0", signature.nativeTools,
+      signature.debugToolUpdates ? "1" : "0", signature.usageMode].join("\u0000");
+
+  function currentWarmupKey(): string {
+    const profile = currentPermissionProfile();
+    return warmupKeyOf({
+      cwd: path.resolve(process.cwd()),
+      autoApprove: profile.autoApproveProcess,
+      nativeTools: toolPolicy.nativeTools,
+      debugToolUpdates: toolPolicy.debugToolUpdates,
+      usageMode: contextSettings.defaults.usageMode ?? DEFAULT_USAGE_MODE,
+    });
+  }
+
+  function sameWarmupSignature(left: WarmupSignature, right: WarmupSignature): boolean {
+    return left.cwd === right.cwd && left.target === right.target && left.autoApprove === right.autoApprove
+      && left.nativeTools === right.nativeTools && left.debugToolUpdates === right.debugToolUpdates
+      && left.usageMode === right.usageMode;
+  }
+
+  // Drop any ready or in-flight standby. The in-flight task sees the generation
+  // bump and closes its own connection instead of publishing it.
+  function invalidateWarmup(): void {
+    warmupGeneration += 1;
+    warmupAbort?.abort();
+    warmupAbort = undefined;
+    warmupTaskKey = undefined;
+    const starting = warmupStarting;
+    warmupStarting = undefined;
+    if (starting) void closeWarmupConnection(starting);
+    const ready = warmupStandby;
+    warmupStandby = undefined;
+    if (ready) void closeWarmupConnection(ready.connection);
+  }
+
+  async function runWarmup(generation: number, controller: AbortController): Promise<void> {
+    const stale = () => controller.signal.aborted || generation !== warmupGeneration;
+    try {
+      // A missing login is a user action; warmup must not surface it.
+      if (!(await authReady())) return;
+      if (stale()) return;
+      // Serialized behind the same preparation every request uses, so warmup
+      // never duplicates a discovery or install already in flight.
+      await prepareRuntime();
+      if (stale()) return;
+      let prepared: ReturnType<typeof prepareSpawn>;
+      try {
+        prepared = prepareSpawn({ cwd: process.cwd() });
+      } catch {
+        // No usable provider target: stay silent and let inference report it.
+        return;
+      }
+      if (stale()) return;
+      const connection = createConnection({
+        ...prepared.options,
+        ompNativeTools: toolPolicy.nativeTools,
+        ompDebugToolUpdates: toolPolicy.debugToolUpdates,
+        ompUsageMode: contextSettings.defaults.usageMode ?? DEFAULT_USAGE_MODE,
+        ompCleanup: cleanup,
+        ompDiagnostics: diagnostics,
+      });
+      warmupStarting = connection;
+      try {
+        await connection.initialize(controller.signal);
+      } catch {
+        if (warmupStarting !== connection) return; // A cancel already closed it.
+        warmupStarting = undefined;
+        await closeWarmupConnection(connection);
+        return;
+      }
+      if (warmupStarting !== connection) return;
+      warmupStarting = undefined;
+      if (stale() || connection.process?.alive === false) {
+        await closeWarmupConnection(connection);
+        return;
+      }
+      warmupStandby = { connection, signature: prepared.signature };
+    } catch { /* Warmup is best effort; the cold path remains available. */ }
+  }
+
+  function startWarmup(): void {
+    if (!warmupEnabled) return;
+    const key = currentWarmupKey();
+    if (warmupStandby && warmupKeyOf(warmupStandby.signature) === key) return;
+    if (warmupTask && warmupTaskKey === key) return;
+    invalidateWarmup();
+    const generation = ++warmupGeneration;
+    const controller = new AbortController();
+    warmupAbort = controller;
+    warmupTaskKey = key;
+    const task = runWarmup(generation, controller);
+    warmupTask = task;
+    void task.then(() => {
+      if (warmupTask === task) { warmupTask = undefined; warmupTaskKey = undefined; }
+      if (warmupAbort === controller) warmupAbort = undefined;
+    });
+  }
+
+  // Only an inference request may consume a standby, and only when every
+  // identity field matches. Handlers are rebound in place, never a new
+  // transport, and a connection that cannot rebind is closed instead.
+  function takeWarmup(
+    signature: WarmupSignature,
+    handlers: ConstructorParameters<typeof TierConnection>[0]["handlers"],
+  ): TierConnection | undefined {
+    const ready = warmupStandby;
+    // Only a handler-bound binding may take a standby. Login and other
+    // purpose-specific transports keep their own environment.
+    if (!ready || handlers === undefined) return undefined;
+    if (!sameWarmupSignature(ready.signature, signature) || ready.connection.process?.alive === false
+      || typeof ready.connection.rebindHandlers !== "function") {
+      warmupStandby = undefined;
+      void closeWarmupConnection(ready.connection);
+      return undefined;
+    }
+    warmupStandby = undefined;
+    ready.connection.rebindHandlers(handlers);
+    return ready.connection;
+  }
+
+  async function stopWarmup(): Promise<void> {
+    warmupEpoch += 1;
+    invalidateWarmup();
+    const task = warmupTask;
+    const pending = [...warmupClosings];
+    if (task) pending.push(task.catch(() => undefined));
+    if (!pending.length) return;
+    // The generation bump already prevents a spawn or publish after this
+    // point, so teardown waits finitely instead of following discovery.
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise<void>(resolve => { const timer = setTimeout(resolve, WARMUP_STOP_TIMEOUT_MS); timer.unref?.(); }),
+    ]);
+  }
+
+  function requestWarmup(): void {
+    if (!warmupEnabled) return;
+    const epoch = warmupEpoch;
+    const start = () => { if (epoch === warmupEpoch) startWarmup(); };
+    // The startup refresh already runs a discovery connection. Warm up after
+    // it settles so two ACP processes never race for the same state.
+    const refresh = startupRefresh;
+    if (refresh) void refresh.then(start, start);
+    else start();
   }
 
   // A side routing id shares its parent's runtime entry, so a new one-shot id
@@ -224,14 +493,19 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   const runtimes = new SessionRuntimePool<RuntimeBundleView>(() => {
     const ownedConnections = new Set<TierConnection>();
     const runtime = new AntigravityRuntime((options: ConstructorParameters<typeof TierConnection>[0]) => {
-      const connection = spawnConnection({
+      const requested = {
         ...options,
         ompNativeTools: toolPolicy.nativeTools,
         ompDebugToolUpdates: toolPolicy.debugToolUpdates,
         ompUsageMode: contextSettings.defaults.usageMode ?? DEFAULT_USAGE_MODE,
         ompCleanup: cleanup,
         ompDiagnostics: diagnostics,
-      });
+      };
+      const prepared = prepareSpawn(requested);
+      // A warmed standby is reused only for this exact target, cwd, permission
+      // process flag, tool policy and usage mode; otherwise it was closed and
+      // this request spawns cold.
+      const connection = takeWarmup(prepared.signature, options.handlers) ?? createConnection(prepared.options);
       connections.add(connection);
       ownedConnections.add(connection);
       void connection.process.exited.finally(() => {
@@ -249,7 +523,9 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   }, (bundle, id) => lifecycle.disposeRuntime(id, bundle, () => bundle.runtime.close()),
   { timeoutMs: idleTimeoutMs, maxIdleEntries, canDispose: bundle => !bundle.isBusy() });
 
-  async function closePool() { await lifecycle.closeAll(); await runtimes.closeAll(); }
+  // Logout, policy changes and a full shutdown all land here: a standby must
+  // never outlive the pool it would serve.
+  async function closePool() { await stopWarmup(); await lifecycle.closeAll(); await runtimes.closeAll(); }
 
   const routing = new TranscriptRouting();
   const sessionIdOf = (ctx: OmpCommandContext | undefined): string | undefined => ctx?.sessionManager?.getSessionId?.();
@@ -258,7 +534,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     const sessionId = sessionIdOf(ctx);
     if (sessionId) {
       const routingId = routing.forget(sessionId, ctx?.sessionManager?.getSessionFile?.());
-      const closing = [lifecycle.closeSession(sessionId)];
+      const closing = [lifecycle.closeSession(sessionId), stopWarmup()];
       if (routingId !== sessionId) closing.push(lifecycle.closeSession(routingId));
       const results = await Promise.allSettled([...closing, lifecycle.waitClosing(), runtimes.closeIdle()]);
       for (const result of results) if (result.status === "rejected") failures.push(result.reason);
@@ -305,9 +581,13 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     try { await cleanup.trackSource(id, file); } catch { /* Unproven or not-yet-persisted sources remain protected. */ }
   };
 
-  const notifyAcpCompactions = (ctx: OmpCommandContext) => {
+  const notifyAcpCompactions = async (ctx: OmpCommandContext) => {
+    const transcriptId = sessionIdOf(ctx);
+    if (!transcriptId) return;
+    const saved = await sessionStore.get(ownerRoutingId(transcriptId) ?? transcriptId).catch(() => undefined);
+    if (!saved) return;
     for (const connection of connections) {
-      for (const notice of connection.takeCompactionNotices?.() ?? []) {
+      for (const notice of connection.takeCompactionNotices?.(saved.acpSessionId) ?? []) {
         try { ctx.ui.notify(formatCompactionNotice(notice), notice.status === "failed" ? "warning" : "info"); }
         catch { /* A notification failure must not affect inference. */ }
       }
@@ -316,12 +596,14 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   let refreshModelsOnStartup: (() => Promise<void>) | undefined;
   pi.on("session_start", async (event: unknown, ctx: OmpCommandContext) => {
     routing.clearPending();
-    auth.watchOmpCredentials(ctx); await trackOmpSource(event, ctx); notifyAcpCompactions(ctx); cleanup.start();
+    auth.watchOmpCredentials(ctx); await trackOmpSource(event, ctx); await notifyAcpCompactions(ctx); cleanup.start();
     await refreshModelsOnStartup?.();
+    // The refresh above has settled, so the standby cannot duplicate it.
+    requestWarmup();
   });
   pi.on("agent_end", async (event: unknown, ctx: OmpCommandContext) => {
     await trackOmpSource(event, ctx);
-    notifyAcpCompactions(ctx);
+    await notifyAcpCompactions(ctx);
   });
   const handleSourceTransition = async (event: unknown, ctx: OmpCommandContext) => {
     routing.clearPending();
@@ -339,7 +621,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       }
     }
     await trackOmpSource(event, ctx);
-    notifyAcpCompactions(ctx);
+    await notifyAcpCompactions(ctx);
   };
   pi.on("session_switch", handleSourceTransition);
   pi.on("session_branch", handleSourceTransition);
@@ -366,18 +648,40 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     cachePath,
     cleanup,
     prepareRuntime,
-    () => [
-      ...(FALLBACK_MODELS as PublicCatalogModel[]),
-      ...projectCatalog([
-        { modelId: "gemini-4-argon-low", name: "Gemini 4 Argon (low)" },
-        { modelId: "gemini-4-argon-medium", name: "Gemini 4 Argon (medium)" },
-        { modelId: "gemini-4-argon-high", name: "Gemini 4 Argon (high)" },
-      ]),
-    ],
+    offlineFallbackModels,
     requireAcpAuth,
     spawnConnection,
   );
-  let initialModels = catalogStore.loadInitialOrCached(contextSettings);
+  let initialModels: ConfiguredCatalogModel[];
+  try {
+    initialModels = catalogStore.loadInitialOrCached(contextSettings);
+  } catch (error) {
+    console.warn("[antigravity-acp] Context budgets do not fit the catalog; using model defaults.", error instanceof Error ? error.message : String(error));
+    contextSettings = { defaults: { usageMode: contextSettings.defaults.usageMode }, models: {} };
+    try {
+      initialModels = catalogStore.loadInitialOrCached(contextSettings);
+    } catch {
+      initialModels = catalogStore.projectWithSettings(offlineFallbackModels(), contextSettings, false);
+    }
+  }
+
+  // A model selection is the first moment the next turn's target is known.
+  // Only this provider's selection warms; another provider's selection must
+  // never spawn an ACP process.
+  const isAntigravitySelection = (event: unknown): boolean => {
+    if (typeof event !== "object" || event === null) return false;
+    const model: unknown = Reflect.get(event, "model");
+    const modelRecord = typeof model === "object" && model !== null ? model : undefined;
+    const provider = Reflect.get(event, "provider") ?? Reflect.get(event, "providerId")
+      ?? (modelRecord ? Reflect.get(modelRecord, "provider") ?? Reflect.get(modelRecord, "api") : undefined);
+    if (typeof provider === "string" && provider.length > 0) return provider === "antigravity-acp";
+    const id = Reflect.get(event, "modelId") ?? (modelRecord ? Reflect.get(modelRecord, "id") : undefined);
+    return typeof id === "string"
+      && (catalogStore.upstreamModels.has(id) || catalogStore.currentModels.some(candidate => candidate.id === id));
+  };
+  pi.on("model_select", (event: unknown) => {
+    if (isAntigravitySelection(event)) requestWarmup();
+  });
 
   async function loadQuotaSnapshot(signal?: AbortSignal): Promise<AntigravityQuotaSnapshot | undefined> {
     // Derive quota from the plan that inference will spawn. Before the plan
@@ -419,15 +723,22 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       catalog: catalogStore,
       prepareRuntime,
       getContextSettings: () => contextSettings,
-      setContextSettings: next => { contextSettings = next; },
+      // A standby carries the policy it was warmed under; any policy or
+      // permission change evicts it so the next turn negotiates fresh state.
+      setContextSettings: next => { contextSettings = next; invalidateWarmup(); },
       getToolPolicy: () => toolPolicy,
-      setToolPolicy: next => { toolPolicy = next; },
-      setPermissionModeState: mode => { permissionMode = mode; },
+      setToolPolicy: next => { toolPolicy = next; invalidateWarmup(); },
+      setPermissionModeState: mode => {
+        permissionPreference = mode as AdapterPermissionMode;
+        permissionMode = resolveAdapterPermissionMode(permissionPreference, path.dirname(stateDir), process.cwd());
+        invalidateWarmup();
+      },
       getRuntimeForSession: sessionId => runtimes.get(sessionId),
       acquireRuntimeForSession: sessionId => runtimes.acquire(sessionId),
       peekRuntimeForSession: sessionId => runtimes.peek(sessionId),
       getSavedSessionCount: savedSessionCount,
       getPermissionMode: () => permissionMode,
+      getPermissionPreference: () => permissionPreference,
       getAllRuntimes: () => runtimes.values(),
       closeAllRuntimes: closePool,
       onModelsUpdated: models => {
@@ -516,7 +827,14 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
               if (options?.signal?.aborted) throw new Error("ACP request cancelled during startup");
               // Discovery uses the same request credential inference will send;
               // the server validates it through its advertised api-key method.
-              if (!catalogStore.upstreamModels.has(model.id)) await catalogStore.refresh(contextSettings, options?.apiKey);
+              if (!catalogStore.upstreamModels.has(model.id) && !catalogStore.hasUpstreamCatalog) {
+                // Publish the first real discovery result to this host instead
+                // of only filling the lookup map; otherwise the model selector
+                // keeps the offline effort list until the next restart.
+                initialModels = await catalogStore.refresh(contextSettings, options?.apiKey);
+                try { adapted.registerProvider(); } catch { /* advisory */ }
+              }
+              if (options?.signal?.aborted) throw new Error("ACP request cancelled during startup");
               const original = catalogStore.upstreamModels.get(model.id);
               if (!original) throw new Error(`Antigravity model was not discovered: ${model.id}. Run /antigravity-acp refresh.`);
               await lifecycle.ready(ticket);
@@ -531,12 +849,14 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
                   if (message?.usage) applyApiCostEstimate(model.id, message.usage, message.timestamp ?? Date.now());
                   deferred.stream.push(event);
                 }
+                if (process.env.OMP_ACP_TRACE === "1") {
+                  try {
+                    const snapshot = await runtime.snapshot();
+                    console.error("[ACP bridge]", JSON.stringify(snapshot.processes.map((item: { mcpHttp: boolean; omittedTools: unknown[] }) => ({ mcpHttp: item.mcpHttp, omittedTools: item.omittedTools }))));
+                  } catch { /* Trace output must never fail a completed turn. */ }
+                }
                 deferred.stream.end();
                 routing.noteSuccess(routingAttempt);
-                if (process.env.OMP_ACP_TRACE === "1") {
-                  const snapshot = await runtime.snapshot();
-                  console.error("[ACP bridge]", JSON.stringify(snapshot.processes.map((item: { mcpHttp: boolean; omittedTools: unknown[] }) => ({ mcpHttp: item.mcpHttp, omittedTools: item.omittedTools }))));
-                }
               } finally { lease.release(); }
             } catch (error) {
               routingFailed = true;
@@ -559,32 +879,42 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
             await prepareRuntime();
             // Always offer a fresh Google sign-in; without this a new server
             // process silently reuses the saved login and keeps the old account.
-            await auth.beginFreshGoogleLogin();
-            const lease = runtimes.acquire();
+            const loginAttempt = await auth.beginFreshGoogleLogin();
             try {
-              const result = await lease.value.provider.auth.oauth.login({
-                signal: callbacks.signal,
-                notify(event: { message?: string; links?: Array<{ url: string }> }) {
-                  if (event.links?.length) {
-                    for (const link of event.links) callbacks.onAuth({ url: link.url, instructions: event.message });
-                  } else callbacks.onProgress?.(event.message);
-                },
-                prompt: (request: { message: string; placeholder?: string }) => callbacks.onPrompt({ message: request.message, placeholder: request.placeholder }),
-              });
-              auth.noteLoginSucceeded();
-              // Record the signed-in account on the marker credential so OMP's
-              // account list can label it; the email is identity data, not a secret.
-              const email = antigravityAccountEmail();
-              return email ? { ...result, email } : result;
-            } finally {
-              lease.release();
+              const lease = runtimes.acquire();
+              try {
+                const result = await lease.value.provider.auth.oauth.login({
+                  signal: callbacks.signal,
+                  notify(event: { message?: string; links?: Array<{ url: string }> }) {
+                    if (event.links?.length) {
+                      for (const link of event.links) callbacks.onAuth({ url: link.url, instructions: event.message });
+                    } else callbacks.onProgress?.(event.message);
+                  },
+                  prompt: (request: { message: string; placeholder: string }) => callbacks.onPrompt({ message: request.message, placeholder: request.placeholder }),
+                });
+                auth.noteLoginSucceeded(loginAttempt);
+                // Record the signed-in account on the marker credential so OMP's
+                // account list can label it; the email is identity data, not a secret.
+                const email = antigravityAccountEmail();
+                return email ? { ...result, email } : result;
+              } finally {
+                lease.release();
+              }
+            } catch (error) {
+              auth.cancelFreshGoogleLogin(loginAttempt);
+              throw error;
             }
           },
           refreshToken: async (credentials: unknown) => {
             // A refresh can be the first thing that needs a connection, and
             // every spawn uses the resolved launch plan.
             await prepareRuntime();
-            return runtimes.get().provider.auth.oauth.refresh(credentials);
+            const lease = runtimes.acquire();
+            try {
+              return await lease.value.provider.auth.oauth.refresh(credentials);
+            } finally {
+              lease.release();
+            }
           },
           getApiKey: () => MARKER,
         },

@@ -3,6 +3,7 @@ export type AntigravityAcpErrorCode =
 	| "auth"
 	| "model"
 	| "protocol"
+	| "quota"
 	| "spawn"
 	| "timeout"
 	| "process_exit"
@@ -28,7 +29,9 @@ export function errorMessage(cause: unknown): string {
 	return redact(String(cause));
 }
 
-export function redact(text: string): string {
+const REDACT_LIMIT = 4_096;
+
+function redactAll(text: string): string {
 	return text
 		.replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/giu, "$1<redacted>@")
 		.replace(/(?:AIza|sk-|npm_|gh[opurs]_)[A-Za-z0-9_-]{12,}/gu, "<redacted>")
@@ -37,6 +40,15 @@ export function redact(text: string): string {
 		.replace(
 			/((?:["']?(?:access_token|refresh_token|id_token|client_secret|api[-_]?key)["']?)\s*[:=]\s*["']?)[^"'\s,;&}]+/giu,
 			"$1<redacted>",
-		)
-		.slice(0, 4_096);
+		);
+}
+
+export function redact(text: string): string {
+	return redactAll(text).slice(0, REDACT_LIMIT);
+}
+
+/** Redact first, then keep the newest characters. A process stderr tail must
+ * retain the output that preceded a crash, not the first 4 KiB it ever wrote. */
+export function redactTail(text: string): string {
+	return redactAll(text).slice(-REDACT_LIMIT);
 }

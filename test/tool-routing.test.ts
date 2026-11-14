@@ -15,7 +15,29 @@ import { TierConnection } from "../extension/tier-connection.ts";
 import { loadNativeToolMode, saveNativeToolMode } from "../extension/tool-policy.ts";
 import { AntigravityRuntime } from "../extension/runtime.mjs";
 import type { AntigravityAcpConnection } from "../extension/runtime/acp/connection.ts";
-import type { Model } from "@earendil-works/pi-ai";
+import { bridgeExecutionSchema, PiMcpBridge } from "../extension/runtime/tools/bridge.ts";
+import type { Model, Tool } from "@earendil-works/pi-ai";
+
+const wireTool = (name: string, parameters: Record<string, unknown>): Tool =>
+  ({ name, label: name, description: "", parameters }) as Tool;
+const contextControlTools = () => [
+  wireTool("context_notes", {
+    type: "object",
+    properties: { i: { type: "string" }, text: { type: "string" } },
+    additionalProperties: false,
+    required: ["i"],
+  }),
+  wireTool("new_context", {
+    type: "object",
+    properties: { i: { type: "string" } },
+    additionalProperties: false,
+    required: ["i"],
+  }),
+];
+const bridgeWith = (tools: Tool[]) => new PiMcpBridge({
+  tools,
+  onCall: async () => { throw new Error("Projection-only test must not execute a tool"); },
+});
 
 const instructions = "# OMP session instructions\n\nCORE_POLICY\n\nDelegate separable work when requested.";
 const initialize: InitializeMetadata = {
@@ -55,6 +77,81 @@ test("session routing carries the complete OMP instruction and task mapping once
   assert.equal(request._meta, undefined, "the caller's request must not be mutated");
 });
 
+test("main guidance maps only actually projected context tools without changing delegation", () => {
+  const bridge = bridgeWith(contextControlTools());
+  const append = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions, "main", true, bridge.projectedToolNames));
+  assert.match(append, /guidance about context_notes maps to pi_context_notes/);
+  assert.match(append, /guidance about new_context maps to pi_new_context/);
+  assert.equal(append.match(/pi_task/gu)?.length, 2,
+    "the existing task/delegation guidance must remain unchanged");
+  assert.equal(append.match(/Delegate separable work when requested\./gu)?.length, 1,
+    "context-note routing must not add general delegation instructions");
+
+  const onlyNotes = bridgeWith(contextControlTools().slice(0, 1));
+  const notesAppend = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions, "main", true, onlyNotes.projectedToolNames));
+  assert.match(notesAppend, /pi_context_notes/);
+  assert.doesNotMatch(notesAppend, /pi_new_context/);
+  const onlyNew = bridgeWith(contextControlTools().slice(1));
+  const newAppend = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions, "main", true, onlyNew.projectedToolNames));
+  assert.doesNotMatch(newAppend, /pi_context_notes/);
+  assert.match(newAppend, /pi_new_context/);
+
+  const noHttp: InitializeMetadata = {
+    ...initialize,
+    agentCapabilities: { ...initialize.agentCapabilities, mcpCapabilities: { http: false } },
+  };
+  const unavailable = [
+    appendOf(sessionRoutingRequest(request, noHttp, "prefer", instructions, "main", true, bridge.projectedToolNames)),
+    appendOf(sessionRoutingRequest({ cwd: "/fixture" }, initialize, "prefer", instructions, "main", true, bridge.projectedToolNames)),
+    appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions)),
+    appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions, "main", true, bridgeWith([]).projectedToolNames)),
+  ];
+  for (const text of unavailable) {
+    assert.doesNotMatch(text, /pi_context_notes|pi_new_context/);
+  }
+});
+
+test("intent compatibility requires the exact control-tool host shapes", () => {
+  const [notes, fresh] = contextControlTools();
+  const notesExecution = bridgeExecutionSchema(notes) as unknown as Record<string, unknown>;
+  const freshExecution = bridgeExecutionSchema(fresh) as unknown as Record<string, unknown>;
+  assert.deepEqual(notesExecution.required, []);
+  assert.deepEqual(freshExecution.required, []);
+  assert.deepEqual(notesExecution.properties, { i: { type: "string" }, text: { type: "string" } });
+  assert.deepEqual(freshExecution.properties, { i: { type: "string" } });
+
+  const preservedRequired = wireTool("context_notes", {
+    type: "object",
+    properties: { i: { type: "string" }, text: { type: "string" } },
+    additionalProperties: false,
+    required: ["i", "text"],
+  });
+  assert.deepEqual((bridgeExecutionSchema(preservedRequired) as unknown as Record<string, unknown>).required, ["text"]);
+
+  const customNotes = wireTool("context_notes", {
+    type: "object",
+    properties: { i: { type: "string" }, text: { type: "string" }, custom: { type: "string" } },
+    additionalProperties: false,
+    required: ["i", "custom"],
+  });
+  assert.equal(bridgeExecutionSchema(customNotes), customNotes.parameters);
+  const customFresh = wireTool("new_context", {
+    type: "object",
+    properties: { i: { type: "string" } },
+    additionalProperties: true,
+    required: ["i"],
+  });
+  assert.equal(bridgeExecutionSchema(customFresh), customFresh.parameters);
+  const unrelated = wireTool("unrelated", {
+    type: "object",
+    properties: { i: { type: "string" } },
+    additionalProperties: false,
+    required: ["i"],
+  });
+  assert.equal(bridgeExecutionSchema(unrelated), unrelated.parameters);
+  assert.deepEqual((unrelated.parameters as unknown as Record<string, unknown>).required, ["i"]);
+});
+
 test("an ephemeral side session keeps the full instruction but never advertises tool calls", () => {
   const append = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions, "ephemeral"));
   assert.ok(append.startsWith(instructions), "the complete native instruction still leads the append text");
@@ -80,6 +177,9 @@ test("capability absence cannot advertise pi_ tools in the append channel", () =
   const noBridge = sessionRoutingRequest({ cwd: "/fixture" }, initialize, "prefer", instructions);
   assert.match(appendOf(noBridge), /pi-bridge MCP server is not available/);
   assert.doesNotMatch(appendOf(noBridge), /maps to pi_task/);
+  const disabled = appendOf(sessionRoutingRequest(request, noHttp, "disabled", instructions));
+  assert.doesNotMatch(disabled, /use only OMP pi_\* tools/u);
+  assert.match(disabled, /pi-bridge MCP server is not available/u);
 });
 
 test("official 1.5.3 omission of MCP HTTP is normalized before advertising", () => {
@@ -255,6 +355,7 @@ test("TierConnection hands each route to the base session method as _meta", asyn
   });
   try {
     disabled.setOmpSystemInstructions(instructions);
+    disabled.setOmpProjectedToolNames(bridgeWith(contextControlTools()).projectedToolNames);
     const mcpServers = [{ name: "pi-bridge", type: "http" as const, url: "http://127.0.0.1:1" }];
     await disabled.newSession("/fixture", undefined, mcpServers, { custom: "keep" });
     assert.equal(disabled.toolRouting?.channel, "system-append");
@@ -269,6 +370,8 @@ test("TierConnection hands each route to the base session method as _meta", asyn
     assert.ok(typeof append === "string", "the routed request must carry a string system append");
     assert.ok(append.startsWith("Follow only the OMP instructions below."));
     assert.match(append, /use only OMP pi_\* tools and pi_task/);
+    assert.match(append, /pi_context_notes/);
+    assert.match(append, /pi_new_context/);
     assert.equal(append.match(/CORE_POLICY/gu)?.length, 1, "routing must not duplicate the instruction");
     assert.deepEqual(meta.antigravity?.enabledTools, []);
     assert.deepEqual(meta.antigravity?.eagerMcpServers, ["pi-bridge"]);

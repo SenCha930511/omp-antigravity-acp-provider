@@ -9,7 +9,7 @@ import { CatalogStore, type ConfiguredCatalogModel } from "../extension/catalog-
 import { SessionRuntimePool } from "../extension/runtime-pool.ts";
 import { registerOmpAdapter } from "../extension/index.ts";
 import type { OmpCommandContext } from "../extension/auth-sync.ts";
-import { selectRuntimeModel } from "../extension/model-catalog.ts";
+import { PARTNER_FALLBACK_MODELS, parseThoughtRoute, selectRuntimeModel } from "../extension/model-catalog.ts";
 import { Type } from "../extension/runtime.mjs";
 
 test("actual OMP wrapper refreshes tool audit for same-array additions/removals and schema/name edits", async () => {
@@ -201,6 +201,7 @@ test("catalog reads and reconfiguration keep current models and lookup state con
     const store = new CatalogStore(file, {} as any, async () => {}, () => []);
     const defaults = { defaults: {}, models: {} };
     store.loadInitialOrCached(defaults);
+    assert.equal(store.hasUpstreamCatalog, true, "a persisted catalog is already upstream-verified");
     const original = store.getDynamicModels(defaults);
     const changed = store.reconfigure({ defaults: { contextWindow: 65536 }, models: {} });
     assert.equal(changed[0].contextWindow, 65536);
@@ -235,6 +236,151 @@ test("catalog cache notices in-place settings changes and reuses missing-file fa
     settings.defaults.contextWindow = 131072;
     assert.equal(store.getDynamicModels(settings)[0].contextWindow, 131072);
   } finally { await fs.rm(state, { recursive: true, force: true }); }
+});
+
+test("known partner limits stay catalog defaults that user settings can override", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-partner-limits-"));
+  try {
+    const store = new CatalogStore(path.join(state, "missing.json"), {} as any, async () => {},
+      () => [...PARTNER_FALLBACK_MODELS]);
+    const models = store.loadInitialOrCached({
+      defaults: { contextWindow: 65_536, maxTokens: 8_192 },
+      models: { "claude-opus-5-5": { maxTokens: 2_048 } },
+    });
+    const byId = new Map(models.map(model => [model.id, model]));
+    assert.equal(byId.get("claude-sonnet-5-5")?.contextWindow, 65_536);
+    assert.equal(byId.get("claude-sonnet-5-5")?.maxTokens, 8_192);
+    assert.equal(byId.get("claude-opus-5-5")?.contextWindow, 65_536);
+    assert.equal(byId.get("claude-opus-5-5")?.maxTokens, 2_048);
+    // Pricing stays the current API-equivalent table, not a fork copy.
+    assert.equal(byId.get("claude-sonnet-5-5")?.cost.input, 2);
+    assert.equal(byId.get("claude-opus-5-5")?.cost.input, 4);
+    assert.equal(byId.get("gpt-oss-120b")?.cost.input, 0.15);
+    assert.equal(store.hasUpstreamCatalog, false);
+    assert.equal(store.upstreamModels.size, 0);
+  } finally { await fs.rm(state, { recursive: true, force: true }); }
+});
+
+test("offline fallbacks stay unverified until a real refresh supplies discovered efforts", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-catalog-unverified-"));
+  try {
+    const store = new CatalogStore(path.join(state, "models-cache.json"), {} as any, async () => {}, () => [
+      { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", api: "antigravity-acp", provider: "antigravity-acp",
+        baseUrl: "", reasoning: true, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 65_536,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        thinkingLevelMap: { low: "gemini-4-hydrogen-low", medium: "gemini-4-hydrogen-medium", high: "gemini-4-hydrogen-high" },
+        thinking: { mode: "effort", efforts: ["low", "medium", "high"], defaultLevel: "high" } },
+    ]);
+    const settings = { defaults: {}, models: {} };
+    assert.equal(store.loadInitialOrCached(settings).length, 1);
+    assert.equal(store.hasUpstreamCatalog, false);
+    assert.equal(store.upstreamModels.size, 0);
+    assert.equal(store.getDynamicModels(settings).length, 1);
+    assert.equal(store.upstreamModels.size, 0);
+    assert.equal(store.reconfigure({ defaults: { contextWindow: 131_072 }, models: {} }).length, 1);
+    assert.equal(store.hasUpstreamCatalog, false);
+    assert.equal(store.upstreamModels.size, 0);
+
+    store.discoverModels = async () => { throw new Error("synthetic discovery failure"); };
+    await assert.rejects(store.refresh(settings), /synthetic discovery failure/);
+    assert.equal(store.hasUpstreamCatalog, false, "a failed refresh must not mark the fallback as upstream-verified");
+    assert.equal(store.upstreamModels.size, 0);
+    assert.equal(store.currentModels.length, 1);
+
+    store.discoverModels = async () => [{
+      modelId: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", selector: true,
+      thoughtLevels: ["low", "medium", "high", "xhigh"], defaultThoughtLevel: "xhigh",
+    }];
+    const refreshed = await store.refresh(settings);
+    assert.equal(store.hasUpstreamCatalog, true);
+    assert.equal(store.upstreamModels.has("gemini-4-hydrogen"), true);
+    assert.deepEqual(refreshed[0]?.thinking?.efforts, ["low", "medium", "high", "xhigh"]);
+    assert.equal(refreshed[0]?.thinking?.defaultLevel, "xhigh");
+    assert.deepEqual(parseThoughtRoute(selectRuntimeModel(refreshed[0]!, "xhigh").thinkingLevelMap!.high!),
+      { modelId: "gemini-4-hydrogen", effort: "xhigh" });
+    const cached = JSON.parse(await fs.readFile(path.join(state, "models-cache.json"), "utf8"));
+    assert.deepEqual(cached.models[0].thoughtLevels, ["low", "medium", "high", "xhigh"]);
+  } finally { await fs.rm(state, { recursive: true, force: true }); }
+});
+
+test("first inference on a fresh profile discovers the catalog and republishes xhigh efforts", async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stream-discovery-"));
+  const geminiHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stream-discovery-home-"));
+  const previousBin = process.env.AGY_ACP_BIN, previousKey = process.env.GEMINI_API_KEY;
+  const previousHome = process.env.GEMINI_HOME;
+  const registrations: any[] = [];
+  const hooks = new Map<string, Function>();
+  let provider: any;
+  let discoveries = 0;
+  const sessionState = {
+    configOptions: [
+      { id: "model", category: "model", type: "select", currentValue: "gemini-4-hydrogen",
+        options: [{ value: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen" }] },
+      { id: "thinking_level", category: "thought_level", type: "select", currentValue: "xhigh",
+        options: ["low", "medium", "high", "xhigh"].map(value => ({ value, name: value })) },
+    ],
+  };
+  try {
+    // An explicit (non-existent) bin keeps launch-plan resolution on the env
+    // branch; every connection is the injected fake, so no ACP process starts.
+    process.env.AGY_ACP_BIN = path.join(state, "fake-agy");
+    process.env.GEMINI_HOME = geminiHome;
+    process.env.GEMINI_API_KEY = "test-key";
+    await registerOmpAdapter({
+      on: (name: string, fn: Function) => hooks.set(name, fn),
+      registerTool() {},
+      registerCommand() {},
+      registerProvider: (_name: string, value: any) => { provider = value; registrations.push(value); },
+    }, state, () => ({
+      activePrompts: 0,
+      process: { exited: Promise.resolve(), alive: true },
+      async initialize() { return {}; },
+      async newSession() { discoveries++; return { sessionId: `disc-${discoveries}`, ...sessionState }; },
+      async setModel() {},
+      getSessionState() { return sessionState; },
+      async discardSession() {},
+      async close() {},
+      async setMode() {},
+      async setOmpContextWindow() {},
+      async setOmpSystemInstructions() {},
+      async setOmpSessionKind() {},
+      configureUsage() {},
+      prompt() { throw new Error("stop after discovery"); },
+    }) as any);
+    const initial = provider.models.find((model: any) => model.id === "gemini-4-hydrogen");
+    assert.ok(initial, "the offline fallback must expose Hydrogen before discovery");
+    assert.equal(initial.thinking?.defaultLevel, "high");
+
+    const events: any[] = [];
+    for await (const event of provider.streamSimple(initial,
+      { messages: [{ role: "user", content: "synthetic", timestamp: 1 }], tools: [] }, {})) events.push(event);
+    assert.ok(discoveries >= 1, "a missing cache must trigger ACP discovery before inference");
+    const cached = JSON.parse(await fs.readFile(path.join(state, "models-cache.json"), "utf8"));
+    assert.equal(cached.models[0].modelId, "gemini-4-hydrogen");
+    assert.deepEqual(cached.models[0].thoughtLevels, ["low", "medium", "high", "xhigh"]);
+
+    assert.ok(registrations.length >= 2, "the host must receive the discovery result, not just the lookup map");
+    const updated = registrations.at(-1)?.models.find((model: any) => model.id === "gemini-4-hydrogen");
+    assert.ok(updated, "the refreshed provider must still expose the selected model");
+    assert.deepEqual(updated.thinking?.efforts, ["low", "medium", "high", "xhigh"]);
+    assert.equal(updated.thinking?.defaultLevel, "xhigh");
+    assert.equal(updated.contextWindow, 1_000_000);
+    assert.equal(updated.maxTokens, 65_536);
+    assert.deepEqual(parseThoughtRoute(selectRuntimeModel(updated, "xhigh").thinkingLevelMap!.high!),
+      { modelId: "gemini-4-hydrogen", effort: "xhigh" });
+
+    const before = discoveries;
+    for await (const _ of provider.streamSimple({ ...initial, id: "retired-model" },
+      { messages: [{ role: "user", content: "synthetic", timestamp: 1 }], tools: [] }, {})) { /* drain */ }
+    assert.equal(discoveries, before, "a successful refresh must not be repeated for an unknown model");
+  } finally {
+    await hooks.get("session_shutdown")?.({}, {});
+    if (previousBin === undefined) delete process.env.AGY_ACP_BIN; else process.env.AGY_ACP_BIN = previousBin;
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previousKey;
+    if (previousHome === undefined) delete process.env.GEMINI_HOME; else process.env.GEMINI_HOME = previousHome;
+    await fs.rm(state, { recursive: true, force: true });
+    await fs.rm(geminiHome, { recursive: true, force: true });
+  }
 });
 
 test("account session counts reuse unchanged files but follow rewrites and stat failures", async t => {

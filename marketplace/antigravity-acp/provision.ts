@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 export const ADAPTER_NAME = "omp-antigravity-acp-provider";
-export const ADAPTER_VERSION = "0.1.44";
+export const ADAPTER_VERSION = "0.2.1";
 const execute = promisify(execFile);
 const pending = new Map<string, Promise<string>>();
 
@@ -34,18 +34,32 @@ export function quoteBatchArgument(value: string): string {
   return `"${value}"`;
 }
 
-export function resolveNpmInstallCommand(destination: string, platform: NodeJS.Platform = process.platform): { command: string; args: string[] } {
+export function resolveNpmInstallCommand(
+  destination: string,
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[]; env?: NodeJS.ProcessEnv } {
   const installFlags = [
     "install", "--prefix", destination, `${ADAPTER_NAME}@${ADAPTER_VERSION}`,
     "--registry=https://registry.npmjs.org/", "--save-exact", "--omit=dev",
     "--legacy-peer-deps", "--ignore-scripts", "--no-audit", "--no-fund",
   ];
   if (platform !== "win32") return { command: "npm", args: installFlags };
-  const quoted = installFlags.map(argument =>
-    argument === destination ? quoteBatchArgument(argument) : argument);
+  if (/["\r\n]/u.test(destination)) {
+    throw new Error("Windows batch arguments may not contain quotes or newlines");
+  }
+  // cmd.exe expands %NAME% before npm sees the argument. Passing the path
+  // through the environment keeps a literal % in a legal Windows folder name
+  // intact; doubling it would survive only inside a batch file, not cmd /c.
+  // CALL would expand the resulting percent sequences a second time. The
+  // command has no following batch statement, so invoke npm.cmd directly.
+  // /s strips the outer pair; the inner pair still quotes the executable.
+  const needsEnv = destination.includes("%");
+  const prefix = needsEnv ? '"%OMP_ACP_INSTALL_PREFIX%"' : quoteBatchArgument(destination);
+  const quoted = installFlags.map(argument => argument === destination ? prefix : argument);
   return {
     command: process.env.ComSpec ?? "cmd.exe",
-    args: ["/d", "/s", "/e:on", "/v:off", "/c", `call "npm.cmd" ${quoted.join(" ")}`],
+    args: ["/d", "/s", "/e:on", "/v:off", "/c", `""npm.cmd" ${quoted.join(" ")}"`],
+    ...(needsEnv ? { env: { OMP_ACP_INSTALL_PREFIX: destination } } : {}),
   };
 }
 
@@ -57,6 +71,7 @@ async function installPackage(destination: string): Promise<void> {
     maxBuffer: 2 * 1024 * 1024,
     windowsHide: true,
     windowsVerbatimArguments: process.platform === "win32",
+    ...(launch.env ? { env: { ...process.env, ...launch.env } } : {}),
   });
 }
 
@@ -80,7 +95,7 @@ async function provision(cache: string, install: (directory: string) => Promise<
       await fs.rename(staging, destination);
     } catch (error: any) {
       // Another OMP process may have finished the same immutable version first.
-      if (!["EEXIST", "ENOTEMPTY"].includes(error.code) || !await ready(destination)) throw error;
+      if (!["EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(error.code) || !await ready(destination)) throw error;
     }
     return entry;
   } finally {

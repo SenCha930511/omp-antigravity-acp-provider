@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,7 +28,7 @@ export function resolveAntigravityAcpLaunch(): AntigravityLaunch {
 
 	const executableName = process.platform === "win32" ? "agy_acp_server.exe" : "agy_acp_server.par";
 	const userBin = path.join(os.homedir(), ".local", "bin", executableName);
-	if (executable(userBin)) return { command: userBin, args: [], source: "user-bin" };
+	if (executable(userBin)) return directOrWrapper(userBin, "user-bin");
 
 	for (const directory of (process.env.PATH ?? process.env.Path ?? "").split(path.delimiter)) {
 		if (!directory) continue;
@@ -80,6 +81,7 @@ export function inspectAntigravityAuth(
 	const tokenFile = regularFile(tokenPath);
 	const settingsFile = regularFile(settingsPath);
 	let authType: string | undefined;
+	let settingsCorrupt = false;
 	if (settingsFile) {
 		try {
 			const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
@@ -87,7 +89,7 @@ export function inspectAntigravityAuth(
 			};
 			if (typeof settings.auth?.type === "string") authType = settings.auth.type;
 		} catch {
-			return { status: "corrupt", tokenFile, settingsFile };
+			settingsCorrupt = true;
 		}
 	}
 	if (env.GEMINI_API_KEY) return { status: "api-key-env", authType: "gemini-api-key", tokenFile, settingsFile };
@@ -102,6 +104,7 @@ export function inspectAntigravityAuth(
 			return { status: "corrupt", ...(authType ? { authType } : {}), tokenFile, settingsFile };
 		}
 	}
+	if (settingsCorrupt) return { status: "corrupt", ...(authType ? { authType } : {}), tokenFile, settingsFile };
 	if (authType) return { status: "configured-not-authenticated", authType, tokenFile, settingsFile };
 	return { status: "missing", tokenFile, settingsFile };
 }
@@ -118,28 +121,37 @@ export function clearAntigravityCredentials(
 ): void {
 	fs.rmSync(path.join(directory, "acp_token.json"), { force: true });
 	const settingsPath = path.join(directory, "settings.json");
+	let parsed: unknown;
+	try { parsed = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch { return; }
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+	const settings = parsed as Record<string, unknown>;
+	delete settings.auth;
+	const temporary = `${settingsPath}.${randomUUID()}.tmp`;
 	try {
-		const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
-		delete settings.auth;
-		const temporary = `${settingsPath}.${process.pid}.tmp`;
 		fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
 		fs.renameSync(temporary, settingsPath);
 	} catch {
-		fs.rmSync(settingsPath, { force: true });
+		// Keep the original settings file when the atomic update fails.
+	} finally {
+		fs.rmSync(temporary, { force: true });
 	}
 }
 
 function directOrWrapper(command: string, source: AntigravityLaunch["source"]): AntigravityLaunch {
+	let fd: number | undefined;
 	try {
-		const fd = fs.openSync(command, "r");
+		fd = fs.openSync(command, "r");
 		const bytes = Buffer.alloc(64);
 		const count = fs.readSync(fd, bytes, 0, bytes.length, 0);
-		fs.closeSync(fd);
 		if (bytes.subarray(0, count).toString("utf8").startsWith("#!")) {
 			return { command, args: [], source };
 		}
 	} catch {
 		// Native executable; use the server's required empty uid argument.
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* The descriptor is already gone. */ }
+		}
 	}
 	return { command, args: process.platform === "linux" ? ["--uid="] : [], source };
 }
@@ -163,9 +175,11 @@ function regularFile(file: string): boolean {
 
 /** The home directory a child resolves `~` and the default store against. */
 function effectiveHome(env: NodeJS.ProcessEnv): string {
-	return env.HOME?.trim() || os.homedir();
+	return env.HOME?.trim() || env.USERPROFILE?.trim() || os.homedir();
 }
 
 function expandHome(file: string, home = os.homedir()): string {
-	return file === "~" || file.startsWith("~/") ? path.join(home, file.slice(1)) : file;
+	return file === "~" || file.startsWith("~/") || file.startsWith("~\\")
+		? path.join(home, file.slice(2))
+		: file;
 }

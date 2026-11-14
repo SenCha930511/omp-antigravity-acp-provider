@@ -100,7 +100,7 @@ try {
   assert.match(account, /OMP login marker:\s+present · non-secret managed marker · authorized 2009-02-13T23:31:30\.123Z · account marker@example\.com/);
   assert.match(account, /OMP auth source:\s+local store \(oauth marker\)/);
   assert.match(account, /Saved ACP sessions:\s+1/);
-  assert.match(account, /Permission:\s+yolo/);
+  assert.match(account, /Permission:\s+default/);
   assert.match(account, /Active sessions:\s+0/);
   await assert.rejects(command.handler("account extra", context), /Usage:/);
 

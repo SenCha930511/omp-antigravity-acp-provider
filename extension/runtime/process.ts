@@ -4,7 +4,7 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 
 import { resolveAntigravityAcpLaunch } from "./acp/antigravity.ts";
-import { redact } from "./acp/errors.ts";
+import { redactTail } from "./acp/errors.ts";
 import { applyAcpProxyEnvironment } from "./acp/proxy.ts";
 import { applyCredentialStorageEnvironment, type CredentialStorageOptions } from "./acp/credential-storage.ts";
 import { runtimeAssetPath } from "./asset.ts";
@@ -185,7 +185,7 @@ export class AntigravityProcess {
 		this.child = child;
 		child.stderr.setEncoding("utf8");
 		child.stderr.on("data", (chunk: string) => {
-			this.stderr = redact((this.stderr + chunk).slice(-STDERR_LIMIT));
+			this.stderr = (this.stderr + chunk).slice(-STDERR_LIMIT);
 		});
 		child.once("error", (cause) => {
 			this.finish(resolveExit, null, null, `spawn failed: ${cause.message}`);
@@ -203,7 +203,7 @@ export class AntigravityProcess {
 	}
 
 	get stderrTail(): string {
-		return this.stderr;
+		return redactTail(this.stderr);
 	}
 
 	get ignoredStdoutNoiseLines(): number {
@@ -247,7 +247,10 @@ export class AntigravityProcess {
 			if (process.platform === "win32" && this.child.pid) {
 				const args = ["/PID", String(this.child.pid), "/T"];
 				if (signal === "SIGKILL") args.push("/F");
-				spawn("taskkill", args, { stdio: "ignore", windowsHide: true });
+				const killer = spawn("taskkill", args, { stdio: "ignore", windowsHide: true });
+				killer.on("error", () => {
+					try { this.child.kill(signal); } catch { /* The tree is already gone. */ }
+				});
 				return;
 			}
 			if (this.child.pid) process.kill(-this.child.pid, signal);
@@ -265,7 +268,7 @@ export class AntigravityProcess {
 	): void {
 		if (this.settled) return;
 		this.settled = true;
-		resolve({ code, signal, stderrTail: redact(stderrTail) });
+		resolve({ code, signal, stderrTail: redactTail(stderrTail) });
 	}
 }
 

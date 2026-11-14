@@ -41,6 +41,22 @@ test("ACP compaction chunks and upserts become one terminal notification", () =>
   assert.deepEqual(connection.takeCompactionNotices(), [], "a completed compaction is notified once");
 });
 
+test("compaction notices are claimed only by their owning ACP session", () => {
+  const connection = bareConnection();
+  for (const sessionId of ["session-a", "session-b"]) {
+    connection.recordCompaction(sessionId, {
+      sessionUpdate: "compaction_update",
+      compactionId: `compact-${sessionId}`,
+      status: "completed",
+    });
+  }
+  const first = connection.takeCompactionNotices("session-a");
+  assert.deepEqual(first.map((notice: { sessionId: string }) => notice.sessionId), ["session-a"]);
+  const second = connection.takeCompactionNotices("session-b");
+  assert.deepEqual(second.map((notice: { sessionId: string }) => notice.sessionId), ["session-b"]);
+  assert.deepEqual(connection.takeCompactionNotices(), []);
+});
+
 test("compaction failures surface the error and clear on explicit null", () => {
   const failed = applyCompactionUpdate(undefined, "s", {
     compactionId: "c", status: "failed", error: "quota unavailable",

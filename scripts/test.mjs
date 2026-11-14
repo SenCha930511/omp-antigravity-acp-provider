@@ -38,9 +38,9 @@ try {
     banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' },
     logLevel: "warning",
   });
-  const compiled = (await readdir(path.join(output, "test")))
-    .filter(file => file.endsWith(".mjs"))
-    .map(file => path.join(output, "test", file));
+  const compiled = entries.map(file => path.join(
+    output, "test", `${path.basename(file, ".ts")}.mjs`,
+  ));
   const result = spawnSync(process.execPath, ["--test", ...compiled], {
     stdio: "inherit",
   });

@@ -16,15 +16,22 @@ async function fakeInstall(directory: string) {
   await fs.writeFile(path.join(root, "extension/assets/runtime-manifest.json"), "{}");
 }
 
-test("Windows installation invokes npm.cmd with verbatim quoting for paths with spaces", () => {
+test("Windows installation invokes npm.cmd with verbatim quoting and no CALL", () => {
   const destination = "C:\\Users\\Jane Doe\\cache & tools\\.install-demo";
   assert.deepEqual(resolveNpmInstallCommand(destination, "win32"), {
     command: process.env.ComSpec ?? "cmd.exe",
     args: ["/d", "/s", "/e:on", "/v:off", "/c",
-      `call "npm.cmd" install --prefix "C:\\Users\\Jane Doe\\cache & tools\\.install-demo" ${ADAPTER_NAME}@${ADAPTER_VERSION} --registry=https://registry.npmjs.org/ --save-exact --omit=dev --legacy-peer-deps --ignore-scripts --no-audit --no-fund`],
+      `""npm.cmd" install --prefix "C:\\Users\\Jane Doe\\cache & tools\\.install-demo" ${ADAPTER_NAME}@${ADAPTER_VERSION} --registry=https://registry.npmjs.org/ --save-exact --omit=dev --legacy-peer-deps --ignore-scripts --no-audit --no-fund"`],
   });
-  assert.throws(() => resolveNpmInstallCommand("C:\\bad\"path\\install", "win32"), /quotes, percent signs, or newlines/);
-  assert.throws(() => resolveNpmInstallCommand("C:\\Users\\%cache%\\install", "win32"), /percent signs/);
+  assert.throws(() => resolveNpmInstallCommand("C:\\bad\"path\\install", "win32"), /quotes or newlines/);
+  assert.throws(() => resolveNpmInstallCommand("C:\\bad\npath\\install", "win32"), /quotes or newlines/);
+  const percent = resolveNpmInstallCommand("C:\\Users\\%cache%\\install", "win32");
+  assert.equal(percent.args.at(-1), `""npm.cmd" install --prefix "%OMP_ACP_INSTALL_PREFIX%" ${ADAPTER_NAME}@${ADAPTER_VERSION} --registry=https://registry.npmjs.org/ --save-exact --omit=dev --legacy-peer-deps --ignore-scripts --no-audit --no-fund"`);
+  assert.deepEqual(percent.env, { OMP_ACP_INSTALL_PREFIX: "C:\\Users\\%cache%\\install" });
+  const percentCommand = percent.args.at(-1);
+  assert.ok(percentCommand);
+  assert.doesNotMatch(percentCommand, /\bcall\b/u);
+  assert.match(percentCommand, /^""npm\.cmd" .*"$/u);
   assert.deepEqual(resolveNpmInstallCommand(destination, "linux"), {
     command: "npm",
     args: [

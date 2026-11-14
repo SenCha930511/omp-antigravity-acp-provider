@@ -9,7 +9,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { SessionCleanup, saveCleanupPolicy } from "../extension/session-cleanup.ts";
 import { AcpSessionStore } from "../extension/session-store.ts";
-import { findSources } from "../extension/omp-session-source.ts";
+import { findSources, sourceId } from "../extension/omp-session-source.ts";
 
 function fixture(t: any) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-acp-cleanup-")));
@@ -703,6 +703,53 @@ test("an unreadable journal marks the scan incomplete instead of failing it", as
   assert.equal(scan.complete, false);
   fs.writeFileSync(path.join(root, "workspace", "empty.jsonl"), '{"type":"session","id":"half');
   assert.equal((await findSources(root)).complete, false, "a truncated header is equally unprovable");
+});
+
+test("duplicate journal IDs stay ambiguous instead of naming a move target", async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-source-duplicate-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "workspace"));
+  const header = JSON.stringify({ type: "session", id: "duplicate" }) + "\n";
+  fs.writeFileSync(path.join(root, "workspace", "one.jsonl"), header);
+  fs.writeFileSync(path.join(root, "workspace", "backup.jsonl"), header);
+  const scan = await findSources(root);
+  assert.equal(scan.sources.has("duplicate"), false);
+  assert.equal(scan.complete, false);
+});
+
+test("a symlinked journal is rejected without canonical path comparison", { skip: process.platform === "win32" }, async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-source-symlink-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const real = path.join(root, "real.jsonl");
+  const link = path.join(root, "link.jsonl");
+  fs.writeFileSync(real, JSON.stringify({ type: "session", id: "symlink-source" }) + "\n");
+  fs.symlinkSync(real, link);
+  assert.equal(await sourceId(real), "symlink-source");
+  await assert.rejects(sourceId(link), /Symlinked OMP session/);
+});
+
+test("trackSource rejects an intermediate symlinked bucket", { skip: process.platform === "win32" }, async t => {
+  const f = fixture(t), id = f.session();
+  const token = await f.cleaner.acquire(id, true, 987654);
+  await f.cleaner.release(token);
+  const root = path.join(f.root, "sessions");
+  const external = path.join(f.root, "external");
+  fs.mkdirSync(external, { recursive: true });
+  const file = path.join(external, "chat.jsonl");
+  fs.writeFileSync(file, JSON.stringify({ type: "session", id: "omp-chat" }) + "\n");
+  fs.mkdirSync(root, { recursive: true });
+  fs.symlinkSync(external, path.join(root, "workspace"), "dir");
+  fs.writeFileSync(path.join(f.root, "state", "sessions.json"), JSON.stringify([{
+    piSessionId: "omp-chat", acpSessionId: id, acpModelId: "flash", cwd: f.root,
+    messageCount: 1, historyFingerprint: "test", lastActive: Date.now(),
+  }]));
+  await assert.rejects(
+    f.cleaner.trackSource("omp-chat", path.join(root, "workspace", "chat.jsonl")),
+    /Symlink/u,
+  );
+  const state = path.join(f.root, "state");
+  const registry = JSON.parse(fs.readFileSync(path.join(state, fs.readdirSync(state).find(name => name.startsWith("cleanup-sessions-"))!), "utf8"));
+  assert.equal(registry.sessions.find((record: any) => record.id === id)?.ompSource, undefined);
 });
 
 test("a corrupt sibling journal cannot prove a missing source was deleted", async t => {

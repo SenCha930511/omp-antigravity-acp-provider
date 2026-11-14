@@ -76,6 +76,7 @@ function resetIso(text: string): string | undefined {
 }
 
 export function parseUsageQuota(markdown: string, now = Date.now()): AntigravityQuotaSnapshot {
+  markdown = markdown.replace(/\r\n?/gu, "\n");
   const section = /^### Quota Limits$([\s\S]*?)(?=^### |(?![\s\S]))/mu.exec(markdown)?.[1] ?? "";
   const groups: AntigravityQuotaSnapshot["groups"] = [];
   let notice: string | undefined;
@@ -173,7 +174,7 @@ export async function fetchCliQuota(cliPath: string, signal?: AbortSignal): Prom
 }
 
 export function quotaExhaustion(text: string, now = Date.now()): { resetAt?: string } | undefined {
-  const notice = text.trim();
+  const notice = text.replace(/\r\n?/gu, "\n").trim();
   if (!notice.startsWith(QUOTA_NOTICE_PREFIX)) return undefined;
   const suffix = notice.slice(QUOTA_NOTICE_PREFIX.length);
   if (!suffix) return {};

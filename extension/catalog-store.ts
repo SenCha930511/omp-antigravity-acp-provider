@@ -4,7 +4,7 @@ import { resolveContextOptions, type ContextSettings, type ResolvedContextOption
 import { EFFORTS, projectCatalog, readModels, type AdvertisedModel, type PublicCatalogModel } from "./model-catalog.ts";
 import { officialApiCost } from "./pricing.ts";
 import { advertisedRecord, choices, selector } from "./selectors.ts";
-import { TierConnection, authenticateForCredential } from "./runtime.mjs";
+import { TierConnection, authenticateForCredential, usableApiKey } from "./runtime.mjs";
 import type { SessionCleanup } from "./session-cleanup.ts";
 
 export interface ConfiguredCatalogModel extends PublicCatalogModel {
@@ -15,9 +15,12 @@ export class CatalogStore {
   readonly upstreamModels = new Map<string, ConfiguredCatalogModel>();
   currentModels: ConfiguredCatalogModel[] = [];
   private sourceModels: PublicCatalogModel[] = [];
+  // False while only the adapter's offline fallback is loaded. A real cache or
+  // successful discovery flips this so inference does not keep re-discovering.
+  private upstreamKnown = false;
   private dynamicCache?: { stamp?: string; settings: string; models: ConfiguredCatalogModel[] };
-  private discovery?: Promise<AdvertisedModel[]>;
-  private refreshing?: Promise<ConfiguredCatalogModel[]>;
+  private readonly discoveries = new Map<string, Promise<AdvertisedModel[]>>();
+  private readonly refreshes = new Map<string, Promise<ConfiguredCatalogModel[]>>();
   private latestSettings?: ContextSettings;
 
   constructor(
@@ -30,9 +33,13 @@ export class CatalogStore {
       options => new TierConnection(options),
   ) {}
 
-  projectWithSettings(models: PublicCatalogModel[], settings: ContextSettings): ConfiguredCatalogModel[] {
+  get hasUpstreamCatalog(): boolean {
+    return this.upstreamKnown;
+  }
+
+  projectWithSettings(models: PublicCatalogModel[], settings: ContextSettings, upstreamKnown = true): ConfiguredCatalogModel[] {
     const projected = this.project(models, settings);
-    this.install(projected, models, settings);
+    this.install(projected, models, settings, upstreamKnown);
     return projected;
   }
 
@@ -54,15 +61,23 @@ export class CatalogStore {
     });
   }
 
-  private install(models: ConfiguredCatalogModel[], sources: PublicCatalogModel[], settings: ContextSettings) {
+  private install(
+    models: ConfiguredCatalogModel[],
+    sources: PublicCatalogModel[],
+    settings: ContextSettings,
+    upstreamKnown = true,
+  ) {
     // Publish only after every model validates. Preserve source limits so a
     // removed override does not inherit the previous projected values.
     this.sourceModels = sources;
     this.latestSettings = settings;
     this.currentModels = models;
     this.dynamicCache = undefined;
+    this.upstreamKnown = upstreamKnown;
     this.upstreamModels.clear();
-    for (const model of models) this.upstreamModels.set(model.id, model);
+    // Offline fallbacks stay selectable but are not proof that the server
+    // advertises them; the first inference must still discover the real catalog.
+    if (upstreamKnown) for (const model of models) this.upstreamModels.set(model.id, model);
   }
 
   readCachedCatalog(): AdvertisedModel[] {
@@ -76,7 +91,7 @@ export class CatalogStore {
   loadInitialOrCached(settings: ContextSettings): ConfiguredCatalogModel[] {
     const cached = this.readCachedCatalog();
     const base = cached.length ? projectCatalog(cached) : this.fallbackModels();
-    this.currentModels = this.projectWithSettings(base, settings);
+    this.currentModels = this.projectWithSettings(base, settings, cached.length > 0);
     return this.currentModels;
   }
 
@@ -94,21 +109,23 @@ export class CatalogStore {
     }
     const cached = this.readCachedCatalog();
     const base = cached.length ? projectCatalog(cached) : this.fallbackModels();
-    const models = this.projectWithSettings(base, settings);
+    const models = this.projectWithSettings(base, settings, cached.length > 0);
     this.dynamicCache = { stamp, settings: settingsKey, models };
     return models;
   }
 
   reconfigure(settings: ContextSettings): ConfiguredCatalogModel[] {
-    return this.projectWithSettings(this.sourceModels, settings);
+    return this.projectWithSettings(this.sourceModels, settings, this.upstreamKnown);
   }
 
   async discoverModels(apiKey?: string): Promise<AdvertisedModel[]> {
-    if (this.discovery) return this.discovery;
+    const key = usableApiKey(apiKey) ?? "";
+    const existing = this.discoveries.get(key);
+    if (existing) return existing;
     const pending = this.discoverOnce(apiKey);
-    this.discovery = pending;
+    this.discoveries.set(key, pending);
     try { return await pending; }
-    finally { if (this.discovery === pending) this.discovery = undefined; }
+    finally { if (this.discoveries.get(key) === pending) this.discoveries.delete(key); }
   }
   private async discoverOnce(apiKey?: string): Promise<AdvertisedModel[]> {
     await this.requireAuth(apiKey);
@@ -150,9 +167,13 @@ export class CatalogStore {
 
   async refresh(settings: ContextSettings, apiKey?: string): Promise<ConfiguredCatalogModel[]> {
     this.latestSettings = settings;
-    if (this.refreshing) return this.refreshing;
-    const pending = this.refreshOnce(apiKey); this.refreshing = pending;
-    try { return await pending; } finally { if (this.refreshing === pending) this.refreshing = undefined; }
+    const key = usableApiKey(apiKey) ?? "";
+    const existing = this.refreshes.get(key);
+    if (existing) return existing;
+    const pending = this.refreshOnce(apiKey);
+    this.refreshes.set(key, pending);
+    try { return await pending; }
+    finally { if (this.refreshes.get(key) === pending) this.refreshes.delete(key); }
   }
   private async refreshOnce(apiKey?: string): Promise<ConfiguredCatalogModel[]> {
     const models = await this.discoverModels(apiKey);
@@ -164,7 +185,9 @@ export class CatalogStore {
       discoveredAt: new Date().toISOString(),
       models,
     });
-    this.install(registered, sources, settings);
+    // Discovery succeeded, so this catalog is now upstream-verified even when
+    // the cache write above is the only persistence step.
+    this.install(registered, sources, settings, true);
     return registered;
   }
 }

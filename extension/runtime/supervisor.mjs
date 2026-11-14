@@ -99,7 +99,10 @@ function signalAgent(signal) {
 		if (process.platform === "win32" && agent.pid) {
 			const args = ["/PID", String(agent.pid), "/T"];
 			if (signal === "SIGKILL") args.push("/F");
-			spawn("taskkill", args, { stdio: "ignore", windowsHide: true });
+			const killer = spawn("taskkill", args, { stdio: "ignore", windowsHide: true });
+			killer.on("error", () => {
+				try { agent.kill(signal); } catch { /* The tree is already gone. */ }
+			});
 			return;
 		}
 		if (agent.pid) process.kill(-agent.pid, signal);

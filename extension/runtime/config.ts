@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,8 +14,8 @@ export interface AntigravityAcpConfig {
 export function resolvePiAgentDir(): string {
 	const custom = process.env.PI_CODING_AGENT_DIR?.trim();
 	if (custom) {
-		return custom === "~" || custom.startsWith("~/")
-			? path.join(os.homedir(), custom.slice(1))
+		return custom === "~" || custom.startsWith("~/") || custom.startsWith("~\\")
+			? path.join(os.homedir(), custom.slice(2))
 			: custom;
 	}
 	return path.join(os.homedir(), ".pi", "agent");
@@ -49,13 +50,13 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 			runtimeUpdates?: unknown;
 		};
 		return {
-			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
+			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "default",
 			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "automatic",
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
 	}
-	return { permissions: "yolo", runtimeUpdates: "automatic" };
+	return { permissions: "default", runtimeUpdates: "automatic" };
 }
 
 export function savePermissionMode(mode: PermissionMode, file = resolveConfigPath()): void {
@@ -69,9 +70,13 @@ export function saveRuntimeUpdateMode(mode: RuntimeUpdateMode, file = resolveCon
 function writeConfig(config: AntigravityAcpConfig, file: string): void {
 	const directory = path.dirname(file);
 	fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-	const temporary = `${file}.${process.pid}.tmp`;
-	fs.writeFileSync(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-	fs.renameSync(temporary, file);
+	const temporary = `${file}.${randomUUID()}.tmp`;
+	try {
+		fs.writeFileSync(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+		fs.renameSync(temporary, file);
+	} finally {
+		fs.rmSync(temporary, { force: true });
+	}
 }
 
 function migrateConfig(targetFile = resolveConfigPath()): void {

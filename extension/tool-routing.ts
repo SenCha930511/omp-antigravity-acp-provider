@@ -12,8 +12,18 @@ const PI_BRIDGE_GUIDANCE =
   "Native OMP guidance about task maps to pi_task: submit delegated work by calling pi_task, " +
   "and follow the supplied tool schema for agent selection and for delegated or parallel work. " +
   "Use the supplied wait mechanism for completion notifications. " +
+  "Use only supplied pi_* tools that appear in the active tool list. " +
   "Antigravity-native tools run in a separate runtime with their own permission negotiation; " +
   "their results are not OMP tool results.";
+
+function contextControlGuidance(projectedToolNames: readonly string[]): string {
+  return [
+    projectedToolNames.includes("context_notes")
+      ? "Native OMP guidance about context_notes maps to pi_context_notes." : "",
+    projectedToolNames.includes("new_context")
+      ? "Native OMP guidance about new_context maps to pi_new_context." : "",
+  ].filter(Boolean).join(" ");
+}
 
 const NO_PI_BRIDGE_GUIDANCE =
   "The pi-bridge MCP server is not available on this runtime, so no OMP tools are exposed. " +
@@ -110,10 +120,13 @@ export function ompToolGuidance(
   mode: NativeToolMode,
   bridgeConfigured: boolean,
   sessionKind: SessionRoutingKind = "main",
+  projectedToolNames: readonly string[] = [],
 ): string {
+  const bridgeActive = bridgeConfigured && mcpHttpAvailable(initialize);
   const guidance = sessionKind === "ephemeral" ? EPHEMERAL_TOOL_GUIDANCE :
-    bridgeConfigured && mcpHttpAvailable(initialize) ? PI_BRIDGE_GUIDANCE : NO_PI_BRIDGE_GUIDANCE;
-  return [guidance, ...(mode === "disabled" ? [NATIVE_TOOLS_DISABLED] : [])].join("\n\n");
+    bridgeActive ? PI_BRIDGE_GUIDANCE : NO_PI_BRIDGE_GUIDANCE;
+  const contextGuidance = bridgeActive && sessionKind === "main" ? contextControlGuidance(projectedToolNames) : "";
+  return [guidance, contextGuidance, ...(mode === "disabled" ? [NATIVE_TOOLS_DISABLED] : [])].filter(Boolean).join("\n\n");
 }
 
 // Composes the session append: optional ACP override, the unchanged complete
@@ -126,12 +139,13 @@ export function sessionSystemAppend(
   bridgeConfigured: boolean,
   sessionKind: SessionRoutingKind = "main",
   hasOmpTools?: boolean,
+  projectedToolNames: readonly string[] = [],
 ): string {
-  const bridgeActive = bridgeConfigured && hasOmpTools !== false;
+  const bridgeActive = bridgeConfigured && hasOmpTools !== false && mcpHttpAvailable(initialize);
   return [
     acpOverride(mode, sessionKind, bridgeActive),
     instructions.trim(),
-    ompToolGuidance(initialize, mode, bridgeActive, sessionKind),
+    ompToolGuidance(initialize, mode, bridgeActive, sessionKind, projectedToolNames),
   ].filter(Boolean).join("\n\n");
 }
 
@@ -155,6 +169,7 @@ export function sessionRoutingRequest<T extends SessionRpcRequest>(
   instructions: string,
   sessionKind: SessionRoutingKind = "main",
   hasOmpTools?: boolean,
+  projectedToolNames: readonly string[] = [],
 ): T {
   if (!supportsSessionRouting(initialize)) {
     if (mode === "disabled") {
@@ -173,7 +188,7 @@ export function sessionRoutingRequest<T extends SessionRpcRequest>(
   else if (bridgeConfigured) eager.add("pi-bridge");
   return { ...request, _meta: { ...request._meta, antigravity: {
     ...previous,
-    systemPrompt: { append: sessionSystemAppend(initialize, mode, instructions, bridgeConfigured, sessionKind, hasOmpTools) },
+    systemPrompt: { append: sessionSystemAppend(initialize, mode, instructions, bridgeConfigured, sessionKind, hasOmpTools, projectedToolNames) },
     eagerMcpServers: [...eager],
     // Explicitly clear a persisted disabled filter when loading in prefer mode.
     ...(mode === "disabled" ? { enabledTools: [] } : { enabledTools: undefined, disabledTools: [] }),

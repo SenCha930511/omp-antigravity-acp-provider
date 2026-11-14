@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { createRequire as makeRequire } from "node:module";
 import path from "node:path";
 
 export interface StepUsage {
@@ -15,29 +16,101 @@ export interface StepUsageBatch {
   usage: StepUsage & { totalTokens: number };
 }
 
-type DatabaseSync = new (path: string, options?: { readOnly?: boolean; timeout?: number }) => {
+export interface UsageDatabase {
   prepare(sql: string): {
     get(...params: unknown[]): Record<string, unknown> | undefined;
     all(...params: unknown[]): Record<string, unknown>[];
   };
+  exec?(sql: string): unknown;
   close(): void;
-};
-
-let cachedDatabaseSync: DatabaseSync | null | undefined;
-
-function loadDatabaseSync(): DatabaseSync | undefined {
-  if (cachedDatabaseSync !== undefined) return cachedDatabaseSync ?? undefined;
-  try {
-    const getBuiltin = (process as unknown as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
-    const sqlite = getBuiltin?.("node:sqlite") as { DatabaseSync?: DatabaseSync } | undefined;
-    cachedDatabaseSync = typeof sqlite?.DatabaseSync === "function" ? sqlite.DatabaseSync : null;
-  } catch {
-    cachedDatabaseSync = null;
-  }
-  return cachedDatabaseSync ?? undefined;
 }
 
-export function conversationDbPath(acpDirectory: string, sessionId: string): string {
+export type UsageDatabaseOpener = (dbPath: string) => UsageDatabase;
+
+export type BunDatabaseConstructor = new (dbPath: string, options?: { readonly?: boolean }) => UsageDatabase;
+export type NodeDatabaseConstructor = new (dbPath: string, options?: { readOnly?: boolean; timeout?: number }) => UsageDatabase;
+
+export interface BunSqliteModule {
+  Database?: BunDatabaseConstructor;
+}
+
+export interface NodeSqliteModule {
+  DatabaseSync?: NodeDatabaseConstructor;
+}
+
+// Module loading is injected so the selection rules stay testable without
+// either host, and so a runtime without SQLite is probed at most once.
+export interface UsageSqliteRuntime {
+  bun: boolean;
+  loadBunSqlite(): BunSqliteModule | undefined;
+  loadNodeSqlite(): NodeSqliteModule | undefined;
+}
+
+function nativeUsageSqliteRuntime(): UsageSqliteRuntime {
+  return {
+    bun: typeof (process.versions as Record<string, string | undefined>).bun === "string",
+    loadBunSqlite: () => {
+      // Keep the specifier non-literal: a node-targeted bundle must not try to
+      // resolve bun:sqlite, and only the Bun host can load it.
+      const specifier = "bun:sqlite";
+      return makeRequire(import.meta.url)(specifier) as BunSqliteModule | undefined;
+    },
+    loadNodeSqlite: () => {
+      const getBuiltin = (process as unknown as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
+      return getBuiltin?.("node:sqlite") as NodeSqliteModule | undefined;
+    },
+  };
+}
+
+// Both hosts are opened read-only: this store belongs to the ACP server, and
+// accounting must never create, migrate, or lock it for writing.
+function bunOpener(Database: BunDatabaseConstructor): UsageDatabaseOpener {
+  return dbPath => {
+    const db = new Database(dbPath, { readonly: true });
+    try { db.exec?.("PRAGMA busy_timeout = 100;"); } catch { /* Best-effort lock timeout. */ }
+    return db;
+  };
+}
+
+function nodeOpener(Database: NodeDatabaseConstructor): UsageDatabaseOpener {
+  return dbPath => new Database(dbPath, { readOnly: true, timeout: 100 });
+}
+
+export function selectUsageDatabaseOpener(runtime: UsageSqliteRuntime): UsageDatabaseOpener | undefined {
+  // OMP runs under Bun, where bun:sqlite is the complete implementation; the
+  // node:sqlite shim is the fallback for Node hosts and for a Bun build that
+  // cannot load its own module.
+  if (runtime.bun) {
+    try {
+      const Database = runtime.loadBunSqlite()?.Database;
+      if (typeof Database === "function") return bunOpener(Database);
+    } catch { /* Fall through to node:sqlite. */ }
+  }
+  try {
+    const Database = runtime.loadNodeSqlite()?.DatabaseSync;
+    if (typeof Database === "function") return nodeOpener(Database);
+  } catch { /* No SQLite in this runtime; accounting stays unavailable. */ }
+  return undefined;
+}
+
+export function createUsageDatabaseOpenerResolver(
+  runtime: UsageSqliteRuntime = nativeUsageSqliteRuntime(),
+): () => UsageDatabaseOpener | undefined {
+  let cached: UsageDatabaseOpener | null | undefined;
+  return () => {
+    if (cached === undefined) cached = selectUsageDatabaseOpener(runtime) ?? null;
+    return cached ?? undefined;
+  };
+}
+
+const resolveUsageDatabaseOpener = createUsageDatabaseOpenerResolver();
+
+const ACP_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu;
+
+export function conversationDbPath(acpDirectory: string, sessionId: string): string | undefined {
+  // A server-provided id is an opaque identity, never a path component.
+  // Unknown formats degrade to unavailable usage rather than escaping ACP data.
+  if (!ACP_SESSION_ID.test(sessionId)) return undefined;
   return path.join(acpDirectory, "conversations", `${sessionId}.db`);
 }
 
@@ -136,32 +209,32 @@ export function decodeModelUsageStats(metadata: Uint8Array): StepUsage | undefin
   return found ? stats : undefined;
 }
 
-export function peekMaxModelStepIdx(dbPath: string): number {
+export function peekMaxModelStepIdx(dbPath: string): number | undefined {
   if (!existsSync(dbPath)) return -1;
-  const Database = loadDatabaseSync();
-  if (Database === undefined) return -1;
+  const openDb = resolveUsageDatabaseOpener();
+  if (openDb === undefined) return undefined;
   try {
-    const db = new Database(dbPath, { readOnly: true, timeout: 100 });
+    const db = openDb(dbPath);
     try {
       const row = db.prepare("SELECT COALESCE(MAX(idx), -1) AS maxIdx FROM steps WHERE step_type = 15 AND status = 3").get();
       const raw = row?.maxIdx;
       if (typeof raw === "number" && Number.isFinite(raw)) return raw;
       if (typeof raw === "bigint") return Number(raw);
-      return -1;
+      return undefined;
     } finally {
       db.close();
     }
   } catch {
-    return -1;
+    return undefined;
   }
 }
 
 export function readModelStepsAfter(dbPath: string, afterIdx: number): StepUsageBatch | undefined {
   if (!existsSync(dbPath)) return undefined;
-  const Database = loadDatabaseSync();
-  if (Database === undefined) return undefined;
+  const openDb = resolveUsageDatabaseOpener();
+  if (openDb === undefined) return undefined;
   try {
-    const db = new Database(dbPath, { readOnly: true, timeout: 100 });
+    const db = openDb(dbPath);
     try {
       const rows = db.prepare("SELECT idx, metadata FROM steps WHERE step_type = 15 AND status = 3 AND idx > ? ORDER BY idx ASC").all(afterIdx);
       let maxIdx = afterIdx;

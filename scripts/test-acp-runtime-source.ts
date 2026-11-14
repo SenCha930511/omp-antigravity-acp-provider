@@ -713,5 +713,113 @@ if (process.platform !== "win32") {
   assert.equal(env.AGY_ACP_BIN, direct);
 }
 
+// A recorded CLI decision carries the identity of the exact binary its version
+// came from. An unchanged stamp reuses the recorded version without spawning
+// `agy acp --version`, and an identical decision never rewrites the record.
+function probeCount(log: string): number {
+  try {
+    return fs.readFileSync(log, "utf8").trimEnd().split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+}
+
+{
+  removeAgy();
+  const probeLog = path.join(work, "agy-probe.log");
+  const cliFile = path.join(bin, "agy");
+  const stub = (version: string) => stubAgy(`if [ "$1" = "acp" ] && [ "$2" = "--version" ]; then\n  printf 'probe\\n' >> '${probeLog}'\n  echo ${version}\n  exit 0\nfi`);
+  stub("9.9.9");
+  setManagedVersion("1.4.5");
+  const env = freshEnv();
+  const stateDir = freshStateDir();
+  const first = await planFor(stateDir, { env });
+  assert.equal(first.source, "cli");
+  assert.equal(probeCount(probeLog), 1);
+  const firstRecord = JSON.parse(fs.readFileSync(recordPath(stateDir), "utf8"));
+  assert.equal(typeof firstRecord.cliStamp, "string", "the record must carry the binary stamp");
+  // Windows reports dev/ino 0 for every file, so the stamp also carries
+  // mtime, ctime and size rather than trusting the path alone.
+  assert.match(firstRecord.cliStamp, /^\d+:\d+:\d+(?:\.\d+)?:\d+(?:\.\d+)?:\d+$/u);
+  const recordIno = fs.statSync(recordPath(stateDir)).ino;
+
+  const repeated = await planFor(stateDir, { env });
+  assert.equal(repeated.source, "cli");
+  assert.equal(repeated.cliVersion, "9.9.9");
+  assert.equal(probeCount(probeLog), 1, "an unchanged stamp must reuse the recorded version");
+  const repeatedRecord = JSON.parse(fs.readFileSync(recordPath(stateDir), "utf8"));
+  assert.equal(repeatedRecord.decidedAt, firstRecord.decidedAt, "an identical decision must not rewrite the record");
+  assert.equal(fs.statSync(recordPath(stateDir)).ino, recordIno, "the record file must not be replaced");
+
+  // Quota inspection is read-only and must reuse the same recorded version
+  // without spawning the CLI version probe.
+  const inspected = await inspectFor(stateDir, { env });
+  assert.equal(inspected.source, "cli");
+  assert.equal(inspected.cliVersion, "9.9.9");
+  assert.equal(probeCount(probeLog), 1, "inspection must reuse the stamp");
+  assert.equal(JSON.parse(fs.readFileSync(recordPath(stateDir), "utf8")).decidedAt, firstRecord.decidedAt);
+
+  // A self-updated binary changes the stamp and must be probed again.
+  stub("9.9.10");
+  const mutated = await planFor(stateDir, { env });
+  assert.equal(mutated.source, "cli");
+  assert.equal(mutated.cliVersion, "9.9.10", "a changed binary must not reuse the recorded version");
+  assert.equal(probeCount(probeLog), 2);
+
+  // An older record without a stamp is re-probed once and then upgraded.
+  const upgradedRecord = JSON.parse(fs.readFileSync(recordPath(stateDir), "utf8"));
+  delete upgradedRecord.cliStamp;
+  fs.writeFileSync(recordPath(stateDir), JSON.stringify(upgradedRecord));
+  const withoutStamp = await planFor(stateDir, { env });
+  assert.equal(withoutStamp.cliVersion, "9.9.10");
+  assert.equal(probeCount(probeLog), 3, "missing metadata must be re-probed");
+  assert.equal(typeof JSON.parse(fs.readFileSync(recordPath(stateDir), "utf8")).cliStamp, "string");
+
+  // A matching stamp alone is not enough: the recorded path must be the same
+  // executable that PATH resolves.
+  const currentStamp = JSON.parse(fs.readFileSync(recordPath(stateDir), "utf8")).cliStamp;
+  fs.writeFileSync(recordPath(stateDir), JSON.stringify({
+    source: "cli",
+    cliPath: path.join(work, "other-agy"),
+    cliVersion: "0.0.1",
+    cliStamp: currentStamp,
+  }));
+  const otherPath = await planFor(stateDir, { env });
+  assert.equal(otherPath.cliVersion, "9.9.10", "a stamp must not override a different recorded path");
+  assert.equal(probeCount(probeLog), 4);
+  assert.equal(fs.readFileSync(cliFile, "utf8").includes("9.9.10"), true);
+}
+
+// The recorded off-PATH CLI is re-probed when its stamp is stale and reused
+// without a subprocess when the stamp still matches.
+{
+  removeAgy();
+  const recordedCliPath = path.join(work, "recorded-stamp-agy");
+  const probeLog = path.join(work, "recorded-stamp-probe.log");
+  fs.writeFileSync(recordedCliPath, `#!/bin/sh\nif [ "$1" = "acp" ] && [ "$2" = "--version" ]; then\n  printf 'probe\\n' >> '${probeLog}'\n  echo 2.2.2\n  exit 0\nfi\n`);
+  fs.chmodSync(recordedCliPath, 0o755);
+  const stateDir = freshStateDir();
+  const wrapper = wrapperPath(stateDir);
+  fs.writeFileSync(wrapper, "#!/bin/sh\nexit 0\n");
+  fs.writeFileSync(recordPath(stateDir), JSON.stringify({
+    source: "cli",
+    cliPath: recordedCliPath,
+    cliVersion: "1.1.1",
+    cliStamp: "0:0:0:0:0",
+  }));
+  const env = { PATH: "/usr/bin:/bin", AGY_ACP_BIN: wrapper };
+  const stale = await planFor(stateDir, { env });
+  assert.equal(stale.source, "cli");
+  assert.equal(stale.cliVersion, "2.2.2", "a stale stamp must be re-probed");
+  assert.equal(probeCount(probeLog), 1);
+  const record = JSON.parse(fs.readFileSync(recordPath(stateDir), "utf8"));
+  assert.notEqual(record.cliStamp, "0:0:0:0:0");
+  assert.equal(record.cliVersion, "2.2.2");
+
+  const reused = await planFor(stateDir, { env });
+  assert.equal(reused.cliVersion, "2.2.2");
+  assert.equal(probeCount(probeLog), 1, "a matching off-PATH stamp must reuse the recorded version");
+}
+
 fs.rmSync(work, { recursive: true, force: true });
 console.log("acp-runtime-source: all launch plan cases passed");

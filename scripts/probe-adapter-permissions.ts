@@ -93,7 +93,7 @@ async function probe(plan: RuntimeLaunchPlan, fixture: ProbeCase) {
       wireMode: profile.wireMode,
       autoApproveProcess: profile.autoApproveProcess,
       acpSessionId,
-      runtimeVersion: preference.cliVersion ?? preference.managedVersion,
+      runtimeVersion: plan.cliVersion ?? plan.managedVersion,
       mcpHttp: true,
       prePromptSentinelReached: reachedSentinel,
       interceptedPromptCalls: promptAttempts,

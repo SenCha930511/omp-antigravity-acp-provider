@@ -11,8 +11,8 @@ export interface OmpSessionSource {
 }
 
 export async function sourceRoot(root: string) {
-  if (await fs.realpath(root) !== path.resolve(root)) throw new Error("Unsafe OMP session root");
-  const stat = await fs.stat(root);
+  const stat = await fs.lstat(root);
+  if (stat.isSymbolicLink()) throw new Error("Unsafe OMP session root");
   if (!stat.isDirectory()) throw new Error("Invalid OMP session root");
   return stat;
 }
@@ -20,7 +20,9 @@ export async function sourceRoot(root: string) {
 // Read only a bounded prefix, never a full transcript. OMP can put a title
 // slot before the session header. No header means insufficient deletion proof.
 export async function sourceId(file: string): Promise<string> {
-  if (await fs.realpath(file) !== path.resolve(file)) throw new Error("Symlinked OMP session");
+  const linkStat = await fs.lstat(file);
+  if (linkStat.isSymbolicLink()) throw new Error("Symlinked OMP session");
+  if (!linkStat.isFile()) throw new Error("Invalid OMP session file");
   const handle = await fs.open(file, "r");
   try {
     if (!(await handle.stat()).isFile()) throw new Error("Invalid OMP session file");
@@ -63,8 +65,17 @@ export async function findSources(root: string): Promise<OmpSourceScan> {
         // A crashed writer can leave an empty or truncated journal. That file
         // proves nothing about its own session, but it must not blind the scan
         // for every other one, so it only marks the scan incomplete.
-        try { sources.set(await sourceId(file), file); }
-        catch { complete = false; }
+        try {
+          const id = await sourceId(file);
+          if (sources.has(id)) {
+            // A backup copy makes this ID ambiguous; neither file may be used
+            // as proof that the tracked session moved.
+            sources.delete(id);
+            complete = false;
+          } else {
+            sources.set(id, file);
+          }
+        } catch { complete = false; }
       }
     }
   }

@@ -29,11 +29,14 @@ function isConfirmedMissing(error: unknown): boolean {
     && typeof detail.stderr === "string" && /could not be found/.test(detail.stderr);
 }
 
+export const KEYCHAIN_SERVICE = "gemini";
+// The managed runtime stores the token under `antigravity-acp`; the agy CLI
+// stores it under `antigravity`. Both are local logins, and logout must clear
+// whichever entry the active channel wrote.
+export const KEYCHAIN_ACCOUNTS = ["antigravity-acp", "antigravity"] as const;
+
 // macOS keychain operations behind one mutable object so offline command
 // tests can substitute them without touching the user's real keychain.
-// present/remove resolve to true (present / removed), false (confirmed
-// absent), or undefined (not macOS); any other subprocess failure rejects
-// with a fixed credential-free message.
 export function createKeychain(run: (args: string[]) => Promise<void>, platform: NodeJS.Platform = process.platform) {
   const check = async (args: string[], failure: string): Promise<boolean | undefined> => {
     if (platform !== "darwin") return undefined;
@@ -45,15 +48,32 @@ export function createKeychain(run: (args: string[]) => Promise<void>, platform:
       throw new Error(failure);
     }
   };
+  const argsFor = (command: "find-generic-password" | "delete-generic-password", account: string): string[] =>
+    [command, "-s", KEYCHAIN_SERVICE, "-a", account];
+  const present = async (): Promise<boolean | undefined> => {
+    if (platform !== "darwin") return undefined;
+    for (const account of KEYCHAIN_ACCOUNTS) {
+      if (await check(argsFor("find-generic-password", account), "Unable to inspect the Antigravity keychain entry")) return true;
+    }
+    return false;
+  };
+  const remove = async (): Promise<boolean | undefined> => {
+    if (platform !== "darwin") return undefined;
+    let removed = false;
+    for (const account of KEYCHAIN_ACCOUNTS) {
+      if (await check(argsFor("delete-generic-password", account), "Unable to remove the Antigravity keychain entry")) removed = true;
+    }
+    return removed;
+  };
   return {
+    applicable: platform === "darwin",
     // Check existence only: the item's ACL does not authorize the security
     // CLI, so a `find-generic-password -w` would pop the macOS keychain
     // password dialog. Attribute-only lookups stay prompt-free.
-    present: (): Promise<boolean | undefined> => check(["find-generic-password", "-s", "gemini", "-a", "antigravity-acp"], "Unable to inspect the Antigravity keychain entry"),
-    // Local logout for macOS keychain storage. The Antigravity server owns
-    // this item; removing it is required for a complete logout when no token
-    // file exists.
-    remove: (): Promise<boolean | undefined> => check(["delete-generic-password", "-s", "gemini", "-a", "antigravity-acp"], "Unable to remove the Antigravity keychain entry"),
+    present,
+    // Both accounts are cleared so a
+    // later channel switch cannot revive the previous login.
+    remove,
   };
 }
 
@@ -85,7 +105,9 @@ export function antigravityAccountEmail(): string | undefined {
 
 // Timing knobs for following OMP-side logouts; mutable so offline tests can
 // run the delayed detection and the removal verification without real waits.
-export const logoutFollow = { delayMs: 500, retryMs: 15_000, removalRetryMs: 400 };
+export const logoutFollow = {
+  delayMs: 500, retryMs: 15_000, removalRetryMs: 400, disabledSuppressionMs: 30_000,
+};
 
 // Shared wording for both logout confirmations (direct command and the
 // follow-up that finishes a logout OMP started).
@@ -154,10 +176,11 @@ export async function inspectAcpAuth(directory?: string, env: NodeJS.ProcessEnv 
   return { ...health, status: "oauth-refreshable", authType: health.authType ?? "oauth-personal", keyring: true };
 }
 
-export async function authReady(): Promise<boolean> {
+export async function authReady(options: { allowKeychain?: boolean } = {}): Promise<boolean> {
   const health = await inspectAcpAuth();
-  return health.status === "api-key-env" || health.status === "oauth-refreshable"
-    || (await keychain.present()) === true;
+  if (health.status === "api-key-env" || health.status === "oauth-refreshable") return true;
+  if (options.allowKeychain === false) return false;
+  return (await keychain.present()) === true;
 }
 
 export interface OmpCommandContext {
@@ -225,7 +248,14 @@ export interface AuthCoordinatorDeps {
   onSyncProvider: () => void;
 }
 
+const freshGoogleLoginBrand = Symbol("fresh google login attempt");
+
+export type FreshGoogleLoginAttempt = {
+  readonly [freshGoogleLoginBrand]: true;
+};
+
 interface CredentialStore {
+  applicable: boolean;
   present: () => Promise<boolean | undefined>;
   remove: () => Promise<boolean | undefined>;
 }
@@ -256,6 +286,9 @@ export class OmpAuthCoordinator {
   private activeContext: OmpCommandContext | undefined;
   private markerPresent: boolean | undefined;
   private suppressFollow = false;
+  private baseSuppressFollow = false;
+  private readonly activeLogins = new Set<FreshGoogleLoginAttempt>();
+  private disabledUntil = 0;
   private selfLogout = false;
   // Whether registerProvider keeps the non-secret config apiKey fallback.
   apiKeyFallback = true;
@@ -277,7 +310,18 @@ export class OmpAuthCoordinator {
   async removeCredentialsDurably(): Promise<{ keychainRemoved: boolean | undefined; keyringRemoved: boolean | undefined }> {
     const pending = [...this.deps.connections].map(connection => connection.process.exited.catch(() => undefined));
     if (pending.length > 0) {
-      await Promise.race([Promise.allSettled(pending), delay(10_000)]);
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          Promise.allSettled(pending),
+          new Promise<void>(resolve => {
+            timer = setTimeout(resolve, 10_000);
+            timer.unref?.();
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
     }
     return {
       keychainRemoved: await removeStoreDurably(keychain),
@@ -288,36 +332,84 @@ export class OmpAuthCoordinator {
   // /login must mean a fresh Google sign-in: drop stored credentials (and this
   // process's old-account servers) so a new server cannot silently reuse the
   // saved login and keep the previous account.
-  noteLoginSucceeded(): void {
+  noteLoginSucceeded(attempt: FreshGoogleLoginAttempt): void {
+    if (!this.activeLogins.delete(attempt)) return;
+    if (this.activeLogins.size > 0) {
+      this.baseSuppressFollow = false;
+      this.disabledUntil = 0;
+      return;
+    }
+    this.suppressFollow = false;
+    this.baseSuppressFollow = false;
+    this.disabledUntil = 0;
     clearTimeout(this.followTimer);
     this.followTimer = undefined;
     clearTimeout(this.followRetry);
     this.followRetry = undefined;
-    this.suppressFollow = false;
     if (!this.apiKeyFallback) {
       this.apiKeyFallback = true;
       this.deps.onSyncProvider();
     }
   }
 
-  async beginFreshGoogleLogin(): Promise<void> {
+  cancelFreshGoogleLogin(attempt: FreshGoogleLoginAttempt): void {
+    if (!this.activeLogins.delete(attempt) || this.activeLogins.size > 0) return;
+    this.suppressFollow = this.baseSuppressFollow || performance.now() < this.disabledUntil;
+    this.baseSuppressFollow = false;
+    clearTimeout(this.followTimer);
+    this.followTimer = undefined;
+    this.restoreApiKeyFallback(this.activeContext);
+  }
+
+  private restoreApiKeyFallback(ctx: OmpCommandContext | undefined): void {
+    // A confirmed marker deletion is a logged-out state, including when a
+    // browser login was cancelled. Never synthesize a credential fallback.
+    if ((this.ompMarkerStored(ctx) ?? this.markerPresent) === false || this.apiKeyFallback) return;
+    this.apiKeyFallback = true;
+    this.deps.onSyncProvider();
+  }
+
+  async beginFreshGoogleLogin(): Promise<FreshGoogleLoginAttempt> {
     if (this.deps.isPoolBusy()) {
       throw new Error("Wait for active Antigravity requests to finish before logging in.");
     }
-    clearTimeout(this.followTimer);
-    this.followTimer = undefined;
-    clearTimeout(this.followRetry);
-    this.followRetry = undefined;
-    await this.deps.closeAllRuntimes();
-    // A different Google login must not restore the previous account's ACP
-    // mappings. OMP retains its transcript for a fresh backend reconstruction.
-    await this.deps.logoutAllRuntimes();
-    clearAntigravityCredentials();
-    // The old credentials must be gone before a new sign-in can start; an
-    // unconfirmed removal refuses the login instead of silently reusing it.
-    const { keychainRemoved, keyringRemoved } = await this.removeCredentialsDurably();
-    if (keychainRemoved === false || keyringRemoved === false) {
-      throw new Error("Unable to confirm removal of the Antigravity credentials");
+    // OMP removes the stale marker while the browser sign-in is still running.
+    // That generation change must not be mistaken for a user logout and close
+    // the new ACP runtime before the login can finish, so suppress it before
+    // the teardown below can yield.
+    const attempt: FreshGoogleLoginAttempt = { [freshGoogleLoginBrand]: true };
+    if (this.activeLogins.size === 0) {
+      this.baseSuppressFollow = this.suppressFollow;
+    }
+    this.activeLogins.add(attempt);
+    this.suppressFollow = true;
+    try {
+      clearTimeout(this.followTimer);
+      this.followTimer = undefined;
+      clearTimeout(this.followRetry);
+      this.followRetry = undefined;
+      await this.deps.closeAllRuntimes();
+      // A different Google login must not restore the previous account's ACP
+      // mappings. OMP retains its transcript for a fresh backend reconstruction.
+      await this.deps.logoutAllRuntimes();
+      clearAntigravityCredentials();
+      // The old credentials must be gone before a new sign-in can start; an
+      // unconfirmed removal refuses the login instead of silently reusing it.
+      const { keychainRemoved, keyringRemoved } = await this.removeCredentialsDurably();
+      if (keychainRemoved === false || keyringRemoved === false
+        || (keychain.applicable && keychainRemoved !== true)
+        || (secretService.applicable && keyringRemoved !== true)) {
+        throw new Error("Unable to confirm removal of the Antigravity credentials");
+      }
+      return attempt;
+    } catch (error) {
+      // A refused or aborted login cleans up its own identity. The caller has
+      // no identity to cancel until this method fulfills.
+      if (this.activeLogins.delete(attempt) && this.activeLogins.size === 0) {
+        this.suppressFollow = this.baseSuppressFollow || performance.now() < this.disabledUntil;
+        this.baseSuppressFollow = false;
+      }
+      throw error;
     }
   }
 
@@ -409,6 +501,7 @@ export class OmpAuthCoordinator {
     // those, but not for user-initiated removals such as /logout.
     this.deps.pi.on("credential_disabled", (event: unknown) => {
       if (event && typeof event === "object" && "provider" in event && event.provider === "antigravity-acp") {
+        this.disabledUntil = performance.now() + logoutFollow.disabledSuppressionMs;
         this.suppressFollow = true;
       }
     });
@@ -418,7 +511,15 @@ export class OmpAuthCoordinator {
       if (current === undefined) return;
       const wasPresent = this.markerPresent === true;
       this.markerPresent = current;
-      if (current) this.suppressFollow = false;
+      if (current) {
+        this.suppressFollow = false;
+        this.baseSuppressFollow = false;
+        this.disabledUntil = 0;
+      } else if (this.activeLogins.size > 0) {
+        this.suppressFollow = true;
+      } else if (performance.now() >= this.disabledUntil) {
+        this.suppressFollow = false;
+      }
       if (wasPresent !== current) {
         // Flip the config apiKey in the same synchronous tick as the marker
         // change: OMP's own logout report then finds no remaining
@@ -432,17 +533,16 @@ export class OmpAuthCoordinator {
       this.followTimer = setTimeout(() => {
         this.followTimer = undefined;
         if (process.env.OMP_ACP_FOLLOW_LOGOUT === "0") return;
-        if (this.suppressFollow) {
+        if (this.suppressFollow && (this.activeLogins.size > 0 || performance.now() < this.disabledUntil)) {
           this.suppressFollow = false;
-          this.apiKeyFallback = true;
-          this.deps.onSyncProvider();
+          this.disabledUntil = 0;
+          this.restoreApiKeyFallback(activeCtx);
           return;
         }
         // A quick re-login after the removal cancels the cleanup.
         const currentCtx = this.activeContext ?? activeCtx;
         if (this.ompMarkerStored(currentCtx) !== false) {
-          this.apiKeyFallback = true;
-          this.deps.onSyncProvider();
+          this.restoreApiKeyFallback(currentCtx);
           return;
         }
         this.runFollowedLogout(currentCtx);

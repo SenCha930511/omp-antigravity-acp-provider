@@ -117,8 +117,18 @@ export class AntigravityAcpConnection {
 						this.updateSessionState(notification.sessionId, notification.update);
 					} else if (notification.update.sessionUpdate === "current_mode_update") {
 						const state = this.getSessionState(notification.sessionId);
-						if (state.modes) this.sessions.set(notification.sessionId, {
-							...state, modes: { ...state.modes, currentModeId: notification.update.currentModeId },
+						const modeSelector = findSessionSelector(state, "mode");
+						this.sessions.set(notification.sessionId, {
+							...state,
+							...(state.modes
+								? { modes: { ...state.modes, currentModeId: notification.update.currentModeId } }
+								: {}),
+							...(modeSelector && state.configOptions
+								? { configOptions: state.configOptions.map(option =>
+									option.type === "select" && option.id === modeSelector.id
+										? { ...option, currentValue: notification.update.currentModeId }
+										: option) }
+								: {}),
 						});
 					}
 					await this.handlers.onUpdate?.(notification);
@@ -170,7 +180,7 @@ export class AntigravityAcpConnection {
 		signal?: AbortSignal,
 		timeoutMs = 180_000,
 	): Promise<void> {
-		await this.initialize();
+		await this.initialize(signal);
 		await this.withAbort(
 			this.withDeadline(this.connection.authenticate(request), timeoutMs, "authenticate"),
 			signal,
@@ -183,7 +193,7 @@ export class AntigravityAcpConnection {
 		mcpServers: McpServer[] = [],
 		meta?: SessionMeta,
 	): Promise<AcpNewSessionResponse> {
-		await this.initialize();
+		await this.initialize(signal);
 		const response = await this.withAbort(
 			this.withDeadline(
 				this.connection.newSession({ cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) }),
@@ -207,7 +217,7 @@ export class AntigravityAcpConnection {
 		signal?: AbortSignal,
 		meta?: SessionMeta,
 	): Promise<SessionState> {
-		await this.initialize();
+		await this.initialize(signal);
 		const response = await this.withAbort(
 			this.withDeadline(
 				this.connection.loadSession({ sessionId, cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) }),
@@ -226,7 +236,7 @@ export class AntigravityAcpConnection {
 		signal?: AbortSignal,
 		meta?: SessionMeta,
 	): Promise<SessionState> {
-		await this.initialize();
+		await this.initialize(signal);
 		const response = await this.withAbort(
 			this.withDeadline(
 				this.connection.resumeSession({ sessionId, cwd, mcpServers, ...(meta === undefined ? {} : { _meta: meta }) }),
@@ -251,6 +261,8 @@ export class AntigravityAcpConnection {
 			),
 			signal,
 		);
+		const state = this.getSessionState(sessionId);
+		if (state.models) this.sessions.set(sessionId, { ...state, models: { ...state.models, currentModelId: modelId } });
 	}
 
 	async setMode(sessionId: string, modeId: string, signal?: AbortSignal): Promise<void> {
@@ -321,7 +333,7 @@ export class AntigravityAcpConnection {
 	// The caller checks `sessionCapabilities.list` before enumerating. Listing
 	// uses the same initialization, request deadline, and external cancellation.
 	async listSessions(cwd: string, signal?: AbortSignal): Promise<ListSessionsResponse> {
-		await this.initialize();
+		await this.initialize(signal);
 		return this.withAbort(this.withDeadline(
 			this.connection.listSessions({ cwd }),
 			this.operationTimeoutMs,
@@ -339,7 +351,7 @@ export class AntigravityAcpConnection {
 		try {
 			await this.withDeadline(
 				this.connection.closeSession({ sessionId }),
-				this.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS,
+				this.operationTimeoutMs,
 				"session/close",
 			);
 			this.sessions.delete(sessionId);

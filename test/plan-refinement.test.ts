@@ -23,7 +23,7 @@ test("built runtime splits oversized plan refinement, then accepts compacted dec
       async prompt(request: any) {
         requests.push(structuredClone(request));
         options.handlers.onUpdate({ sessionId: id, update: { sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: "REFINEMENT_ANSWER" } } });
+          content: { type: "text", text: request.prompt.at(-1)?.text?.endsWith("Reply only with: OK") ? "OK" : "REFINEMENT_ANSWER" } } });
         return { stopReason: "end_turn" };
       },
       async close() { process.alive = false; exit.resolve({ code: 0 }); },

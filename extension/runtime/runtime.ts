@@ -3,6 +3,8 @@ import { ToolRelay, resolveRelayConfig, relayControlTool, projectedMcpName, TOOL
 import { claimContinuation } from "../continuation-claim.ts";
 import { drainCancelledTurn, isSteerAbort, steerMode } from "../turn-cancellation.ts";
 import { createHistoryFingerprintMemo, createStructuredFingerprintMemo } from "./binding.ts";
+import { captureImageHistoryCheckpoint, matchesImageHistoryCheckpoint, type ImageHistoryCheckpoint } from "./image-history.ts";
+import { HistorySeedError, HistorySeedGuard } from "./history-seed.ts";
 import { ompToolGuidance, type NativeToolMode, type SessionRoutingKind } from "../tool-routing.ts";
 import type {
 	ContentBlock,
@@ -51,6 +53,7 @@ import { HeadlessOAuthRelay, shouldUseHeadlessOAuth } from "./acp/headless-oauth
 import {
 	PiMcpBridge,
 	piToolFingerprint,
+	planProjectedToolNames,
 	planToolProjection,
 	type ToolOmission,
 	type PiToolInvocation,
@@ -75,6 +78,10 @@ interface OmpQuotaRequest {
 
 const PERMISSION_TIMEOUT_MS = 120_000;
 const TOOL_BATCH_MS = 100;
+
+// OMP's per-provider image budget floor (session/provider-image-budget.ts).
+// This adapter's provider name is not in the table, so it gets the floor.
+const OMP_PROVIDER_IMAGE_BUDGET = 5;
 
 type AntigravityModel = Model<"antigravity-acp">;
 
@@ -119,7 +126,7 @@ export type ShadowCheckpoint =
 	| { kind: "uncertain"; reason: ShadowRebuildReason };
 
 interface Binding {
- ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedText?: string; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; relayBridge?: PiMcpBridge; relayFingerprint: string;
+ ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedGuard?: HistorySeedGuard; ompImageCheckpoint?: ImageHistoryCheckpoint; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; relayBridge?: PiMcpBridge; relayFingerprint: string;
 	ompTerminalStopReason?: PromptResponse["stopReason"];
 	ompCancelledCheckpoint?: boolean;
 	ompCancelledHadOutput?: boolean;
@@ -159,7 +166,12 @@ interface OmpRoutedConnection {
 	toolRouting?: { nativeTools: NativeToolMode; channel: "pending" | "system-append" | "legacy-prompt" };
 	setOmpSystemInstructions?: (text: string) => void;
 	setOmpSessionKind?: (kind: SessionRoutingKind) => void;
+	setOmpProjectedToolNames?: (names: readonly string[]) => void;
 	setOmpContextWindow?: (sessionId: string, contextWindow: number) => void;
+}
+
+function contextControlMembership(names: readonly string[]): string {
+	return ["context_notes", "new_context"].filter(name => names.includes(name)).join(",");
 }
 
 function isJsonValue(value: unknown, ancestors = new Set<object>()): value is JsonValue {
@@ -242,11 +254,81 @@ export interface RuntimeSnapshot {
 
 export type AntigravityConnectionFactory = (options: AntigravityConnectionOptions) => AntigravityAcpConnection;
 
+function defaultQuotaRefreshDelay(signal: AbortSignal, delayMs: number): Promise<void> {
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	let timer: ReturnType<typeof setTimeout>;
+	const onAbort = () => {
+		clearTimeout(timer);
+		signal.removeEventListener("abort", onAbort);
+		reject(abortError());
+	};
+	timer = setTimeout(() => {
+		signal.removeEventListener("abort", onAbort);
+		resolve();
+	}, delayMs);
+	signal.addEventListener("abort", onAbort, { once: true });
+	if (signal.aborted) onAbort();
+	return promise.finally(() => {
+		signal.removeEventListener("abort", onAbort);
+		clearTimeout(timer);
+	});
+}
+
 export class AntigravityRuntime {
           private readonly ompSystemMemo = createStructuredFingerprintMemo();
           private readonly ompToolsMemo = createStructuredFingerprintMemo();
           private ompMessagesFingerprint(messages: Context["messages"]): string { return messagesFingerprint(messages, this.ompSystemMemo); }
           private ompMessageFingerprint(message: Context["messages"][number]): string { return messageFingerprint(message, this.ompSystemMemo); }
+          // OMP drops the oldest image blocks when its provider image budget is
+          // exceeded. That one-way rewrite changes the history fingerprint but
+          // not what the warm ACP session already holds, so only a proven
+          // eviction may rebase it. The checkpoint is in-memory, per binding,
+          // and stores digests/positions only.
+          private ompRebaseImageHistory(binding: Binding, context: Context): void {
+            const checkpoint = binding.ompImageCheckpoint;
+            if (!checkpoint || binding.needsReconstruction || binding.ompInvalidated) return;
+            // A rebase must never stand in for an instruction or policy change.
+            if (binding.instructionsFingerprint === undefined ||
+              binding.instructionsFingerprint !== instructionFingerprint(context)) return;
+            // OMP only clamps when its provider image budget is exceeded, and
+            // an unknown provider such as this adapter gets the conservative
+            // floor. A shorter image history under that floor is a user edit,
+            // not an eviction, and must rebuild.
+            if (this.ompContextImageCount(context.messages) > OMP_PROVIDER_IMAGE_BUDGET) return;
+            const active = Boolean(binding.turnCompletion) || Boolean(binding.permission) || binding.pendingTools.size > 0;
+            const count = active ? binding.pendingContextCount : binding.messageCount;
+            if (count === 0 || context.messages.length < count) return;
+            const prefix = context.messages.slice(0, count);
+            const current = this.ompMessagesFingerprint(prefix);
+            if (current === (active ? binding.pendingContextFingerprint : binding.historyFingerprint)) return;
+            if (!matchesImageHistoryCheckpoint(checkpoint, prefix, message => this.ompMessageFingerprint(message))) return;
+            // Only the adapter checkpoint moves; the sent context is unchanged.
+            const conversation = this.ompMessagesFingerprint(prefix.filter(message => message.role !== 'system'));
+            if (active) {
+              binding.pendingContextFingerprint = current;
+              binding.pendingConversationFingerprint = conversation;
+            } else {
+              binding.historyFingerprint = current;
+              binding.ompConversationFingerprint = conversation;
+            }
+            binding.ompImageCheckpoint = captureImageHistoryCheckpoint(prefix, message => this.ompMessageFingerprint(message));
+          }
+          // Best-effort count of the images OMP's clamp can see. Any exotic
+          // shape reports "over budget" so the caller rebuilds conservatively.
+          private ompContextImageCount(messages: Context["messages"]): number {
+            try {
+              let count = 0;
+              for (const message of messages) {
+                if (message.role === "assistant" || !Array.isArray(message.content)) continue;
+                for (const block of message.content) {
+                  if (block !== null && typeof block === "object" && Reflect.get(block, "type") === "image") count++;
+                }
+              }
+              return count;
+            } catch {
+              return Number.POSITIVE_INFINITY;
+            }
+          }
           private ompToolsFingerprint(tools: NonNullable<Context["tools"]>): string { return this.ompToolsMemo(tools, () => piToolFingerprint(tools)); }
           private ompRelayConfig() {
             const base = resolveRelayConfig();
@@ -263,7 +345,10 @@ export class AntigravityRuntime {
             const nextFp = this.ompToolsFingerprint(tools);
             if (binding.toolFingerprint === nextFp) return true;
             if (binding.initialize.agentCapabilities?.mcpCapabilities?.http === true) {
-              return binding.bridge !== undefined || tools.length === 0;
+              if (binding.bridge === undefined && tools.length > 0) return false;
+              const previous = contextControlMembership(binding.bridge?.projectedToolNames ?? []);
+              const next = contextControlMembership(planProjectedToolNames(tools));
+              return previous === next;
             }
             return true;
           }
@@ -324,14 +409,23 @@ export class AntigravityRuntime {
 	private quotaCache: AntigravityQuotaSnapshot | undefined;
 	private quotaCacheOwner: string | undefined;
 	private readonly quotaInFlights = new Set<OmpQuotaRequest>();
+	private readonly quotaRefreshGraceMs: number;
+	private readonly waitForQuotaRefresh: (signal: AbortSignal, delayMs: number) => Promise<void>;
 
 	constructor(
 		connectionFactory?: AntigravityConnectionFactory,
 		permissionMode: PermissionMode = "yolo",
 		sessionStore?: AcpSessionStore,
 		relayThresholdMs?: number,
+		quotaRefreshGraceMs = 1_500,
+		quotaRefreshDelay?: (signal: AbortSignal, delayMs: number) => Promise<void>,
 	) {
+		if (!Number.isSafeInteger(quotaRefreshGraceMs) || quotaRefreshGraceMs < 0 || quotaRefreshGraceMs > 60_000) {
+			throw new Error("quotaRefreshGraceMs must be an integer between 0 and 60000");
+		}
 		this.ompRelayThresholdMs = relayThresholdMs;
+		this.quotaRefreshGraceMs = quotaRefreshGraceMs;
+		this.waitForQuotaRefresh = quotaRefreshDelay ?? defaultQuotaRefreshDelay;
 		this.connectionFactory = connectionFactory ?? ((options) => new AntigravityAcpConnection(options));
 		this.ensureAgent = connectionFactory === undefined;
 		this.permissionMode = permissionMode;
@@ -456,7 +550,7 @@ export class AntigravityRuntime {
 				await connection.setModel(sessionId, currentModel, signal);
 				this.assertEpoch(epoch);
 			}
-			const advertised = "waitForUsageCommand" in connection && typeof connection.waitForUsageCommand === "function" && await connection.waitForUsageCommand(sessionId, undefined, signal);
+			const advertised = "waitForUsageCommand" in connection && typeof connection.waitForUsageCommand === "function" && await connection.waitForUsageCommand(sessionId, 20_000, signal);
 			if (signal.aborted) throw abortError();
 			if (!advertised) {
 				throw new Error("Antigravity /usage was not advertised by this ACP runtime. No model prompt was sent.");
@@ -470,7 +564,20 @@ export class AntigravityRuntime {
 			if (signal.aborted) throw abortError();
 			return parseUsageQuota(text);
 		} finally {
-			try { if (sessionId) await connection.discardSession?.(sessionId); } finally { await connection.close(); }
+			try { if (sessionId) await connection.discardSession?.(sessionId); } finally {
+				// A short-lived quota connection may be completing an OAuth refresh
+				// after the response lands. Preserve that window before shutting its
+				// process down, but never delay an explicitly cancelled caller.
+				try {
+					if (!signal.aborted && this.quotaRefreshGraceMs > 0) {
+						await this.waitForQuotaRefresh(signal, this.quotaRefreshGraceMs);
+					}
+				} finally {
+					// Cancellation can race with the refresh delay's abort rejection.
+					// Never let that rejection skip closing the short-lived connection.
+					await connection.close();
+				}
+			}
 		}
 	}
 
@@ -719,6 +826,10 @@ export class AntigravityRuntime {
 		}
 		if (!ompContinuation) this.ompSyncTools(binding, tools);
 
+		// Rebase a proven image eviction before any prefix comparison below can
+		// mistake it for a user edit and destroy the warm session.
+		this.ompRebaseImageHistory(binding, context);
+
 		// A new/edited user request is not a tool-result continuation of the
 		// previous ACP prompt. Never let old pending results swallow it.
 		if (binding.turnCompletion || binding.permission || binding.pendingTools.size > 0) {
@@ -748,6 +859,7 @@ export class AntigravityRuntime {
 					if (drained && prefixMatches) {
 						this.ompSyncTools(binding, tools);
 						binding.historyFingerprint = this.ompMessagesFingerprint(context.messages.slice(0, binding.messageCount));
+						binding.ompImageCheckpoint = captureImageHistoryCheckpoint(context.messages.slice(0, binding.messageCount), message => this.ompMessageFingerprint(message));
 					}
 					binding = await this.getBinding(key, mainRoute, model, acpModelId, options.apiKey, writer, tools, instructions, options.signal);
 				}
@@ -775,6 +887,7 @@ export class AntigravityRuntime {
 				binding.pendingContextCount = context.messages.length;
 				binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
 			binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
+				binding.ompImageCheckpoint = captureImageHistoryCheckpoint(context.messages, message => this.ompMessageFingerprint(message));
 				binding.permission = undefined;
 				clearTimeout(pending.timer);
 				binding.ompFallbackContextTokens = estimateContextTokens(context);
@@ -814,6 +927,7 @@ export class AntigravityRuntime {
 				binding.pendingContextCount = context.messages.length;
 				binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
 			binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
+				binding.ompImageCheckpoint = captureImageHistoryCheckpoint(context.messages, message => this.ompMessageFingerprint(message));
 				binding.ompFallbackContextTokens = estimateContextTokens(context);
 				for (const { pending, message } of results) {
 					binding.pendingTools.delete(pending.invocation.id);
@@ -854,6 +968,7 @@ export class AntigravityRuntime {
 				binding.ompConversationFingerprint !== undefined &&
 				this.ompMessagesFingerprint(context.messages.slice(0, binding.messageCount).filter(message => message.role !== 'system')) === binding.ompConversationFingerprint) {
 				binding.historyFingerprint = this.ompMessagesFingerprint(context.messages.slice(0, binding.messageCount));
+				binding.ompImageCheckpoint = captureImageHistoryCheckpoint(context.messages.slice(0, binding.messageCount), message => this.ompMessageFingerprint(message));
 			}
 			// Only after accepting a non-textual system/tool delta can an
 			// identical resend be recognized against the updated checkpoint.
@@ -907,14 +1022,19 @@ export class AntigravityRuntime {
 				binding.bridge !== undefined && !binding.bridge.empty;
 			const sessionGuidance = sessionAppend
 				? undefined
-				: ompToolGuidance(binding.initialize, routing?.nativeTools ?? "prefer", bridgeConfigured);
+				: ompToolGuidance(binding.initialize, routing?.nativeTools ?? "prefer", bridgeConfigured,
+					"main", binding.bridge?.projectedToolNames ?? []);
 			const parts = adaptPromptToCapabilities(
 				buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy, sessionRouting: sessionAppend, sessionGuidance }, ompRetryResend),
 				binding.initialize,
 			);
 			await this.modeChanges;
 			this.assertEpoch(epoch);
-			if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode || !binding.connection.process.alive) {
+			if (!binding.connection.process.alive) {
+				await this.invalidateBinding(binding);
+				throw new AntigravityAcpError("protocol", "ACP session closed before prompt dispatch");
+			}
+			if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode) {
 				await this.invalidateBinding(binding);
 				throw new AntigravityAcpError("protocol", "Permission mode changed before prompting; retry the turn");
 			}
@@ -925,6 +1045,7 @@ export class AntigravityRuntime {
 			binding.pendingContextCount = context.messages.length;
 			binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
 			binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
+			binding.ompImageCheckpoint = captureImageHistoryCheckpoint(context.messages, message => this.ompMessageFingerprint(message));
 			binding.relay.beginTurn();
 			binding.turnCompletion = new Promise<void>((resolve) => {
 				completeTurn = resolve;
@@ -946,31 +1067,43 @@ export class AntigravityRuntime {
             if (binding.ompInvalidated || !binding.connection.process.alive) throw new AntigravityAcpError('protocol', 'ACP session closed before prompt dispatch');
             if (options.signal?.aborted) throw abortError();
             ompDispatched = true;
-            let ompSeedUsage;
+            let ompSeedUsage: PromptUsageResult | undefined;
             if (parts.seedSteps?.length) {
               const savedWriter = binding.writer;
               binding.writer = undefined;
               binding.ompSeeding = true;
               try {
                 for (const seedPrompt of parts.seedSteps) {
-                  binding.ompSeedText = '';
                   if (options.signal?.aborted || binding.abortRequested) throw abortError();
-                  const seedResponse = await binding.connection.prompt({ sessionId: binding.session.sessionId, prompt: seedPrompt }, options.signal);
-                  if (binding.ompInvalidated) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost');
-                  if (binding.abortRequested || seedResponse.stopReason === 'cancelled' || options.signal?.aborted) throw abortError();
-                  const seedQuota = quotaExhaustion(binding.ompSeedText ?? '');
-                  binding.ompSeedText = undefined;
-                  if (seedQuota) await this.ompThrowQuota(binding, seedQuota);
-                  if (seedResponse.stopReason !== 'end_turn') throw new AntigravityAcpError('protocol', `ACP seed step stopped early with ${seedResponse.stopReason}`);
-                  const seedUsage = usageFromPrompt(seedResponse);
-                  if (ompSeedUsage) {
-                    ompSeedUsage.input += seedUsage.input;
-                    ompSeedUsage.output += seedUsage.output;
-                    ompSeedUsage.cacheRead += seedUsage.cacheRead;
-                    ompSeedUsage.cacheWrite += seedUsage.cacheWrite;
-                    ompSeedUsage.totalTokens += seedUsage.totalTokens;
-                    ompSeedUsage.reasoning = (ompSeedUsage.reasoning ?? 0) + (seedUsage.reasoning ?? 0);
-                  } else ompSeedUsage = seedUsage;
+                  // One guard per hidden step: bounded ACK capture, a fixed
+                  // deadline, and an immediate stop on tools/permissions.
+                  const guard = new HistorySeedGuard(options.signal);
+                  binding.ompSeedGuard = guard;
+                  try {
+                    const seedResponse = await guard.run((seedSignal) => binding.connection.prompt(
+                      { sessionId: binding.session.sessionId, prompt: seedPrompt },
+                      seedSignal,
+                    ));
+                    if (binding.ompInvalidated) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost');
+                    if (binding.abortRequested || seedResponse.stopReason === 'cancelled' || options.signal?.aborted) throw abortError();
+                    // Quota notices keep their existing handling and are checked
+                    // before the acknowledgement, which they never carry.
+                    const seedQuota = quotaExhaustion(guard.text);
+                    if (seedQuota) await this.ompThrowQuota(binding, seedQuota);
+                    if (seedResponse.stopReason !== 'end_turn') throw new AntigravityAcpError('protocol', `ACP seed step stopped early with ${seedResponse.stopReason}`);
+                    guard.assertAcknowledged();
+                    const seedUsage = usageFromPrompt(seedResponse);
+                    ompSeedUsage = ompSeedUsage ? mergeUsage(ompSeedUsage, seedUsage) : seedUsage;
+                  } catch (error) {
+                    // A parent cancellation stays a cancellation, never a
+                    // protocol failure, so the caller can retry cleanly.
+                    if (options.signal?.aborted || binding.abortRequested) throw abortError();
+                    if (error instanceof HistorySeedError) throw new AntigravityAcpError('protocol', error.message, { cause: error });
+                    throw error;
+                  } finally {
+                    guard.dispose();
+                    binding.ompSeedGuard = undefined;
+                  }
                 }
                 binding.ompSeeding = false;
               } finally {
@@ -987,14 +1120,7 @@ export class AntigravityRuntime {
 			binding.ompTerminalStopReason = response.stopReason;
 			if (binding.abortRequested) throw abortError();
 			const usage = usageFromPrompt(response, binding.ompFallbackContextTokens);
-			if (ompSeedUsage) {
-				usage.input += ompSeedUsage.input;
-				usage.output += ompSeedUsage.output;
-				usage.cacheRead += ompSeedUsage.cacheRead;
-				usage.cacheWrite += ompSeedUsage.cacheWrite;
-				usage.totalTokens += ompSeedUsage.totalTokens;
-				if (ompSeedUsage.reasoning !== undefined) usage.reasoning = (usage.reasoning ?? 0) + ompSeedUsage.reasoning;
-			}
+			if (ompSeedUsage) mergeUsage(usage, ompSeedUsage);
 			activeWriter.message.usage = usage;
 			this.metrics.record(response, usage);
 			const quota = response.stopReason === "cancelled" ? undefined : quotaExhaustion(activeWriter.message.content.map(block => block.type === "text" ? block.text : "").join(""));
@@ -1097,11 +1223,14 @@ export class AntigravityRuntime {
 		}
 		await this.modeChanges;
 		this.assertEpoch(epoch);
+		if (!binding.connection.process.alive) {
+			await this.invalidateBinding(binding);
+			throw new AntigravityAcpError("protocol", "ACP session closed before prompt dispatch");
+		}
 		if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode) {
 			await this.invalidateBinding(binding);
 			throw new AntigravityAcpError("protocol", "Permission mode changed before prompting; retry the turn");
 		}
-		if (!binding.connection.process.alive) throw new AntigravityAcpError("protocol", "ACP session closed before prompt dispatch");
 		// Two side turns cannot interleave on one shadow session. OMP runs BTW
 		// turns one at a time; a duplicate dispatch fails loudly instead of
 		// corrupting the shared checkpoint.
@@ -1128,7 +1257,8 @@ export class AntigravityRuntime {
 		// that prohibits every tool call rather than only the pi_ guidance.
 		const sessionGuidance = sessionAppend
 			? undefined
-			: ompToolGuidance(binding.initialize, routing?.nativeTools ?? "prefer", bridgeConfigured, "ephemeral");
+			: ompToolGuidance(binding.initialize, routing?.nativeTools ?? "prefer", bridgeConfigured,
+				"ephemeral", binding.bridge?.projectedToolNames ?? []);
 		const planned = adaptPromptToCapabilities(
 			buildPromptParts(dispatchContext, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy, sessionRouting: sessionAppend, sessionGuidance, promptKind: "ephemeral" }, plan.kind === "retry"),
 			binding.initialize,
@@ -1218,22 +1348,35 @@ export class AntigravityRuntime {
 		let usage: PromptUsageResult | undefined;
 		try {
 			for (const step of steps) {
-				binding.ompSeedText = "";
 				if (signal?.aborted || binding.abortRequested) throw abortError();
-				const response = await binding.connection.prompt({ sessionId: binding.session.sessionId, prompt: step }, signal);
-				if (binding.ompInvalidated) throw new AntigravityAcpError("protocol", "ACP session ownership was lost");
-				if (binding.abortRequested || response.stopReason === "cancelled" || signal?.aborted) throw abortError();
-				const quota = quotaExhaustion(binding.ompSeedText ?? "");
-				binding.ompSeedText = undefined;
-				if (quota) await this.ompThrowQuota(binding, quota);
-				if (response.stopReason !== "end_turn") throw new AntigravityAcpError("protocol", `ACP seed step stopped early with ${response.stopReason}`);
-				const stepUsage = usageFromPrompt(response);
-				usage = usage ? mergeUsage(usage, stepUsage) : stepUsage;
+				const guard = new HistorySeedGuard(signal);
+				binding.ompSeedGuard = guard;
+				try {
+					const response = await guard.run((seedSignal) => binding.connection.prompt(
+						{ sessionId: binding.session.sessionId, prompt: step },
+						seedSignal,
+					));
+					if (binding.ompInvalidated) throw new AntigravityAcpError("protocol", "ACP session ownership was lost");
+					if (binding.abortRequested || response.stopReason === "cancelled" || signal?.aborted) throw abortError();
+					const quota = quotaExhaustion(guard.text);
+					if (quota) await this.ompThrowQuota(binding, quota);
+					if (response.stopReason !== "end_turn") throw new AntigravityAcpError("protocol", `ACP seed step stopped early with ${response.stopReason}`);
+					guard.assertAcknowledged();
+					const stepUsage = usageFromPrompt(response);
+					usage = usage ? mergeUsage(usage, stepUsage) : stepUsage;
+				} catch (error) {
+					if (signal?.aborted || binding.abortRequested) throw abortError();
+					if (error instanceof HistorySeedError) throw new AntigravityAcpError("protocol", error.message, { cause: error });
+					throw error;
+				} finally {
+					guard.dispose();
+					binding.ompSeedGuard = undefined;
+				}
 			}
 			return usage;
 		} finally {
 			binding.ompSeeding = false;
-			binding.ompSeedText = undefined;
+			binding.ompSeedGuard = undefined;
 			binding.writer = savedWriter;
 		}
 	}
@@ -1408,6 +1551,7 @@ export class AntigravityRuntime {
 					if (relayServer) relayServer.name = "pi-relay";
 				}
 			}
+			routed.setOmpProjectedToolNames?.(bridge?.projectedToolNames ?? []);
 			const mcpServers = [];
 			if (mcpServer) mcpServers.push(mcpServer);
 			if (relayServer) mcpServers.push(relayServer);
@@ -1555,6 +1699,8 @@ export class AntigravityRuntime {
 		binding: Binding | undefined,
 		invocation: PiToolInvocation,
 	): Promise<CallToolResult> {
+		// A hidden seed turn must never execute a bridged tool, side or main.
+		binding?.ompSeedGuard?.rejectTool();
 		// BTW side turns declare the catalog only to keep the prompt cache warm;
 		// the prompt itself says tool calls are discarded without execution.
 		if (binding?.route.kind === "shadow") {
@@ -1596,6 +1742,7 @@ export class AntigravityRuntime {
 	): Promise<RequestPermissionResponse> {
 		// A side turn has no OMP tool loop to answer a permission prompt, so it
 		// must cancel rather than park the prompt for the permission timeout.
+		if (binding?.ompSeedGuard && request.sessionId === binding.session.sessionId) binding.ompSeedGuard.rejectTool();
 		if (!binding || binding.route.kind === "shadow" || !binding.writer || binding.writer.finished || binding.permission || binding.abortRequested || request.sessionId !== binding.session.sessionId) {
 			return Promise.resolve({ outcome: { outcome: "cancelled" } });
 		}
@@ -1628,8 +1775,13 @@ export class AntigravityRuntime {
 			}
 			return;
 		}
-		if (binding.ompSeeding && notification.update.sessionUpdate === "agent_message_chunk" && notification.update.content.type === "text") {
-			binding.ompSeedText = (binding.ompSeedText ?? "") + notification.update.content.text;
+		const seedGuard = binding.ompSeedGuard;
+		if (seedGuard) {
+			// A hidden seed turn only acknowledges. Anything else — a tool call,
+			// or text that will fail the exact OK check — ends it immediately.
+			const update = notification.update;
+			if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") seedGuard.appendText(update.content.text);
+			else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") seedGuard.rejectTool();
 		}
 		if ((notification.update.sessionUpdate === "config_option_update" || notification.update.sessionUpdate === "current_mode_update") &&
 			this.confirmedMode(binding) !== this.permissionMode) {

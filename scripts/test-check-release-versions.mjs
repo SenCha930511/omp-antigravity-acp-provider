@@ -126,6 +126,9 @@ test("malformed JSON, missing fields and an authoritative name mismatch fail", (
   writeFixture(root);
   updateJson(root, "package.json", (json) => { json.name = "not-the-provider"; });
   assert.match(outcome(check(root), 1).stderr, /package\.json name/);
+  writeFixture(root);
+  updateJson(root, "marketplace/antigravity-acp/package.json", (json) => { json.name = "not-the-provider"; });
+  assert.match(outcome(check(root), 1).stderr, /marketplace\/antigravity-acp\/package\.json name/);
 });
 
 test("plugin selection rejects no match and duplicate matching names", (t) => {

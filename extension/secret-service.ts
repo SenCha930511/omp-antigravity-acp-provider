@@ -78,6 +78,7 @@ export function createSecretService(run: (args: string[]) => Promise<string>, pl
     }
   };
   return {
+    applicable: platform === "linux",
     present: (): Promise<boolean | undefined> => platform === "linux" ? present() : Promise.resolve(undefined),
     remove: (): Promise<boolean | undefined> => platform === "linux" ? remove() : Promise.resolve(undefined),
   };
