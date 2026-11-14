@@ -172,7 +172,7 @@ jobs:
             echo "$NAME@$VERSION is already published with the same integrity; skipping publish."
             exit 0
           fi
-          npm publish "$TARBALL" --access public --provenance
+          npm publish "./$TARBALL" --access public --provenance
 
   github-release:
     name: github-release

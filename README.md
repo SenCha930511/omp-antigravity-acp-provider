@@ -10,7 +10,7 @@
 
 Google Antigravity's official ACP server, adapted for **Oh My Pi (OMP)**.
 
-Current version: `0.2.1`.
+Current version: `0.2.2`.
 
 **An OMP-focused derivative fork of [zacbemis/pi-antigravity-acp-provider](https://github.com/zacbemis/pi-antigravity-acp-provider).** Original project by [zacbemis](https://github.com/zacbemis) and contributors, licensed under MIT.
 
@@ -80,7 +80,7 @@ Or install the published npm package directly:
 omp plugin install npm:omp-antigravity-acp-provider
 ```
 
-To pin this version, use `omp plugin install npm:omp-antigravity-acp-provider@0.2.1`.
+To pin this version, use `omp plugin install npm:omp-antigravity-acp-provider@0.2.2`.
 
 Do not install both. Remove or disable any older Antigravity ACP adapter first.
 
