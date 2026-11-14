@@ -157,11 +157,13 @@ test("release reads the changelog and checks only the first heading plus duplica
   const draft = fixture(t, "# Changelog\n\n## Unreleased\n");
   outcome(check(draft), 0);
   assert.match(outcome(check(draft, "--release", "--tag", `v${version}`), 1).stderr, /first ## heading/);
-  const root = fixture(t, `# Changelog\n\n## 9.9.9 — 2026-11-12\n\n## ${version} — 2026-11-12\n`);
+  const root = fixture(t, `# Changelog\n\n## 9.9.9 — 2026-11-12\n\n- Wrong version.\n\n## ${version} — 2026-11-12\n\n- Target version.\n`);
   outcome(check(root), 0);
   assert.match(outcome(check(root, "--release", "--tag", `v${version}`), 1).stderr, /first ## heading/);
-  writeText(root, "CHANGELOG.md", `${changelog}\n## ${version} — 2026-11-11\n`);
+  writeText(root, "CHANGELOG.md", `${changelog}\n## ${version} — 2026-11-11\n\n- Duplicate.\n`);
   assert.match(outcome(check(root, "--release", "--tag", `v${version}`), 1).stderr, /duplicate heading/);
+  writeText(root, "CHANGELOG.md", `# Changelog\n\n## ${version} — 2026-11-12\n\n   \n\n## 1.2.2 — 2026-11-10\n\n- Older.\n`);
+  assert.match(outcome(check(root, "--release", "--tag", `v${version}`), 1).stderr, /release section for 1\.2\.3 must not be empty/);
   writeText(root, "CHANGELOG.md", "Not a changelog\n");
   assert.match(outcome(check(root, "--release", "--tag", `v${version}`), 1).stderr, /must start with # Changelog/);
 });
@@ -178,8 +180,12 @@ test("argument boundaries are usage errors", (t) => {
   const cases = [
     ["--root", root, "--release"],
     ["--root", root, "--tag", `v${version}`],
+    ["--root", root, "--notes-output", path.join(root, "notes.md")],
     ["--root", root, "--release", "--tag"],
     ["--root", root, "--release", "--tag", ""],
+    ["--root", root, "--release", "--tag", `v${version}`, "--notes-output"],
+    ["--root", root, "--release", "--tag", `v${version}`, "--notes-output", "--root"],
+    ["--root", root, "--release", "--tag", `v${version}`, "--notes-output", path.join(root, "a.md"), "--notes-output", path.join(root, "b.md")],
     ["--root", root, "--release", "--release", "--tag", `v${version}`],
     ["--root", root, "--tag", `v${version}`, "--tag", `v${version}`, "--release"],
     ["--root", root, "--root", root],
@@ -221,4 +227,34 @@ test("invalid calendar dates and trailing newlines are not valid release version
   const trailingNewline = fixture(t, changelog);
   updateJson(trailingNewline, "package.json", (json) => { json.version = `${version}\n`; });
   assert.match(outcome(check(trailingNewline, "--release", "--tag", `v${version}`), 1).stderr, /package\.json version/);
+});
+
+test("notes-output writes trimmed release notes with fenced blocks only when all checks pass", (t) => {
+  const sectionBody = [
+    "- First change.",
+    "",
+    "```markdown",
+    "## 0.0.0 — 2026-01-01",
+    "code fence content",
+    "```",
+    "",
+    "### Details",
+    "",
+    "- Second change.",
+  ].join("\n");
+  const fullChangelog = `# Changelog\n\n## ${version} — 2026-11-12\n\n\n${sectionBody}\n\n\n## 1.2.2 — 2026-11-10\n\n- Older release.\n`;
+  const root = fixture(t, fullChangelog);
+  const notesFile = path.join(root, "out", "release-notes.md");
+
+  outcome(check(root, "--release", "--tag", `v${version}`, "--notes-output", notesFile), 0);
+  assert.equal(fs.readFileSync(notesFile, "utf8"), `${sectionBody}\n`);
+
+  const failedNotesFile = path.join(root, "out", "failed-notes.md");
+  outcome(check(root, "--release", "--tag", "v9.9.9", "--notes-output", failedNotesFile), 1);
+  assert.equal(fs.existsSync(failedNotesFile), false);
+
+  updateJson(root, ".omp-plugin/marketplace.json", (json) => { json.plugins[0].version = "9.9.9"; });
+  const mismatchNotesFile = path.join(root, "out", "mismatch-notes.md");
+  outcome(check(root, "--release", "--tag", `v${version}`, "--notes-output", mismatchNotesFile), 1);
+  assert.equal(fs.existsSync(mismatchNotesFile), false);
 });

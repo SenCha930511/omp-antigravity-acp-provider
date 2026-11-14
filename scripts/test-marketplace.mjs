@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
+import { resolveCommandProbe } from "../extension/runtime/launch.ts";
+import { quoteBatchArgument } from "../marketplace/antigravity-acp/provision.ts";
 
 const execute = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -20,9 +22,23 @@ const env = { ...process.env, HOME: home, USERPROFILE: home, OMP_PROFILE: profil
   AGY_ACP_BIN: process.platform === "win32" ? "missing-acp-runtime.exe" : "/usr/bin/false" };
 delete env.PI_CODING_AGENT_DIR;
 delete env.PI_CONFIG_DIR;
-const command = (...args) => execute("omp", args, {
-  cwd: temporary, env, timeout: 300_000, maxBuffer: 2 * 1024 * 1024,
-});
+const runOmp = (args, options = {}) => {
+  const ompCommand = process.env.OMP_ACP_OMP_COMMAND ?? (process.platform === "win32" ? "omp.cmd" : "omp");
+  const resolved = resolveCommandProbe(
+    ompCommand,
+    process.platform === "win32" ? args.map(quoteBatchArgument) : args,
+  );
+  return execute(resolved.command, resolved.args, {
+    cwd: temporary,
+    env,
+    timeout: 300_000,
+    maxBuffer: 2 * 1024 * 1024,
+    ...options,
+    windowsHide: true,
+    windowsVerbatimArguments: process.platform === "win32",
+  });
+};
+const command = (...args) => runOmp(args);
 
 try {
   const source = process.argv.includes("--remote") ? "SenCha930511/omp-antigravity-acp-provider" : root;
@@ -38,9 +54,9 @@ try {
   console.log("First-load npm preparation and automatic OMP provider loading: PASS");
 
   // An invalid registry proves that a second process needs only the local cache.
-  const warm = await execute("omp", ["models", "antigravity-acp", "--json"], {
-    cwd: temporary, env: { ...env, npm_config_offline: "true", npm_config_registry: "http://127.0.0.1:1" },
-    timeout: 60_000, maxBuffer: 2 * 1024 * 1024,
+  const warm = await runOmp(["models", "antigravity-acp", "--json"], {
+    env: { ...env, npm_config_offline: "true", npm_config_registry: "http://127.0.0.1:1" },
+    timeout: 60_000,
   });
   assert.deepEqual(JSON.parse(warm.stdout).models, models);
   console.log("Second process reuses cached adapter with npm offline: PASS");

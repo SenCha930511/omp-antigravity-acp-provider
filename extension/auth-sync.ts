@@ -16,7 +16,7 @@ const execFileAsync = promisify(execFile);
 // parameter so tests can drive a stub executable through the same code path.
 // Captured stderr is matched in memory only; it is never logged or persisted.
 export function runSecurity(args: string[], bin = "/usr/bin/security"): Promise<void> {
-  return execFileAsync(bin, args, { stdio: ["ignore", "ignore", "pipe"], timeout: 3000 }).then(() => undefined);
+  return execFileAsync(bin, args, { timeout: 3000 }).then(() => undefined);
 }
 
 // errSecItemNotFound reaches the caller as exit code 44 (OSStatus -25300

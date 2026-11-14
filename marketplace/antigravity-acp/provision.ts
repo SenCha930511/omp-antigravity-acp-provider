@@ -82,8 +82,8 @@ async function provision(cache: string, install: (directory: string) => Promise<
   try {
     await fs.access(destination);
     throw new Error(`Cached ${ADAPTER_NAME} installation is incomplete. Reinstall the marketplace plugin to repair it.`);
-  } catch (error: any) {
-    if (error.code !== "ENOENT") throw error;
+  } catch (error: unknown) {
+    if (!(error instanceof Error) || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 
   await fs.mkdir(cache, { recursive: true });
@@ -93,9 +93,10 @@ async function provision(cache: string, install: (directory: string) => Promise<
     if (!await ready(staging)) throw new Error(`Downloaded ${ADAPTER_NAME} did not contain the pinned prebuilt adapter`);
     try {
       await fs.rename(staging, destination);
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Another OMP process may have finished the same immutable version first.
-      if (!["EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(error.code) || !await ready(destination)) throw error;
+      const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+      if (!code || !["EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(code) || !await ready(destination)) throw error;
     }
     return entry;
   } finally {

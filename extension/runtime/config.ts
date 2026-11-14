@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export type PermissionMode = "default" | "auto_edit" | "yolo";
+export type PermissionMode = "default" | "auto_edit" | "accept-edits" | "yolo";
 export type RuntimeUpdateMode = "automatic" | "notify" | "manual";
 
 export interface AntigravityAcpConfig {

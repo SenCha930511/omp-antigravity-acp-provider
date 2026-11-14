@@ -9,6 +9,7 @@ import { ompToolGuidance, type NativeToolMode, type SessionRoutingKind } from ".
 import type {
 	ContentBlock,
 	InitializeResponse,
+	PromptCapabilities,
 	PromptResponse,
 	RequestPermissionRequest,
 	RequestPermissionResponse,
@@ -20,10 +21,9 @@ import {
 	getCurrentTools,
 	normalizeContext,
 	type Context,
-	type Model,
 	type SimpleStreamOptions,
+	type ThinkingLevel,
 	type ToolResultMessage,
-	type JsonValue,
 	type TextContent,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
@@ -59,8 +59,9 @@ import {
 	type PiToolInvocation,
 } from "./tools/bridge.ts";
 import type { PermissionMode } from "./config.ts";
-import { resolveAcpModelId } from "./models.ts";
-import { type PromptParts, buildPromptParts, currentSystemInstructions, stableSystemInstructions, estimateContextTokens } from "./prompt.ts";
+import { type AntigravityModel, resolveAcpModelId } from "./models.ts";
+import { type PromptParts, type TransferBlock, buildPromptParts, currentSystemInstructions, stableSystemInstructions, estimateContextTokens } from "./prompt.ts";
+import { isJsonObject } from "./stream/json.ts";
 import { resolveSessionRoute, type SessionRoute } from "./routing.ts";
 import { PiEventWriter } from "./stream/pi-events.ts";
 import { usageFromPrompt, type PromptUsageResult } from "../usage.ts";
@@ -83,11 +84,10 @@ const TOOL_BATCH_MS = 100;
 // This adapter's provider name is not in the table, so it gets the floor.
 const OMP_PROVIDER_IMAGE_BUDGET = 5;
 
-type AntigravityModel = Model<"antigravity-acp">;
-
 // OMP passes its routing identity beside the Pi stream options. The complete Pi
 // option object stays intact; only these adapter-only fields are read here.
-export interface OmpStreamOptions extends SimpleStreamOptions {
+export interface OmpStreamOptions extends Omit<SimpleStreamOptions, "reasoning"> {
+	reasoning?: ThinkingLevel | string;
 	/** Owning main routing id for an OMP side (`/btw`) request. */
 	parentSessionId?: string;
 	/** OMP prompt cache key; carried through unchanged. */
@@ -174,22 +174,6 @@ function contextControlMembership(names: readonly string[]): string {
 	return ["context_notes", "new_context"].filter(name => names.includes(name)).join(",");
 }
 
-function isJsonValue(value: unknown, ancestors = new Set<object>()): value is JsonValue {
-	if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-	if (typeof value === "number") return Number.isFinite(value);
-	if (typeof value !== "object" || ancestors.has(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	if (prototype !== Object.prototype && prototype !== Array.prototype && prototype !== null) return false;
-	// Track the current recursion path only: the same object may appear twice in
-	// valid JSON data (encoding duplicates it), while a cycle must fail.
-	ancestors.add(value);
-	const valid = Array.isArray(value)
-		? value.every(item => isJsonValue(item, ancestors))
-		: Object.values(value).every(item => isJsonValue(item, ancestors));
-	ancestors.delete(value);
-	return valid;
-}
-
 function normalizeBoundaryContentBlock(block: unknown): Array<TextContent | ToolCall> {
 	if (typeof block !== "object" || block === null) return [];
 	const type = Reflect.get(block, "type");
@@ -199,7 +183,7 @@ function normalizeBoundaryContentBlock(block: unknown): Array<TextContent | Tool
 	}
 	if (type === "toolCall") {
 		const id = Reflect.get(block, "id"), name = Reflect.get(block, "name"), args = Reflect.get(block, "arguments");
-		if (typeof id !== "string" || typeof name !== "string" || !isJsonValue(args) || typeof args !== "object" || args === null || Array.isArray(args)) return [];
+		if (typeof id !== "string" || typeof name !== "string" || !isJsonObject(args)) return [];
 		return [{ type: "toolCall", id, name, arguments: args }];
 	}
 	return [];
@@ -792,7 +776,7 @@ export class AntigravityRuntime {
 	private async runQueued(
 		model: AntigravityModel,
 		context: Context,
-		options: SimpleStreamOptions,
+		options: OmpStreamOptions,
 		writer: PiEventWriter,
 	): Promise<void> {
 		this.assertActive();
@@ -853,7 +837,7 @@ export class AntigravityRuntime {
 				} else {
 					const drained = prefixMatches && await drainCancelledTurn(binding, () => abortTurn(binding), options.signal);
 					if (!drained || !binding.connection.process.alive || binding.needsReconstruction ||
-						!['cancelled', 'end_turn', 'max_turn_requests', 'max_tokens'].includes(binding.ompTerminalStopReason)) {
+						!binding.ompTerminalStopReason || !['cancelled', 'end_turn', 'max_turn_requests', 'max_tokens'].includes(binding.ompTerminalStopReason)) {
 						await this.invalidateBinding(binding);
 					}
 					if (drained && prefixMatches) {
@@ -1051,14 +1035,15 @@ export class AntigravityRuntime {
 				completeTurn = resolve;
 			});
 			if (options.signal) {
+				const turnSignal = options.signal;
 				const promptBinding = binding;
 				onTurnAbort = () => {
-					if (steerMode() === 'queue' && isSteerAbort(options.signal) && !promptBinding.ompSeeding) {
+					if (steerMode() === 'queue' && isSteerAbort(turnSignal) && !promptBinding.ompSeeding) {
 						promptBinding.connection.muteSteerChunks?.(promptBinding.session.sessionId);
 					} else abortTurn(promptBinding);
 				};
-				options.signal.addEventListener("abort", onTurnAbort, { once: true });
-				if (options.signal.aborted) onTurnAbort();
+				turnSignal.addEventListener("abort", onTurnAbort, { once: true });
+				if (turnSignal.aborted) onTurnAbort();
 			}
 			if (options.signal?.aborted) throw abortError();
             binding.ompInFlight = true;
@@ -1155,7 +1140,7 @@ export class AntigravityRuntime {
 			if (isAbort(error) || binding.abortRequested) {
 				abortTurn(binding);
 				if (binding.connection.process.alive && !binding.ompInvalidated && !binding.needsReconstruction && !binding.ompSeeding &&
-					['cancelled', 'end_turn', 'max_turn_requests', 'max_tokens'].includes(binding.ompTerminalStopReason)) {
+					binding.ompTerminalStopReason !== undefined && ['cancelled', 'end_turn', 'max_turn_requests', 'max_tokens'].includes(binding.ompTerminalStopReason)) {
 					const ompWasWarm = binding.messageCount > 0;
 					binding.messageCount = binding.pendingContextCount;
 					binding.historyFingerprint = binding.pendingContextFingerprint;
@@ -1339,7 +1324,7 @@ export class AntigravityRuntime {
 
 	private async promptShadowSeedSteps(
 		binding: Binding,
-		steps: NonNullable<PromptParts["seedSteps"]>,
+		steps: ContentBlock[][],
 		signal?: AbortSignal,
 	): Promise<PromptUsageResult | undefined> {
 		const savedWriter = binding.writer;
@@ -1895,21 +1880,53 @@ export async function authenticateForCredential(
 	await connection.authenticate({ methodId: method.id, _meta: { "api-key": key } }, signal);
 }
 
-function adaptPromptToCapabilities(parts: PromptParts, initialize: InitializeResponse): PromptParts {
-	const capabilities = initialize.agentCapabilities?.promptCapabilities;
+interface AcpPromptParts {
+	prompt: ContentBlock[];
+	seedSteps?: ContentBlock[][];
+	messageCount: number;
+	estimatedContextTokens: number;
+}
+
+function adaptPromptBlocks(blocks: readonly TransferBlock[], capabilities: PromptCapabilities | undefined): ContentBlock[] {
 	const output: ContentBlock[] = [];
-	for (const block of parts.prompt) {
-		if (block.type === "image" && capabilities?.image !== true) {
-			throw new AntigravityAcpError("invalid_input", "This Antigravity ACP runtime did not advertise image input");
-		}
-		if (block.type === "resource" && capabilities?.embeddedContext !== true) {
-			const resource = block.resource;
-			if ("text" in resource) output.push({ type: "text", text: resource.text });
+	for (const block of blocks) {
+		if (block.type === "image") {
+			if (capabilities?.image !== true) {
+				throw new AntigravityAcpError("invalid_input", "This Antigravity ACP runtime did not advertise image input");
+			}
+			if (typeof block.data !== "string" || typeof block.mimeType !== "string") {
+				throw new AntigravityAcpError("invalid_input", "ACP image prompt block is missing data or mimeType");
+			}
+			output.push({ type: "image", data: block.data, mimeType: block.mimeType });
 			continue;
 		}
-		output.push(block);
+		if (block.type === "resource") {
+			const resource = block.resource;
+			if (!resource) continue;
+			if (capabilities?.embeddedContext !== true) {
+				if ("text" in resource) output.push({ type: "text", text: resource.text });
+				continue;
+			}
+			output.push({ type: "resource", resource });
+			continue;
+		}
+		if (block.type === "text" && typeof block.text === "string") {
+			output.push({ type: "text", text: block.text });
+			continue;
+		}
+		throw new AntigravityAcpError("invalid_input", `Unsupported ACP prompt block type '${block.type}'`);
 	}
-	return { ...parts, prompt: output, ...(parts.seedSteps ? { seedSteps: parts.seedSteps.map(step => adaptPromptToCapabilities({ prompt: step, messageCount: parts.messageCount, estimatedContextTokens: parts.estimatedContextTokens }, initialize).prompt) } : {}) };
+	return output;
+}
+
+function adaptPromptToCapabilities(parts: PromptParts, initialize: InitializeResponse): AcpPromptParts {
+	const capabilities = initialize.agentCapabilities?.promptCapabilities;
+	return {
+		messageCount: parts.messageCount,
+		estimatedContextTokens: parts.estimatedContextTokens,
+		prompt: adaptPromptBlocks(parts.prompt, capabilities),
+		seedSteps: parts.seedSteps ? parts.seedSteps.map(step => adaptPromptBlocks(step, capabilities)) : undefined,
+	};
 }
 
 function hasUsableLocalAuth(health: AntigravityAuthHealth): boolean {
@@ -1969,12 +1986,14 @@ function findPermissionResult(context: Context, requestId: string): PermissionTo
 	return undefined;
 }
 
-function messagesFingerprint(messages: Context["messages"], systemMemo?: any): string {
+type FingerprintMemo = (value: unknown, compute: () => string) => string;
+
+function messagesFingerprint(messages: Context["messages"], systemMemo?: FingerprintMemo): string {
 	const fingerprints = messages.map(message => messageFingerprint(message, systemMemo));
 	return createHash("sha256").update(fingerprints.join("\n")).digest("hex");
 }
 
-function messageFingerprint(message: Context["messages"][number], systemMemo?: any): string {
+function messageFingerprint(message: Context["messages"][number], systemMemo?: FingerprintMemo): string {
 	let value: unknown;
 	if (message.role === "user") {
 		value = { role: message.role, content: message.content };

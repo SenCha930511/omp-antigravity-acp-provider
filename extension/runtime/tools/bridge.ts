@@ -21,9 +21,17 @@ const BODY_LIMIT = 1024 * 1024;
 const MAX_TOOLS = 64;
 export const OMP_TASK_TOOL_NAME = "task";
 
+export interface ToolProjectionInput {
+	name: string;
+	description?: string;
+	parameters?: unknown;
+}
+
 const CONTEXT_CONTROL_TOOLS = new Set(["context_notes", "new_context"]);
 
-export function bridgeExecutionSchema(tool: Pick<Tool, "name" | "parameters">): Tool["parameters"] {
+export function bridgeExecutionSchema(tool: Pick<Tool, "name" | "parameters">): Tool["parameters"];
+export function bridgeExecutionSchema(tool: ToolProjectionInput): unknown;
+export function bridgeExecutionSchema(tool: ToolProjectionInput): unknown {
 	const parameters = tool.parameters;
 	if (!CONTEXT_CONTROL_TOOLS.has(tool.name) || parameters === null || typeof parameters !== "object" || Array.isArray(parameters)) {
 		return parameters;
@@ -49,7 +57,7 @@ export function bridgeExecutionSchema(tool: Pick<Tool, "name" | "parameters">): 
 	}
 	// These two native tools receive OMP's injected intent as call metadata,
 	// not as an execute argument. Keep the property and supplied value intact.
-	return { ...schema, required: required.filter(key => key !== "i") } as Tool["parameters"];
+	return { ...schema, required: required.filter(key => key !== "i") };
 }
 
 interface BridgeTool {
@@ -86,13 +94,13 @@ function projectionFingerprint(tools: BridgeTool[], omissions: ToolOmission[]): 
 	return JSON.stringify([tools.map((tool) => [tool.mcpName, tool.description, tool.inputSchema]), omissions]);
 }
 
-export function planToolProjection(tools: readonly Tool[]): ToolOmission[] {
+export function planToolProjection(tools: readonly ToolProjectionInput[]): ToolOmission[] {
 	const omissions: ToolOmission[] = [];
 	projectTools(tools, omissions);
 	return omissions;
 }
 
-export function planProjectedToolNames(tools: readonly Tool[]): readonly string[] {
+export function planProjectedToolNames(tools: readonly ToolProjectionInput[]): readonly string[] {
 	return projectTools(tools, []).map(tool => tool.piName);
 }
 
@@ -235,7 +243,9 @@ export class PiMcpBridge {
 	}
 }
 
-function projectTool(tool: Tool, names: Set<string>): BridgeTool | ToolOmission {
+function projectTool(tool: Tool, names: Set<string>): BridgeTool | ToolOmission;
+function projectTool(tool: ToolProjectionInput, names: Set<string>): (Omit<BridgeTool, "originalSchema"> & { originalSchema: unknown }) | ToolOmission;
+function projectTool(tool: ToolProjectionInput, names: Set<string>): (Omit<BridgeTool, "originalSchema"> & { originalSchema: unknown }) | ToolOmission {
 	const mcpName = projectedMcpName(tool.name);
 	if (!mcpName || names.has(mcpName)) {
 		return { name: tool.name, reason: "duplicate or invalid projected name" };
@@ -249,7 +259,7 @@ function projectTool(tool: Tool, names: Set<string>): BridgeTool | ToolOmission 
 	return {
 		mcpName,
 		piName: tool.name,
-		description: tool.description,
+		description: tool.description ?? "",
 		inputSchema: projected.schema,
 		originalSchema,
 	};
@@ -258,8 +268,10 @@ function projectTool(tool: Tool, names: Set<string>): BridgeTool | ToolOmission 
 // Keep the first 64 projectable tools in OMP's input order. When `task` would
 // fall beyond that boundary, hold one slot open so the delegated-work
 // declaration survives without moving any retained tool.
-function projectTools(tools: readonly Tool[], omissions: ToolOmission[]): BridgeTool[] {
-	const selected = new Map<number, BridgeTool>();
+function projectTools(tools: readonly Tool[], omissions: ToolOmission[]): BridgeTool[];
+function projectTools(tools: readonly ToolProjectionInput[], omissions: ToolOmission[]): Array<Omit<BridgeTool, "originalSchema"> & { originalSchema: unknown }>;
+function projectTools(tools: readonly ToolProjectionInput[], omissions: ToolOmission[]): Array<Omit<BridgeTool, "originalSchema"> & { originalSchema: unknown }> {
+	const selected = new Map<number, Omit<BridgeTool, "originalSchema"> & { originalSchema: unknown }>();
 	const rejected = new Map<number, string>();
 	const limitSkipped = new Set<number>();
 	const names = new Set<string>();

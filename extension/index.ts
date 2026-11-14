@@ -22,7 +22,8 @@ import { ownerRoutingId, sessionOwnerId } from "./runtime/routing.ts";
 import { createStructuredFingerprintMemo } from "./runtime/binding.ts";
 import { Diagnostics, instrumentRuntime } from "./diagnostics.ts";
 import { stableTools } from "./tool-order.ts";
-import { toolDeclarations, normalizeOmpSystemDeltas, type OmpToolDeclaration } from "./omp-context.ts";
+import type { Context, Message, Tool } from "@earendil-works/pi-ai";
+import { toolDeclarations, normalizeOmpSystemDeltas } from "./omp-context.ts";
 import { OmpSessionLifecycle, type OmpProviderSessionState } from "./omp-session-lifecycle.ts";
 import { DEFAULT_USAGE_MODE, loadContextSettings, type ContextSettings } from "./context-settings.ts";
 import { PARTNER_FALLBACK_MODELS, projectCatalog, selectRuntimeModel, type PublicCatalogModel } from "./model-catalog.ts";
@@ -93,7 +94,7 @@ export function resolveAdapterStateDir(env: NodeJS.ProcessEnv = process.env, hom
 // CatalogStore marks these entries as unverified until a real refresh lands.
 export function offlineFallbackModels(): PublicCatalogModel[] {
   return [
-    ...(FALLBACK_MODELS as PublicCatalogModel[]),
+    ...FALLBACK_MODELS,
     ...projectCatalog([
       { modelId: "gemini-4-argon-low", name: "Gemini 4 Argon (low)" },
       { modelId: "gemini-4-argon-medium", name: "Gemini 4 Argon (medium)" },
@@ -169,7 +170,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     usageMode: legacyContextSettings.defaults.usageMode,
     diagnostics: legacyDiagnostics.status().enabled,
   });
-  let contextSettings = {
+  let contextSettings: ContextSettings = {
     ...legacyContextSettings,
     defaults: { ...legacyContextSettings.defaults, usageMode: adapterConfig.usageMode },
   };
@@ -250,17 +251,19 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   let lastToolAudit: ToolAuditSummary | undefined;
   let cachedToolProjection: {
     revision: string;
-    tools: OmpToolDeclaration[];
+    tools: Tool[];
     audit: ToolAuditSummary;
   } | undefined;
 
   // A spawn is described once so warmup and a real request can compare the
   // exact target, cwd, permission process flag and tool policy before a
   // standby is reused.
-  function prepareSpawn(options: ConstructorParameters<typeof TierConnection>[0]): {
+  interface PreparedSpawn {
     options: ConstructorParameters<typeof TierConnection>[0];
     signature: WarmupSignature;
-  } {
+  }
+
+  function prepareSpawn(options: ConstructorParameters<typeof TierConnection>[0]): PreparedSpawn {
     const profile = currentPermissionProfile();
     const env = ensureLoopbackBypass({
       ...process.env,
@@ -384,7 +387,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       // never duplicates a discovery or install already in flight.
       await prepareRuntime();
       if (stale()) return;
-      let prepared: ReturnType<typeof prepareSpawn>;
+      let prepared: PreparedSpawn;
       try {
         prepared = prepareSpawn({ cwd: process.cwd() });
       } catch {
@@ -487,10 +490,10 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
 
   // A side routing id shares its parent's runtime entry, so a new one-shot id
   // never spawns a fresh process. Only a full owner close tears it down.
-  const lifecycle = new OmpSessionLifecycle(id => runtimes.close(ownerRoutingId(id)), async id => {
+  const lifecycle: OmpSessionLifecycle = new OmpSessionLifecycle(id => runtimes.close(ownerRoutingId(id)), async id => {
     if (id) await cleanup.releaseSession(id);
   }, ownerRoutingId);
-  const runtimes = new SessionRuntimePool<RuntimeBundleView>(() => {
+  const runtimes: SessionRuntimePool<RuntimeBundleView> = new SessionRuntimePool<RuntimeBundleView>(() => {
     const ownedConnections = new Set<TierConnection>();
     const runtime = new AntigravityRuntime((options: ConstructorParameters<typeof TierConnection>[0]) => {
       const requested = {
@@ -556,7 +559,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     // config; unregister first so a logout report finds no remaining
     // "provider config (fallback)" source.
     try { pi.unregisterProvider?.("antigravity-acp"); } catch { /* older hosts */ }
-    try { adapted.registerProvider(); } catch { /* advisory */ }
+    tryRegisterProvider();
   }
 
   const auth = new OmpAuthCoordinator({
@@ -608,13 +611,14 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   const handleSourceTransition = async (event: unknown, ctx: OmpCommandContext) => {
     routing.clearPending();
     const transcriptId = sessionIdOf(ctx), file = ctx.sessionManager?.getSessionFile?.();
-    const reason: unknown = typeof event === "object" && event !== null ? Reflect.get(event, "reason") : undefined;
+    const eventRecord = typeof event === "object" && event !== null ? event : undefined;
+    const reason: unknown = eventRecord ? Reflect.get(eventRecord, "reason") : undefined;
     if ((reason === "new" || reason === "resume" || reason === "fork" || reason === "branch" || reason === "btw")
       && !transcriptId?.includes(":side:")) {
       if (!transcriptId || !file) {
         routing.invalidateUnknownSource();
       } else {
-        const candidate: unknown = Reflect.get(event, "previousSessionFile");
+        const candidate: unknown = eventRecord ? Reflect.get(eventRecord, "previousSessionFile") : undefined;
         const previousFile = typeof candidate === "string" ? candidate : undefined;
         const previousTranscriptId = previousFile ? await sourceId(previousFile).catch(() => undefined) : undefined;
         routing.noteSourceSwitch(reason, transcriptId, file, previousTranscriptId, previousFile);
@@ -743,19 +747,22 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
       closeAllRuntimes: closePool,
       onModelsUpdated: models => {
         initialModels = models;
-        adapted.registerProvider();
+        registerProvider();
       },
     }),
     getArgumentCompletions: createAntigravityArgumentCompletions({ catalog: catalogStore }),
   });
 
-  const adapted = new Proxy(pi, {
-    get(target, key) {
-      if (key !== "registerProvider") {
-        const value = Reflect.get(target, key);
-        return typeof value === "function" ? value.bind(target) : value;
-      }
-      return () => target.registerProvider("antigravity-acp", {
+  function tryRegisterProvider(): void {
+    try {
+      registerProvider();
+    } catch {
+      return;
+    }
+  }
+
+  function registerProvider(): void {
+    pi.registerProvider("antigravity-acp", {
         api: "antigravity-acp",
         baseUrl: "acp://antigravity",
         // A config apiKey keeps OMP's own logout report claiming a remaining
@@ -772,11 +779,11 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
         },
         streamSimple(
           model: { id: string },
-          context: { tools?: OmpToolDeclaration[]; systemPrompt?: string | string[]; messages: unknown[] },
+          context: { tools?: Tool[]; systemPrompt?: string | string[]; messages: Message[] },
           options?: { apiKey?: string; sessionId?: string; parentSessionId?: string; promptCacheKey?: string; reasoning?: string; signal?: AbortSignal; providerSessionState?: Map<string, OmpProviderSessionState> },
         ) {
           const inputTools = toolDeclarations(context.tools ?? []);
-          let tools: OmpToolDeclaration[];
+          let tools: Tool[];
           const cached = cachedToolProjection;
           const revision = toolProjectionMemo(inputTools, () => String(++toolRevision));
           // Validate live definitions, including mutation of the same array.
@@ -796,7 +803,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
             };
             cachedToolProjection = { revision, tools, audit: lastToolAudit };
           }
-          const routedContext = {
+          const routedContext: Context = {
             ...context,
             tools,
             messages: normalizeOmpSystemDeltas(context.messages),
@@ -832,7 +839,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
                 // of only filling the lookup map; otherwise the model selector
                 // keeps the offline effort list until the next restart.
                 initialModels = await catalogStore.refresh(contextSettings, options?.apiKey);
-                try { adapted.registerProvider(); } catch { /* advisory */ }
+                tryRegisterProvider();
               }
               if (options?.signal?.aborted) throw new Error("ACP request cancelled during startup");
               const original = catalogStore.upstreamModels.get(model.id);
@@ -845,7 +852,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
                 await runtime.setPermissionMode(currentPermissionProfile().wireMode);
                 const stream = provider.streamSimple(selectRuntimeModel(original, options?.reasoning), routedContext, { ...options, sessionId: routingId });
                 for await (const event of stream) {
-                  const message = event.message ?? event.partial;
+                  const message = "message" in event ? event.message : "partial" in event ? event.partial : undefined;
                   if (message?.usage) applyApiCostEstimate(model.id, message.usage, message.timestamp ?? Date.now());
                   deferred.stream.push(event);
                 }
@@ -890,7 +897,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
                       for (const link of event.links) callbacks.onAuth({ url: link.url, instructions: event.message });
                     } else callbacks.onProgress?.(event.message);
                   },
-                  prompt: (request: { message: string; placeholder: string }) => callbacks.onPrompt({ message: request.message, placeholder: request.placeholder }),
+                  prompt: (request: { message: string; placeholder?: string }) => callbacks.onPrompt({ message: request.message, placeholder: request.placeholder }),
                 });
                 auth.noteLoginSucceeded(loginAttempt);
                 // Record the signed-in account on the marker credential so OMP's
@@ -918,10 +925,9 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
           },
           getApiKey: () => MARKER,
         },
-      });
-    },
-  });
-  adapted.registerProvider();
+    });
+  }
+  registerProvider();
 
   let startupRefresh: Promise<void> | undefined;
   refreshModelsOnStartup = () => {
@@ -931,7 +937,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     startupRefresh = catalogStore.refresh(contextSettings)
       .then(models => {
         initialModels = models;
-        adapted.registerProvider();
+        registerProvider();
       })
       .catch(() => { /* Keep the cached catalog. */ });
     return startupRefresh;

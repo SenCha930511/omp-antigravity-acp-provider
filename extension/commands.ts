@@ -7,6 +7,10 @@ import { DEFAULT_USAGE_MODE, updateContextSettings, resolveContextOptions, saveC
 import type { CatalogStore, ConfiguredCatalogModel } from "./catalog-store.ts";
 import type { SessionCleanup, CleanupMode } from "./session-cleanup.ts";
 import type { TierConnection } from "./tier-connection.ts";
+import type { AssistantMessageEvent, Context, TranscriptContext } from "@earendil-works/pi-ai";
+import type { PermissionMode } from "./runtime/config.ts";
+import type { AntigravityModel } from "./runtime/models.ts";
+import type { OmpStreamOptions } from "./runtime/runtime.ts";
 
 export interface RuntimeSnapshotProcess {
   mcpHttp: boolean;
@@ -29,20 +33,13 @@ export interface RuntimeSnapshotView {
   processes: RuntimeSnapshotProcess[];
 }
 
-export interface StreamUsageLike { input?: unknown; output?: unknown; cacheRead?: unknown; cost?: unknown }
-export interface StreamEventLike {
-  message?: { usage?: StreamUsageLike; timestamp?: number };
-  partial?: { usage?: StreamUsageLike; timestamp?: number };
-}
-
 export interface RuntimeBundleView {
   runtime: {
     snapshot: () => Promise<RuntimeSnapshotView>;
-    setPermissionMode: (mode: string) => Promise<void>;
+    setPermissionMode: (mode: PermissionMode) => Promise<void>;
     logout: () => Promise<void>;
     close: () => Promise<void>;
     getPermission: (requestId: string) => { id: string; title: string; options: Array<{ id?: string; label: string }> } | undefined;
-    sessionStore?: { read: () => unknown[]; clear: () => void };
   };
   provider: {
     auth: {
@@ -51,11 +48,11 @@ export interface RuntimeBundleView {
           signal?: AbortSignal;
           notify: (event: { message?: string; links?: Array<{ url: string }> }) => void;
           prompt: (request: { message: string; placeholder?: string }) => Promise<string>;
-        }) => Promise<unknown>;
+        }) => Promise<Record<string, unknown>>;
         refresh: (credentials: unknown) => Promise<unknown>;
       };
     };
-    streamSimple: (model: { id: string }, context: unknown, options?: unknown) => AsyncIterable<StreamEventLike>;
+    streamSimple(model: AntigravityModel, context: Context | TranscriptContext, options?: OmpStreamOptions): AsyncIterable<AssistantMessageEvent>;
   };
   isBusy: () => boolean;
 }

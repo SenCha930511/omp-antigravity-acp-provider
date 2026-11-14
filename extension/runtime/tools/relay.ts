@@ -143,7 +143,7 @@ export class ToolRelay {
       () => this.settle(record, relayError("The original tool call failed before returning a result")),
     );
     const outcome = await this.wait(Promise.race([promise, record.cancellation]), this.config.thresholdMs);
-    if (record.state === "cancelled") return record.result ?? relayError("The original tool call returned no result");
+    if (this.records.get(callId)?.state === "cancelled") return record.result ?? relayError("The original tool call returned no result");
     if (outcome.timedOut) {
       if (record.state === "pending") record.state = "relayed";
       return relayNoticeResult(callId);
@@ -161,7 +161,7 @@ export class ToolRelay {
       return record.result ?? relayError("The original tool call has no result");
     }
     const outcome = await this.wait(Promise.race([record.promise, record.cancellation]), this.config.thresholdMs);
-    if (record.state === "cancelled") return record.result ?? relayError("The original tool call returned no result");
+    if (this.records.get(callId)?.state === "cancelled") return record.result ?? relayError("The original tool call returned no result");
     if (outcome.timedOut) {
       if (record.state === "pending") record.state = "relayed";
       return relayNoticeResult(callId);

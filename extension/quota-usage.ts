@@ -199,7 +199,8 @@ export function createQuotaUsageProvider(options: {
       let shared = inFlight;
       if (!shared) {
         const controller = new AbortController();
-        const load = (async () => {
+        let load: Promise<QuotaUsageReport | null> | undefined;
+        load = (async () => {
           try {
             const snapshot = await options.loadSnapshot(controller.signal);
             if (!snapshot || controller.signal.aborted) return null;

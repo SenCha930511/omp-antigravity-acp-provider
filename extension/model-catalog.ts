@@ -19,7 +19,7 @@ export interface PublicCatalogModel {
   contextWindow: number;
   maxTokens: number;
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-  thinkingLevelMap?: Record<string, string | null>;
+  thinkingLevelMap?: Partial<Record<string, string | null>>;
   thinking?: { mode: "effort"; efforts: string[]; defaultLevel?: string };
 }
 const ROUTE_PREFIX = "__omp_acp_thought__:";

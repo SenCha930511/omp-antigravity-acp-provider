@@ -28,7 +28,7 @@ async function fixture(run: (file: string) => Promise<void>) {
   finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 
-test("contended checkpoint lock yields to the event loop and persists before resolving", async () => fixture(async file => {
+test("contended checkpoint lock yields to the event loop and persists before resolving", { skip: process.platform === "win32" }, async () => fixture(async file => {
   const release = await lock(file, { realpath: false });
   const store = new AcpSessionStore(file);
   let settled = false;

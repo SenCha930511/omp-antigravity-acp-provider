@@ -110,9 +110,10 @@ test("plan spawning verifies the wrapper bytes before naming the spawned path", 
 
   const executable = wrapperFixture();
   const fresh = wrapperPlan(executable);
-  fs.chmodSync(executable, 0o644);
-  assert.throws(() => resolveLaunchTarget(fresh), /not executable/);
-
+  if (process.platform !== "win32") {
+    fs.chmodSync(executable, 0o644);
+    assert.throws(() => resolveLaunchTarget(fresh), /not executable/);
+  }
   fs.rmSync(executable, { force: true });
   assert.throws(() => resolveLaunchTarget(fresh), /missing/);
 });
@@ -131,7 +132,7 @@ test("a plan without a spawn target fails closed", () => {
   assert.throws(() => resolveLaunchTarget(pending), /No ACP runtime is installed/);
 });
 
-test("repeated selection repairs lost execute bits on an identical wrapper", () => {
+test("repeated selection repairs lost execute bits on an identical wrapper", { skip: process.platform === "win32" }, () => {
   const wrapper = wrapperFixture();
   const script = fs.readFileSync(wrapper, "utf8");
   const plan = wrapperPlan(wrapper);

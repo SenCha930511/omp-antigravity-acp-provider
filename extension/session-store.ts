@@ -172,15 +172,15 @@ export class AcpSessionStore {
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) throw new Error("Invalid ACP session registry; refusing to overwrite it");
-    const valid = (record: any): record is SavedSessionRecord => Boolean(record) && typeof record === "object" &&
-      ["piSessionId", "acpSessionId", "acpModelId", "cwd", "historyFingerprint"].every(key => typeof record[key] === "string") &&
-      Number.isSafeInteger(record.messageCount) && record.messageCount >= 0 && Number.isFinite(record.lastActive) &&
-      (record.expectedAssistantFingerprint === undefined || typeof record.expectedAssistantFingerprint === "string") &&
+    const valid = (record: unknown): record is SavedSessionRecord => record !== null && typeof record === "object" &&
+      ["piSessionId", "acpSessionId", "acpModelId", "cwd", "historyFingerprint"].every(key => typeof Reflect.get(record, key) === "string") &&
+      Number.isSafeInteger(Reflect.get(record, "messageCount")) && Number(Reflect.get(record, "messageCount")) >= 0 && Number.isFinite(Reflect.get(record, "lastActive")) &&
+      (Reflect.get(record, "expectedAssistantFingerprint") === undefined || typeof Reflect.get(record, "expectedAssistantFingerprint") === "string") &&
       ["ompExpectedAssistantNormalized", "ompInstructionsFingerprint", "ompConversationFingerprint"].every(key =>
-        record[key] === undefined || typeof record[key] === "string") &&
-      (record.ompCheckpointVersion === undefined || record.ompCheckpointVersion === 1) &&
+        Reflect.get(record, key) === undefined || typeof Reflect.get(record, key) === "string") &&
+      (Reflect.get(record, "ompCheckpointVersion") === undefined || Reflect.get(record, "ompCheckpointVersion") === 1) &&
       ["ompInFlight", "ompExpectedAssistantHasOutput", "ompCancelledCheckpoint", "ompCancelledHadOutput"].every(key =>
-        record[key] === undefined || typeof record[key] === "boolean");
+        Reflect.get(record, key) === undefined || typeof Reflect.get(record, key) === "boolean");
     if (!parsed.every(valid)) throw new Error("Invalid or unsupported ACP session registry record; refusing to overwrite it");
     return parsed;
   }

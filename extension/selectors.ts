@@ -3,19 +3,20 @@ import { parseThoughtRoute, splitLegacyEffort, validId, type AdvertisedModel } f
 export interface ConfigOptionChoice {
   value?: unknown;
   name?: unknown;
-  options?: ConfigOptionChoice[];
+  options?: ReadonlyArray<ConfigOptionChoice> | null;
 }
 
 export interface ConfigOption {
   id: string;
-  type?: string;
-  category?: string;
-  currentValue?: string;
-  options?: ConfigOptionChoice[];
+  type?: string | null;
+  category?: string | null;
+  description?: string | null;
+  currentValue?: string | boolean | null;
+  options?: ReadonlyArray<ConfigOptionChoice> | null;
 }
 
 export interface SelectorState {
-  configOptions?: ConfigOption[] | null;
+  configOptions?: ReadonlyArray<ConfigOption> | null;
 }
 
 export function selector(state: SelectorState | undefined, category: "model" | "thought_level"): ConfigOption | undefined {
@@ -33,7 +34,7 @@ export function advertisedRecord(state: SelectorState | undefined, modelId: stri
   const thought = selector(state, "thought_level");
   return {
     modelId, name, selector: true,
-    ...(thought ? { thoughtLevels: choices(thought).map(option => option.value), defaultThoughtLevel: thought.currentValue } : {}),
+    ...(thought ? { thoughtLevels: choices(thought).map(option => option.value), ...(typeof thought.currentValue === "string" ? { defaultThoughtLevel: thought.currentValue } : {}) } : {}),
   };
 }
 

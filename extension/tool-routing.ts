@@ -1,3 +1,5 @@
+import type { InitializeResponse } from "@agentclientprotocol/sdk";
+
 export type NativeToolMode = "prefer" | "disabled";
 
 // A main session may delegate through the pi-bridge; an ephemeral side turn
@@ -61,19 +63,29 @@ export function parseNativeToolMode(value: unknown): NativeToolMode {
 const OFFICIAL_AGENT_NAMES = new Set(["antigravity-acp", "Antigravity ACP Server"]);
 
 export interface InitializeMetadata {
-  agentInfo?: { name?: string; version?: string };
+  protocolVersion?: number;
+  agentInfo?: { name?: string | null; version?: string | null; title?: string | null; _meta?: Record<string, unknown> | null } | null;
+  authMethods?: ReadonlyArray<{ id?: string | null; name?: string | null; description?: string | null; _meta?: Record<string, unknown> | null }> | null;
   agentCapabilities?: {
+    loadSession?: boolean;
     mcpCapabilities?: {
-      http?: boolean;
+      http?: boolean | null;
+      sse?: boolean | null;
+      acp?: boolean | null;
+      _meta?: Record<string, unknown> | null;
       [key: string]: unknown;
-    };
-    _meta?: {
-      antigravity?: {
-        systemPrompt?: { append?: boolean };
-      };
-    };
+    } | null;
+    promptCapabilities?: {
+      image?: boolean | null;
+      audio?: boolean | null;
+      embeddedContext?: boolean | null;
+      _meta?: Record<string, unknown> | null;
+      [key: string]: unknown;
+    } | null;
+    _meta?: Record<string, unknown> | null;
     [key: string]: unknown;
-  };
+  } | null;
+  _meta?: Record<string, unknown> | null;
 }
 
 export interface SessionRpcRequest {
@@ -100,8 +112,11 @@ function isOfficialAgentAtLeast(initialize: InitializeMetadata | undefined, mino
 }
 
 export function supportsSessionRouting(initialize: InitializeMetadata | undefined): boolean {
-  return isOfficialAgentAtLeast(initialize, 4, 1) &&
-    initialize?.agentCapabilities?._meta?.antigravity?.systemPrompt?.append === true;
+  if (!isOfficialAgentAtLeast(initialize, 4, 1)) return false;
+  const meta = initialize?.agentCapabilities?._meta;
+  const antigravity = meta && typeof meta === "object" ? Reflect.get(meta, "antigravity") : undefined;
+  const systemPrompt = antigravity && typeof antigravity === "object" ? Reflect.get(antigravity, "systemPrompt") : undefined;
+  return Boolean(systemPrompt && typeof systemPrompt === "object" && Reflect.get(systemPrompt, "append") === true);
 }
 
 // The runtime only starts the pi-bridge when the agent advertises HTTP MCP.
@@ -149,7 +164,9 @@ export function sessionSystemAppend(
   ].filter(Boolean).join("\n\n");
 }
 
-export function normalizeInitializeResponse<T extends InitializeMetadata>(initialize: T): T {
+export function normalizeInitializeResponse(initialize: InitializeResponse): InitializeResponse;
+export function normalizeInitializeResponse(initialize: InitializeMetadata): InitializeMetadata;
+export function normalizeInitializeResponse(initialize: InitializeMetadata): InitializeMetadata {
   if (!isOfficialAgentAtLeast(initialize, 5, 3) || initialize.agentCapabilities?.mcpCapabilities?.http !== undefined) {
     return initialize;
   }

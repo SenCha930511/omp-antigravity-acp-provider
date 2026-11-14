@@ -1,4 +1,5 @@
 import type { AcpModelInfo } from "./acp/session-state.ts";
+import type { ContextOptions } from "../context-settings.ts";
 import type {
 	Model,
 	ThinkingLevel,
@@ -8,11 +9,17 @@ import type {
 export const PROVIDER_ID = "antigravity-acp";
 export const API_ID = "antigravity-acp";
 
+export interface AntigravityModel extends Omit<Model<typeof API_ID>, "baseUrl" | "input" | "compat"> {
+	baseUrl?: string;
+	input: readonly string[];
+	ompContextPolicy?: ContextOptions;
+}
+
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 type Effort = "low" | "medium" | "high";
 type Variants = Partial<Record<Effort, string>>;
 
-export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
+export const FALLBACK_MODELS: readonly (Model<typeof API_ID> & { provider: typeof PROVIDER_ID })[] = [
 	reasoningModel("gemini-3.8-flash", "Gemini 3.8 Flash", {
 		low: "gemini-3.8-flash-low",
 		medium: "gemini-3.8-flash-medium",
@@ -37,7 +44,7 @@ export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
 /** Collapse Antigravity's effort-qualified ACP IDs into one Pi model. The
  * exact server IDs live in thinkingLevelMap, allowing Shift+Tab to select the
  * corresponding low/medium/high variant without cluttering /model. */
-export function projectModels(models: readonly AcpModelInfo[]): Model<typeof API_ID>[] {
+export function projectModels(models: readonly AcpModelInfo[]): (Model<typeof API_ID> & { provider: typeof PROVIDER_ID })[] {
 	const safe = models.filter((candidate) => validModelId(candidate.modelId.trim()));
 	const groups = new Map<
 		string,
@@ -57,7 +64,7 @@ export function projectModels(models: readonly AcpModelInfo[]): Model<typeof API
 
 	const emittedGroups = new Set<string>();
 	const emittedIds = new Set<string>();
-	const projected: Model<typeof API_ID>[] = [];
+	const projected: (Model<typeof API_ID> & { provider: typeof PROVIDER_ID })[] = [];
 	for (const candidate of safe) {
 		const id = candidate.modelId.trim();
 		if (emittedIds.has(id)) continue;
@@ -88,8 +95,8 @@ export function projectModels(models: readonly AcpModelInfo[]): Model<typeof API
 /** Resolve Pi's current reasoning level to the exact model ID advertised by
  * Antigravity. Unsupported programmatic levels clamp to the nearest tier. */
 export function resolveAcpModelId(
-	model: Model<typeof API_ID>,
-	reasoning: ThinkingLevel | undefined,
+	model: Pick<Model<typeof API_ID>, "id" | "reasoning" | "thinkingLevelMap">,
+	reasoning: ThinkingLevel | string | undefined,
 ): string {
 	const map = model.thinkingLevelMap;
 	if (!model.reasoning || !map) return model.id;
@@ -116,7 +123,7 @@ function reasoningModel(
 	id: string,
 	name: string,
 	variants: Variants,
-): Model<typeof API_ID> {
+): Model<typeof API_ID> & { provider: typeof PROVIDER_ID } {
 	const thinkingLevelMap: ThinkingLevelMap = {
 		off: null,
 		minimal: null,
@@ -129,7 +136,7 @@ function reasoningModel(
 	return baseModel(id, name, true, thinkingLevelMap);
 }
 
-function fixedModel(id: string, name: string): Model<typeof API_ID> {
+function fixedModel(id: string, name: string): Model<typeof API_ID> & { provider: typeof PROVIDER_ID } {
 	return baseModel(id, name, false);
 }
 
@@ -138,7 +145,7 @@ function baseModel(
 	name: string,
 	reasoning: boolean,
 	thinkingLevelMap?: ThinkingLevelMap,
-): Model<typeof API_ID> {
+): Model<typeof API_ID> & { provider: typeof PROVIDER_ID } {
 	return {
 		id,
 		name,

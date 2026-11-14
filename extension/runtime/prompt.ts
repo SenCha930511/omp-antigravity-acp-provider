@@ -694,10 +694,19 @@ export function buildPromptParts(context: TransferContext, fresh: boolean, unsee
   // catalog-store attaches ompContextPolicy to discovered models; re-resolution
   // is only needed for partial input in tests and standalone callers.
   const policy = limits.policy;
+  const fallbackWindow = policy?.contextWindow ?? limits.contextWindow ?? 32_768;
+  const fallbackMaxTokens = policy?.maxTokens ?? limits.maxTokens ?? 8192;
   const options: ResolvedContextOptions = policy &&
       typeof policy.inputTokenBudget === "number" && typeof policy.maxTransferBytes === "number" && typeof policy.maxImageBytes === "number"
-    ? policy
-    : resolveContextOptions({ id: "transfer", contextWindow: limits.contextWindow ?? 32_768, maxTokens: limits.maxTokens ?? 8192 },
+    ? {
+      contextWindow: fallbackWindow,
+      maxTokens: fallbackMaxTokens,
+      reserveTokens: policy.reserveTokens ?? Math.min(16_384, Math.floor(fallbackWindow * 0.05)),
+      inputTokenBudget: policy.inputTokenBudget,
+      maxTransferBytes: policy.maxTransferBytes,
+      maxImageBytes: policy.maxImageBytes,
+    }
+    : resolveContextOptions({ id: "transfer", contextWindow: fallbackWindow, maxTokens: fallbackMaxTokens },
       { defaults: limits.policy ?? {}, models: {} });
   // Ordinary callers keep the main wording; only a shadow side turn selects
   // the ephemeral variant that prohibits every tool call.
