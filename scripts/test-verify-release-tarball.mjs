@@ -18,7 +18,7 @@ function fixture(t) {
   fs.mkdirSync(packageRoot, { recursive: true });
   fs.writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify({ name, version, gitHead: head }, null, 2)}\n`);
   const tarball = path.join(root, `${name}-${version}.tgz`);
-  execFileSync("tar", ["-czf", tarball, "-C", root, "package"], { stdio: "pipe" });
+  execFileSync("tar", ["-czf", path.basename(tarball), "-C", ".", "package"], { cwd: root, stdio: "pipe" });
   return { root, tarball };
 }
 

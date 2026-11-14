@@ -56,7 +56,8 @@ function findTarball(directory) {
 }
 
 function readPackageMetadata(tarball) {
-  const raw = execFileSync("tar", ["-xOf", tarball, "package/package.json"], {
+  const raw = execFileSync("tar", ["-xOf", path.basename(tarball), "package/package.json"], {
+    cwd: path.dirname(tarball),
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
   });
