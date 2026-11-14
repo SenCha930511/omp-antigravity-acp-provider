@@ -20,6 +20,7 @@ const bin = path.join(work, "bin");
 fs.mkdirSync(bin, { recursive: true });
 
 const platform = process.platform;
+const managedArgs = platform === "linux" ? ["--uid="] : [];
 const managedRoot = path.join(home, ".local", "opt", "agy-acp", "current");
 function managedBinary(): string {
   return path.join(managedRoot, "agy_acp_server.par");
@@ -78,8 +79,8 @@ try {
       },
     });
     assert.equal(installs, 1, "a fresh managed-auto plan must install once");
-    assert.deepEqual(prepared.target, { kind: "direct", value: { command: managedBinary(), args: [] } });
-    assert.deepEqual(prepared.quota, { kind: "acp", value: { command: managedBinary(), args: [] } });
+    assert.deepEqual(prepared.target, { kind: "direct", value: { command: managedBinary(), args: managedArgs } });
+    assert.deepEqual(prepared.quota, { kind: "acp", value: { command: managedBinary(), args: managedArgs } });
     assert.equal(env.AGY_ACP_BIN, undefined, "plan resolution must not write AGY_ACP_BIN");
   }
 
@@ -104,7 +105,7 @@ try {
       },
     });
     assert.equal(installs, 1, "a stale wrapper must not suppress the managed install");
-    assert.deepEqual(prepared.target, { kind: "direct", value: { command: managedBinary(), args: [] } });
+    assert.deepEqual(prepared.target, { kind: "direct", value: { command: managedBinary(), args: managedArgs } });
     assert.equal(env.AGY_ACP_BIN, wrapper, "the caller's environment must stay untouched");
   }
 
@@ -146,7 +147,7 @@ try {
       const after = await resolveRuntimeLaunchPlan(stateDir, { env: emptyPathEnv({ AGY_ACP_BIN: wrapper }), home, platform });
       assert.equal(after.source, "managed");
       assert.equal(after.installManaged, true);
-      assert.deepEqual(after.target, { kind: "direct", value: { command: managedBinary(), args: [] } });
+      assert.deepEqual(after.target, { kind: "direct", value: { command: managedBinary(), args: managedArgs } });
     } finally {
       if (previous === undefined) delete process.env.AGY_ACP_BIN;
       else process.env.AGY_ACP_BIN = previous;
