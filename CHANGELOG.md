@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.2.1 — 2026-11-14
+## 0.2.2 — 2026-11-14
 
+- Publish the exact packed tarball through a filesystem path so npm does not parse the tarball name as a GitHub shorthand. The v0.2.1 tag was created but the release failed before publication; 0.2.2 is the first published 0.2.x release.
 - Add an offline Gemini 4 Hydrogen catalog including `xhigh`, conservative known limits for advertised Claude/GPT-OSS models and partner-model fallbacks. An uncached first inference can discover the real server catalog, while offline/cached listing remains usable without starting ACP. Metadata adaptation: `@notmaddock` and `@00lllooolll00`.
 - Preserve warm ACP sessions only across proven oldest-image evictions, retaining bounded image positions and digests without keeping image bytes. Bound every hidden history/request seed to 60 seconds, require an exact `OK`, and reject tool or permission attempts before the adapter dispatches bridged work; unsafe partial sessions are rebuilt. Adapted from `@ldfhhc`.
 - Add read-only session SQLite accounting with `bun:sqlite` preferred on Bun and `node:sqlite` as fallback. Native response usage wins, per-session cursors and bounded WAL retries replace completed-step accounting only when no supplemental `/usage` query is running, and `OMP_ACP_USAGE=off` disables supplemental query and database accounting together. Adapted from `@00lllooolll00`.
