@@ -27,7 +27,7 @@ test("debug defaults off, persists independently, and survives native-tool mode 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-debug-policy-"));
   const file = path.join(root, "omp-tools.json");
   try {
-    assert.deepEqual(loadToolPolicy(file), { nativeTools: "prefer", debugToolUpdates: false });
+    assert.deepEqual(loadToolPolicy(file), { nativeTools: "disabled", debugToolUpdates: false });
     fs.writeFileSync(file, '{"nativeTools":"disabled"}');
     assert.equal(loadToolPolicy(file).debugToolUpdates, false);
     saveDebugToolUpdates(file, true);

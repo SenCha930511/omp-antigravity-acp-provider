@@ -68,7 +68,7 @@ test("command settings default and update without dropping unset fields", () => 
   const file = path.join(directory, "config.json");
   try {
     const defaults = loadAdapterConfig(file);
-    assert.equal(defaults.nativeTools, "prefer");
+    assert.equal(defaults.nativeTools, "disabled");
     assert.equal(defaults.debugToolUpdates, false);
     assert.equal(defaults.usageMode, "off");
     assert.equal(defaults.diagnostics, false);

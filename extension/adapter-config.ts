@@ -31,7 +31,7 @@ const DEFAULTS: AdapterConfig = {
   permissions: "follow",
   runtimeUpdates: "automatic",
   runtimeSource: "auto",
-  nativeTools: "prefer",
+  nativeTools: "disabled",
   debugToolUpdates: false,
   usageMode: "off",
   diagnostics: false,

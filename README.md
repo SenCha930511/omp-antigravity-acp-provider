@@ -20,7 +20,7 @@ This is an independent adaptation, **NOT** an official Google or OMP integration
 - CLI-first selection. When a usable `agy` CLI is on `PATH`, the adapter launches it through a generated `AGY_ACP_BIN` wrapper. The managed runtime is the fallback. An explicit `AGY_ACP_BIN` always wins.
 - Per-model thinking levels, exposed only when the server confirms them. The offline catalog includes Gemini 4 Hydrogen through `xhigh` and known partner models; the first inference after an empty cache attempts real server discovery.
 - OMP tools through an authenticated loopback MCP bridge.
-- Optional `disabled` native-tool mode for strict OMP-only sessions.
+- ACP-native tools are disabled by default for strict OMP-only sessions; `/antigravity-acp native-tools prefer` restores them.
 - Standby ACP initialization coordinated with discovery, plus warm session reuse and guarded oldest-image history continuity.
 - `/login` plus `/antigravity-acp` account, usage and cleanup commands.
 - API-equivalent cost estimates from a model-ID rate table, not subscription billing. Native response usage takes precedence, with a read-only SQLite fallback for completed model steps when no supplemental usage query runs.
@@ -123,7 +123,7 @@ To remove the installed plugin, use `omp plugin uninstall omp-antigravity-acp-pr
 | No models after `/antigravity-acp refresh` | Run `/antigravity-acp account` to confirm both sides are signed in, then retry with internet access. ACP can advertise fewer models than the Antigravity app. |
 | Two Antigravity providers appear | Remove the older adapter (`antigravity-acp-omp`, the upstream Pi extension, or a duplicate npm install), then restart OMP. |
 | Login opens the wrong Google account | Both login paths always start a fresh sign-in. Choose the intended account (or "Use another account") on Google's consent screen. |
-| `disabled` native-tool mode rejects the session | The official runtime must advertise system-append support (1.4.1+). Upgrade the runtime or run `/antigravity-acp native-tools prefer`. |
+| Default `disabled` native-tool mode rejects the session | The official runtime must advertise system-append support (1.4.1+). Upgrade the runtime or run `/antigravity-acp native-tools prefer`. |
 | The first request is slow | Runtime download and cold ACP start happen once; later turns reuse the warm session. |
 | A tool call returns a relay notice | The model should call `pi_omp_await_result` with the notice's `call_id`. Lower `OMP_ACP_TOOL_RELAY_MS` or set it to `0` to disable relay. |
 
@@ -137,7 +137,7 @@ Google ships the same ACP server through two channels. The adapter chooses one a
 
 - **`agy` CLI.** Preferred whenever `agy` or `agy.exe` is on `PATH` and `agy acp --version` returns a semantic version. The adapter writes `agy-acp-cli.sh` or `agy-acp-cli.cmd` and points `AGY_ACP_BIN` at that wrapper.
 - **Managed runtime.** The registry-signed release in `~/.local/opt/agy-acp/`. It is the fallback when the CLI is missing or unusable.
-  The bundled signed manifest may select 1.3.0 until Google's newer release is approved. System-append routing and `native-tools disabled` require 1.4.1 or newer.
+  The bundled signed manifest may select 1.3.0 until Google's newer release is approved. System-append routing and the default `native-tools disabled` require 1.4.1 or newer; on 1.3.0, upgrade or run `/antigravity-acp native-tools prefer`.
 
 Selection order:
 
@@ -165,14 +165,14 @@ Create or edit `~/.omp/agent/antigravity-acp-provider/config.json`:
 {
   "permissions": "follow",
   "runtimeSource": "auto",
-  "nativeTools": "prefer",
+  "nativeTools": "disabled",
   "debugToolUpdates": false,
   "usageMode": "off",
   "diagnostics": false
 }
 ```
 
-`permissions` accepts `default`, `auto_edit`, `yolo`, or `follow`. `runtimeSource` accepts `auto`, `cli`, or `managed`. `nativeTools` accepts `prefer` or `disabled`. `usageMode` accepts `auto` or `off`. `debugToolUpdates` and `diagnostics` are config-only booleans. Missing fields use these defaults: `permissions: "follow"`, `runtimeSource: "auto"`, `nativeTools: "prefer"`, `debugToolUpdates: false`, `usageMode: "off"`, and `diagnostics: false`. `follow` reads OMP's effective approval mode at plugin startup: OMP CLI `--approval-mode` and `--auto-approve` take precedence, then the project `.omp` override, then the active agent config. It maps `yolo` to `yolo`, `write` to `auto_edit`, and both ask modes to `default`. Restart OMP after changing OMP's approval mode so the ACP process is recreated with the matching auto-approval policy. Slash commands write the command-backed fields and keep the legacy setting files in sync. Context budgets remain in `context.json`; cleanup policy remains in `cleanup.json`.
+`permissions` accepts `default`, `auto_edit`, `yolo`, or `follow`. `runtimeSource` accepts `auto`, `cli`, or `managed`. `nativeTools` accepts `prefer` or `disabled`. `usageMode` accepts `auto` or `off`. `debugToolUpdates` and `diagnostics` are config-only booleans. Missing fields use these defaults: `permissions: "follow"`, `runtimeSource: "auto"`, `nativeTools: "disabled"`, `debugToolUpdates: false`, `usageMode: "off"`, and `diagnostics: false`. `follow` reads OMP's effective approval mode at plugin startup: OMP CLI `--approval-mode` and `--auto-approve` take precedence, then the project `.omp` override, then the active agent config. It maps `yolo` to `yolo`, `write` to `auto_edit`, and both ask modes to `default`. Restart OMP after changing OMP's approval mode so the ACP process is recreated with the matching auto-approval policy. Slash commands write the command-backed fields and keep the legacy setting files in sync. Context budgets remain in `context.json`; cleanup policy remains in `cleanup.json`.
 
 - `auto` uses the CLI first and falls back to the managed runtime. If no usable CLI exists, it downloads the managed runtime.
 - `cli` requires a usable `agy` CLI. If the CLI is missing or unusable, the first ACP use fails and nothing is downloaded.
@@ -245,8 +245,8 @@ OMP's built-in `omp usage`, interactive `/usage`, and the statusline `usage` seg
 | `cleanup timeout [DAYS]` | Apply timeout collection, optionally with a custom idle retention in days. |
 | `cleanup balanced [DAYS]` | Apply timeout and soft-budget cleanup with recovery protection, optionally with custom idle days. |
 | `cleanup budget MAX_SESSIONS MAX_MIB` | Set soft session/byte limits; `0` disables either limit. Active and recently used sessions can remain above a soft budget. Timeout deletion loses ACP-only state but retains OMP history. |
-| `native-tools prefer` | Let OMP tools shadow matching ACP-native tools. |
-| `native-tools disabled` | Disable ACP-native built-ins for strict OMP-tool sessions while retaining MCP configuration; connections are recreated on the next request. |
+| `native-tools disabled` | Disable ACP-native built-ins for strict OMP-tool sessions while retaining MCP configuration; this is the default and requires ACP 1.4.1+. Connections are recreated on the next request. |
+| `native-tools prefer` | Retain ACP-native built-ins and let OMP tools shadow matching native tools. |
 | `permissions default` | Confirm edits and commands. |
 | `permissions follow` | Follow OMP's `tools.approvalMode`; this is the default. |
 | `permissions auto-edit` | Auto-accept edits. |

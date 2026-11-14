@@ -16,11 +16,11 @@ export function loadToolPolicy(file: string): ToolPolicy {
       throw new Error("debugToolUpdates must be boolean");
     }
     return {
-      nativeTools: parseNativeToolMode(record.nativeTools === undefined ? "prefer" : String(record.nativeTools)),
+      nativeTools: parseNativeToolMode(record.nativeTools === undefined ? "disabled" : String(record.nativeTools)),
       debugToolUpdates: record.debugToolUpdates ?? false,
     };
   } catch (error: unknown) {
-    if (isMissingFileError(error)) return { nativeTools: "prefer", debugToolUpdates: false };
+    if (isMissingFileError(error)) return { nativeTools: "disabled", debugToolUpdates: false };
     throw new Error(`Invalid OMP ACP tool policy: ${errorMessageOf(error)}`);
   }
 }

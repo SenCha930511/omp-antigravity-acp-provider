@@ -151,8 +151,8 @@ const SUBCOMMANDS: SubcommandSpec[] = [
   {
     name: "native-tools",
     description: "Native ACP tool exposure",
-    usage: "prefer|disabled",
-    values: [["prefer", "Let OMP tools shadow ACP natives (default)"], ["disabled", "Disable ACP-native tools for strict OMP-tool sessions"]],
+    usage: "disabled|prefer",
+    values: [["disabled", "Disable ACP-native tools for strict OMP-tool sessions (default)"], ["prefer", "Let OMP tools shadow ACP natives"]],
   },
   {
     name: "permissions",
@@ -395,7 +395,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
     }
 
     if (command === "native-tools") {
-      if (parts.length !== 2) throw new Error("Usage: /antigravity-acp native-tools prefer|disabled");
+      if (parts.length !== 2) throw new Error("Usage: /antigravity-acp native-tools disabled|prefer");
       const mode: NativeToolMode = parseNativeToolMode(value);
       const next = { ...deps.getToolPolicy(), nativeTools: mode };
       saveToolPolicy(deps.toolPolicyPath, next);

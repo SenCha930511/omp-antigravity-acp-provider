@@ -419,7 +419,7 @@ test("tool policy persists independently and rejects invalid data instead of wea
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-tool-policy-"));
   const file = path.join(root, "omp-tools.json");
   try {
-    assert.equal(loadNativeToolMode(file), "prefer");
+    assert.equal(loadNativeToolMode(file), "disabled");
     saveNativeToolMode(file, "disabled");
     assert.equal(loadNativeToolMode(file), "disabled");
     assert.deepEqual(fs.readdirSync(root), ["omp-tools.json"]);
