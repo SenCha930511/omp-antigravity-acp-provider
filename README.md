@@ -268,7 +268,7 @@ Inference and `/antigravity-acp refresh` refuse to start ACP when no local Googl
 
 ## Long tools and relay
 
-A tool call that outlives `OMP_ACP_TOOL_RELAY_MS` (default 85000, `0` disables, otherwise 5000 through 165000) returns a relay notice instead of holding the MCP request open. The model calls `pi_omp_await_result` with the notice's `call_id`; the adapter returns the same original result, not a second execution. The control tool is a separate MCP server and is not added to OMP's tool list. If the ACP turn ends before the result arrives, the adapter retries the same result in a fresh ACP turn; it never delivers a stale result to a new writer.
+A tool call that outlives `OMP_ACP_TOOL_RELAY_MS` (default 85000, `0` disables, otherwise 5000 through 165000) returns a relay notice instead of holding the MCP request open. The model calls `pi_omp_await_result` with the notice's `call_id`; the adapter returns the same original result, not a second execution. The control tool is a separate MCP server and is not added to OMP's tool list. If the ACP turn ends before the result arrives, the adapter retries the same result in a fresh ACP turn; it never delivers a stale result to a new writer. If the model never calls the control tool, the next OMP turn carries the completed result as history or a bounded `<tool_result>` envelope; the adapter never re-executes the tool.
 
 Permission requests are correlated by session, turn and `toolCallId` with structured `mcpServerName`/`mcpToolName` metadata. A conflicting update, a previous-turn id, or a permission-before-update that claims MCP identity is rejected with `reject_once` when available, otherwise `cancelled`. Normal requests still go through OMP's human review.
 
