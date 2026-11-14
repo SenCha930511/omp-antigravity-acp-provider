@@ -948,6 +948,9 @@ export class AntigravityRuntime {
 				binding.writer = writer;
 				const continuationTurn = binding.turnCompletion; await this.noteContinuationInstructions(binding, context); if (!continuationTurn || binding.turnCompletion !== continuationTurn || binding.abortRequested || options.signal?.aborted || !binding.connection.process.alive) throw abortError();
 				if (!undelivered) {
+					binding.ompUnabsorbedToolBoundary = false;
+					binding.ompUnabsorbedToolBoundaryFingerprint = undefined;
+					binding.ompUnabsorbedToolBoundaryNormalized = undefined;
 					binding.pendingContextCount = context.messages.length;
 					binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
 					binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
