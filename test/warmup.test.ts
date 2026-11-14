@@ -9,6 +9,7 @@ import type { TestContext } from "node:test";
 import { registerOmpAdapter } from "../extension/index.ts";
 import { keychain, secretService } from "../extension/auth-sync.ts";
 import type { TierConnection } from "../extension/runtime.mjs";
+const realSetTimeout = globalThis.setTimeout;
 
 const MODEL_ID = "gemini-3.8-flash";
 const QUOTA_TEXT = [
@@ -47,6 +48,7 @@ async function driveToSettlement(context: TestContext, pending: Promise<unknown>
     }
     context.mock.timers.tick(2_000);
     await new Promise<void>(resolve => setImmediate(resolve));
+    await new Promise<void>(resolve => realSetTimeout(resolve, 1));
   }
   throw new Error(`no settlement for ${label} after bounded fake-clock advance`);
 }
