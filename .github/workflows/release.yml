@@ -86,7 +86,12 @@ jobs:
             DIST_TAG=backfill
             echo "$NAME@$VERSION is older than the current latest $LATEST; publishing under the backfill dist-tag."
           fi
-          npm publish "$TARBALL" --access public --provenance --tag "$DIST_TAG"
+          PUBLISH_TARGET="$TARBALL"
+          case "$PUBLISH_TARGET" in
+            /*|./*|../*) ;;
+            *) PUBLISH_TARGET="./$PUBLISH_TARGET" ;;
+          esac
+          npm publish "$PUBLISH_TARGET" --access public --provenance --tag "$DIST_TAG"
 
   github-release:
     name: github-release
@@ -176,3 +181,32 @@ jobs:
               exit 1
               ;;
           esac
+
+  verify-marketplace:
+    name: verify-marketplace
+    needs: github-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up toolchain
+        uses: ./.github/actions/setup-toolchain
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare isolated home
+        run: mkdir -p "$RUNNER_TEMP/omp-home"
+
+      - name: Verify marketplace installation
+        env:
+          HOME: ${{ runner.temp }}/omp-home
+          USERPROFILE: ${{ runner.temp }}/omp-home
+        run: npm run test:marketplace

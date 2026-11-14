@@ -22,8 +22,8 @@ function fixture(t) {
   return { root, tarball };
 }
 
-function invoke(args) {
-  const result = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8" });
+function invoke(args, options = {}) {
+  const result = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", ...options });
   assert.equal(result.error, undefined);
   return result;
 }
@@ -35,6 +35,21 @@ test("accepts a matching tarball and writes GitHub env", (t) => {
   assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
   assert.match(result.stdout, /Verified omp-antigravity-acp-provider@1\.2\.3/);
   assert.equal(fs.readFileSync(env, "utf8"), `TARBALL=${tarball}\nNAME=${name}\nVERSION=${version}\n`);
+});
+
+test("resolves relative --directory when writing TARBALL to GitHub env", (t) => {
+  const { root, tarball } = fixture(t);
+  const realRoot = fs.realpathSync(root);
+  const env = path.join(realRoot, "github-env");
+  const result = invoke(
+    ["--directory", path.basename(realRoot), "--tag", `v${version}`, "--head", head, "--github-env", env],
+    { cwd: path.dirname(realRoot) },
+  );
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.equal(
+    fs.readFileSync(env, "utf8"),
+    `TARBALL=${path.join(realRoot, path.basename(tarball))}\nNAME=${name}\nVERSION=${version}\n`,
+  );
 });
 
 test("rejects a tag mismatch", (t) => {

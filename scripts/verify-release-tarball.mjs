@@ -52,7 +52,7 @@ function findTarball(directory) {
   if (entries.length !== 1) {
     throw new Error(`expected exactly one .tgz in ${directory}, found ${entries.length}`);
   }
-  return path.join(directory, entries[0]);
+  return path.resolve(directory, entries[0]);
 }
 
 function readPackageMetadata(tarball) {

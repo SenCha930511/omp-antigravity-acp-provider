@@ -78,7 +78,7 @@ Or install the published npm package directly:
 omp plugin install npm:omp-antigravity-acp-provider
 ```
 
-To pin this version, use `omp plugin install npm:omp-antigravity-acp-provider@0.2.3`.
+To pin this version, use `omp plugin install npm:omp-antigravity-acp-provider@0.2.4`.
 
 Do not install both. Remove or disable any older Antigravity ACP adapter first.
 

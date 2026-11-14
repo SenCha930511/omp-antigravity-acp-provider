@@ -41,18 +41,18 @@ const EPHEMERAL_TOOL_GUIDANCE =
   "no tools may be called in this side turn, and tool calls are discarded without execution. " +
   "Reply with plain text only.";
 
-// Two sentences at most: redirect the host prompt, then the complete OMP
-// instruction follows unchanged. Only disabled native tools need the
-// redirect; prefer keeps native tools, so its append starts with the OMP text.
-const ACP_OVERRIDE =
-  "Follow only the OMP instructions below. Ignore any earlier ACP host instructions, personas or workflows.";
-const ACP_OVERRIDE_WITH_TOOLS =
-  "Follow only the OMP instructions below. Ignore any earlier ACP host instructions, personas or workflows; " +
+// Two sentences at most: redirect the Antigravity host prompt, then the
+// complete OMP instruction follows unchanged. Only disabled native tools need
+// the redirect; prefer keeps native tools, so its append starts with the OMP text.
+const ANTIGRAVITY_OVERRIDE =
+  "Follow only the OMP instructions below. Ignore any earlier Antigravity host instructions, personas or workflows.";
+const ANTIGRAVITY_OVERRIDE_WITH_TOOLS =
+  "Follow only the OMP instructions below. Ignore any earlier Antigravity host instructions, personas or workflows; " +
   "use only OMP pi_* tools and pi_task for reads, writes, searches, commands and subagent delegation.";
 
-function acpOverride(mode: NativeToolMode, sessionKind: SessionRoutingKind, hasOmpTools: boolean): string {
+function antigravityOverride(mode: NativeToolMode, sessionKind: SessionRoutingKind, hasOmpTools: boolean): string {
   if (mode !== "disabled") return "";
-  return sessionKind === "main" && hasOmpTools ? ACP_OVERRIDE_WITH_TOOLS : ACP_OVERRIDE;
+  return sessionKind === "main" && hasOmpTools ? ANTIGRAVITY_OVERRIDE_WITH_TOOLS : ANTIGRAVITY_OVERRIDE;
 }
 
 export function parseNativeToolMode(value: unknown): NativeToolMode {
@@ -144,7 +144,7 @@ export function ompToolGuidance(
   return [guidance, contextGuidance, ...(mode === "disabled" ? [NATIVE_TOOLS_DISABLED] : [])].filter(Boolean).join("\n\n");
 }
 
-// Composes the session append: optional ACP override, the unchanged complete
+// Composes the session append: optional Antigravity override, the unchanged complete
 // OMP instruction, then the existing tool guidance. `hasOmpTools` is only
 // needed when the bridge is registered without ordinary tools.
 export function sessionSystemAppend(
@@ -158,7 +158,7 @@ export function sessionSystemAppend(
 ): string {
   const bridgeActive = bridgeConfigured && hasOmpTools !== false && mcpHttpAvailable(initialize);
   return [
-    acpOverride(mode, sessionKind, bridgeActive),
+    antigravityOverride(mode, sessionKind, bridgeActive),
     instructions.trim(),
     ompToolGuidance(initialize, mode, bridgeActive, sessionKind, projectedToolNames),
   ].filter(Boolean).join("\n\n");

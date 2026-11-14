@@ -12,6 +12,11 @@ on:
         required: false
         default: npm-tarball
         type: string
+      verify_marketplace:
+        description: Verify marketplace installation from npm (requires the tag version to be published)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -61,6 +66,7 @@ jobs:
         run: npm run check
 
       - name: Run marketplace verification
+        if: ${{ inputs.verify_marketplace }}
         env:
           HOME: ${{ runner.temp }}/omp-home
           USERPROFILE: ${{ runner.temp }}/omp-home
