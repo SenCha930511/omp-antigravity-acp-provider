@@ -95,12 +95,4 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/omp-home
           USERPROFILE: ${{ runner.temp }}/omp-home
-        run: |
-          npm run typecheck
-          npm run check:versions
-          node --test scripts/test-check-release-versions.mjs
-          node --test scripts/test-bump-release.mjs
-          npm run build
-          node scripts/test.mjs
-          node scripts/test-with-managed-context.mjs
-          node scripts/test-packed.mjs
+        run: npm run check:portable

@@ -297,7 +297,7 @@ Detailed behavior, advanced settings and limitations: [docs/](docs/) and [CHANGE
 
 For a prepared release, first update `CHANGELOG.md`, then run `npm run release:bump -- X.Y.Z`. The helper updates all six supported version declarations and runs the version consistency checker; it does not commit, tag, push or publish. `npm run check:versions` verifies the current metadata, and `node scripts/check-release-versions.mjs --release --tag vX.Y.Z` additionally checks the tag and changelog heading.
 
-The `Release` workflow runs only for pushed `v*` tags. It reruns the offline check, validates the packed tarball against the tag and commit, then uses npm trusted publishing with provenance before creating or reusing the GitHub release. The tag run is the only publishing path; do not publish from a local checkout.
+The `Release` workflow runs only for pushed `v*` tags. It reruns the offline check and marketplace check, validates the packed tarball against the tag and commit, then uses npm trusted publishing with provenance before creating or reusing the GitHub release. The tag run is the only publishing path; do not publish from a local checkout. A separate `Release dry run` workflow can verify an existing tag without publishing.
 
 ## Contributors
 
