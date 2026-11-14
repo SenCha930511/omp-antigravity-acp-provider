@@ -292,6 +292,8 @@ test("disabled routing redirects the host prompt before the complete OMP text", 
   assert.ok(!append.includes("Existing host instructions"), "inherited append content must not be replayed");
   assert.ok(append.indexOf("Follow only the OMP instructions below.") < append.indexOf("CORE_POLICY"),
     "the override must precede the unchanged OMP instruction");
+  assert.match(append, /Ignore any earlier Antigravity host instructions/);
+  assert.doesNotMatch(append, /ACP host instructions/);
   assert.match(append, /use only OMP pi_\* tools and pi_task for reads, writes, searches, commands and subagent delegation/);
   assert.ok(append.indexOf("CORE_POLICY") < append.indexOf("OMP tools exposed by the authenticated pi-bridge"),
     "existing tool guidance stays after the instruction");
@@ -303,10 +305,11 @@ test("disabled routing redirects the host prompt before the complete OMP text", 
   assert.doesNotMatch(preferred, /Follow only the OMP instructions below/);
 });
 
-test("an ephemeral or tool-less session gets only the short ACP override", () => {
+test("an ephemeral or tool-less session gets only the short Antigravity override", () => {
   const ephemeral = sessionRoutingRequest(request, initialize, "disabled", instructions, "ephemeral");
   const ephemeralAppend = appendOf(ephemeral);
   assert.ok(ephemeralAppend.startsWith("Follow only the OMP instructions below."));
+  assert.match(ephemeralAppend, /Ignore any earlier Antigravity host instructions/);
   assert.doesNotMatch(ephemeralAppend, /pi_\*|pi_task|subagent delegation/);
   assert.match(ephemeralAppend, /no tools may be called in this side turn/);
   assert.match(ephemeralAppend, /native tools are disabled/);
