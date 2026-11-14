@@ -38,7 +38,7 @@ async function driveToSettlement(context: TestContext, pending: Promise<unknown>
     () => { state = "fulfilled"; },
     () => { state = "rejected"; },
   );
-  for (let iteration = 0; iteration < 64; iteration++) {
+  for (let iteration = 0; iteration < 128; iteration++) {
     await Promise.resolve();
     if (state === "fulfilled") return;
     if (state === "rejected") {

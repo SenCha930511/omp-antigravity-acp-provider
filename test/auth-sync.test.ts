@@ -25,6 +25,7 @@ const settle = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const noSecretService = async () => undefined;
 secretService.present = noSecretService;
 secretService.remove = noSecretService;
+secretService.applicable = false;
 const NOT_FOUND_STDERR = "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.";
 
 interface AuthFixture {
@@ -423,12 +424,14 @@ test("a keyring entry that survives removal refuses a fresh login", async () => 
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-keyring-"));
   const savedHome = process.env.GEMINI_HOME;
   const originalKeychainPresent = keychain.present;
+  const originalSecretApplicable = secretService.applicable;
   const originalSecretRemove = secretService.remove;
   const originalRetryMs = logoutFollow.removalRetryMs;
   let removes = 0;
   process.env.GEMINI_HOME = home;
   logoutFollow.removalRetryMs = 0;
   keychain.present = async () => undefined;
+  secretService.applicable = true;
   // The removal claims success but a dying server flushes the item back.
   secretService.present = async () => true;
   secretService.remove = async () => { removes++; return true; };
@@ -446,6 +449,7 @@ test("a keyring entry that survives removal refuses a fresh login", async () => 
     assert.ok(removes > beforeLogin, "the refused login re-checks instead of trusting the old result");
   } finally {
     keychain.present = originalKeychainPresent;
+    secretService.applicable = originalSecretApplicable;
     secretService.present = noSecretService;
     secretService.remove = originalSecretRemove;
     logoutFollow.removalRetryMs = originalRetryMs;
@@ -459,11 +463,13 @@ test("a failing keyring removal cannot certify a fresh login", async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-keyring-"));
   const savedHome = process.env.GEMINI_HOME;
   const originalKeychainPresent = keychain.present;
+  const originalSecretApplicable = secretService.applicable;
   const originalSecretRemove = secretService.remove;
   const originalRetryMs = logoutFollow.removalRetryMs;
   process.env.GEMINI_HOME = home;
   logoutFollow.removalRetryMs = 0;
   keychain.present = async () => undefined;
+  secretService.applicable = true;
   secretService.present = async () => true;
   secretService.remove = async () => undefined;
   try {
@@ -478,6 +484,7 @@ test("a failing keyring removal cannot certify a fresh login", async () => {
     });
   } finally {
     keychain.present = originalKeychainPresent;
+    secretService.applicable = originalSecretApplicable;
     secretService.present = noSecretService;
     secretService.remove = originalSecretRemove;
     logoutFollow.removalRetryMs = originalRetryMs;
