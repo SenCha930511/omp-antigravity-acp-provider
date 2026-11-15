@@ -19,7 +19,7 @@ if (nativeAddon) {
 }
 const { generateSummary } = await import(pathToFileURL(path.join(source, "packages/agent/src/compaction/compaction.ts")).href);
 const AIError = await import(pathToFileURL(path.join(source, "packages/ai/src/error/index.ts")).href);
-const model = { id: "gemini-3.8-flash", name: "Offline ACP compaction", api: "antigravity-acp", provider: "antigravity-acp",
+const model = { id: "gemini-3.8-flash", name: "Offline ACP compaction", api: "antigravity-acp-provider", provider: "antigravity-acp-provider",
   contextWindow: 524288, maxTokens: 32000, reasoning: false, input: ["text"],
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 const history = Array.from({ length: 60 }, (_, index) => ({ role: "user" as const,

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { AntigravityRuntime, PERMISSION_TOOL_NAME, PERMISSION_RESULT_KIND } from "../extension/runtime.mjs";
 
-const model = { id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp", provider: "antigravity-acp",
+const model = { id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp-provider", provider: "antigravity-acp-provider",
   contextWindow: 524288, maxTokens: 32000, reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 const user = (text: string) => ({ role: "user", content: text, timestamp: 1 });
 const modes = { currentModeId: "yolo", availableModes: [{ id: "yolo", name: "Yolo" }] };

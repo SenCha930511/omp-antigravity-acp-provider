@@ -9,8 +9,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const model = {
   id: "gemini-3.8-flash",
   name: "Flash",
-  api: "antigravity-acp",
-  provider: "antigravity-acp",
+  api: "antigravity-acp-provider",
+  provider: "antigravity-acp-provider",
   contextWindow: 524288,
   maxTokens: 32000,
   reasoning: false,
