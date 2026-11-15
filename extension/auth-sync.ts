@@ -214,7 +214,7 @@ export interface OmpCommandContext {
 // the model registry surface is host version dependent and absent in tests.
 export function ompCredentialSummary(ctx: OmpCommandContext | undefined) {
   try {
-    const stored = ctx?.modelRegistry?.authStorage?.credentials?.getOAuth?.("antigravity-acp");
+    const stored = ctx?.modelRegistry?.authStorage?.credentials?.getOAuth?.("antigravity-acp-provider");
     if (!stored) return { present: false };
     return {
       present: true,
@@ -232,9 +232,9 @@ export async function removeOmpCredentialRecord(ctx: OmpCommandContext | undefin
   try {
     const credentials = ctx?.modelRegistry?.authStorage?.credentials;
     if (!credentials?.remove || !credentials.getOAuth) return "unavailable";
-    if (!credentials.getOAuth("antigravity-acp")) return "absent";
-    await credentials.remove("antigravity-acp");
-    try { await ctx?.modelRegistry?.refreshProvider?.("antigravity-acp", "online"); } catch { /* advisory only */ }
+    if (!credentials.getOAuth("antigravity-acp-provider")) return "absent";
+    await credentials.remove("antigravity-acp-provider");
+    try { await ctx?.modelRegistry?.refreshProvider?.("antigravity-acp-provider", "online"); } catch { /* advisory only */ }
     return "removed";
   } catch { return "unavailable"; }
 }
@@ -376,7 +376,7 @@ export class OmpAuthCoordinator {
 
   ompMarkerStored(ctx: OmpCommandContext | undefined): boolean | undefined {
     try {
-      return Boolean(ctx?.modelRegistry?.authStorage?.credentials?.getOAuth?.("antigravity-acp"));
+      return Boolean(ctx?.modelRegistry?.authStorage?.credentials?.getOAuth?.("antigravity-acp-provider"));
     } catch { return undefined; }
   }
 
@@ -581,7 +581,7 @@ export class OmpAuthCoordinator {
     // destroy the Antigravity-side login. OMP emits credential_disabled for
     // those, but not for user-initiated removals such as /logout.
     this.deps.pi.on("credential_disabled", (event: unknown) => {
-      if (event && typeof event === "object" && "provider" in event && event.provider === "antigravity-acp") {
+      if (event && typeof event === "object" && "provider" in event && event.provider === "antigravity-acp-provider") {
         this.disabledUntil = performance.now() + logoutFollow.disabledSuppressionMs;
         this.suppressFollow = true;
       }

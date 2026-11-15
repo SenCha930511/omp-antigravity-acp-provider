@@ -15,7 +15,7 @@ Steps:
 2. Run `omp plugin list --json` and search `npm[].name` and `marketplace[].id` for `antigravity-acp-provider`. If one exists, stop and report it instead of installing a second copy.
 3. Install with `omp plugin install npm:omp-antigravity-acp-provider`. For the marketplace variant, run `omp plugin marketplace add SenCha930511/omp-antigravity-acp-provider` first, then `omp plugin install omp-antigravity-acp-provider@sencha-plugins`.
 4. Run `omp plugin list --json` again and confirm exactly one adapter is present. Record its version.
-5. Run `omp models antigravity-acp --json`. Offline/cached listing must not start the ACP server. Before discovery, the built-in Gemini, Hydrogen and known partner-model fallback entries may be listed; neither those entries nor an empty catalog proves a live login. Report any failure instead of retrying in a loop.
+5. Run `omp models antigravity-acp-provider --json`. Offline/cached listing must not start the ACP server. Before discovery, the built-in Gemini, Hydrogen and known partner-model fallback entries may be listed; neither those entries nor an empty catalog proves a live login. Report any failure instead of retrying in a loop.
 6. Tell the user to restart OMP, then run `/login` → "Google Antigravity (ACP)" and `/antigravity-acp refresh` inside OMP. Do not perform these steps yourself.
 
 Notes:
@@ -23,5 +23,5 @@ Notes:
 - To pin a channel, set `runtimeSource` in `~/.omp/agent/antigravity-acp-provider/config.json` to `auto`, `cli`, or `managed`. A pinned source fails instead of downloading the other channel.
 - ACP sessions are stored under `~/.gemini/antigravity-acp/`. The user's personal `agy` CLI chats under `~/.gemini/antigravity-cli/` are never read or deleted by the adapter.
 
-Acceptance: one adapter installed, `omp models antigravity-acp --json` returns valid JSON, and no credential material appears in any output. Report the commands run, the adapter version, any model IDs and the first step that failed.
+Acceptance: one adapter installed, `omp models antigravity-acp-provider --json` returns valid JSON, and no credential material appears in any output. Report the commands run, the adapter version, any model IDs and the first step that failed.
 ```

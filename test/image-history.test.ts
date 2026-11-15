@@ -186,7 +186,7 @@ test("checkpoint capture is bounded", () => {
 
 test("the runtime keeps a warm session across an image eviction but rebuilds on a text edit", async () => {
 	const model = {
-		id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp", provider: "antigravity-acp",
+		id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp-provider", provider: "antigravity-acp-provider",
 		contextWindow: 524288, maxTokens: 32000, reasoning: false, input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	};

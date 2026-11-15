@@ -120,7 +120,7 @@ test("partner fallback models mirror the advertised catalog and current limits",
   const gpt = PARTNER_FALLBACK_MODELS[2]!;
   assert.equal(gpt.reasoning, false);
   assert.equal(gpt.contextWindow, 131_072);
-  for (const model of PARTNER_FALLBACK_MODELS) assert.equal(model.api, "antigravity-acp");
+  for (const model of PARTNER_FALLBACK_MODELS) assert.equal(model.api, "antigravity-acp-provider");
 });
 
 test("offline fallback exposes Hydrogen with xhigh and the partner models", () => {

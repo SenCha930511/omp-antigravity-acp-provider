@@ -8,7 +8,7 @@ const normalize = (message: unknown) => Reflect.get(runtime, "ompNormalizeAssist
 test("assistant boundary accepts string content and preserves real tool calls", () => {
   const text = normalize({ role: "assistant", content: "PLAIN_TEXT" });
   assert.deepEqual(text.content, [{ type: "text", text: "PLAIN_TEXT" }]);
-  assert.equal(text.provider, "antigravity-acp");
+  assert.equal(text.provider, "antigravity-acp-provider");
   assert.equal(text.model, "");
 
   const withTool = normalize({ role: "assistant", content: [

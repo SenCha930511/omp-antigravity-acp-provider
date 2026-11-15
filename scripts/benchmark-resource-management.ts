@@ -34,7 +34,7 @@ function validCases() {
     const messages = [
       { role: "system", content: `RULES ${i}` },
       user(i % 2 ? text : [{ type: "text", text }, image]),
-      { role: "assistant", provider: "antigravity-acp", model: "synthetic", content: [{ type: "text", text: "DONE" }] },
+      { role: "assistant", provider: "antigravity-acp-provider", model: "synthetic", content: [{ type: "text", text: "DONE" }] },
       user([{ type: "text", text: `NEW ${text}` }, ...(i % 3 ? [] : [image])]),
     ];
     const context = { systemPrompt: "FALLBACK_RULES", messages };

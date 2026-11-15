@@ -18,8 +18,8 @@ const state = {
 const model = {
   id: "fixture-model",
   name: "Fixture",
-  api: "antigravity-acp",
-  provider: "antigravity-acp",
+  api: "antigravity-acp-provider",
+  provider: "antigravity-acp-provider",
   contextWindow: 524_288,
   maxTokens: 32_000,
   reasoning: false,

@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 export const ADAPTER_NAME = "omp-antigravity-acp-provider";
-export const ADAPTER_VERSION = "0.2.4";
+export const ADAPTER_VERSION = "0.3.0";
 const execute = promisify(execFile);
 const pending = new Map<string, Promise<string>>();
 

@@ -95,10 +95,10 @@ function authCoordinatorFixture(overrides: {
     notices,
     logoutCallCount: () => logouts.length,
     storeMarker: () => {
-      ompCredentials.set("antigravity-acp", { refresh: MARKER, authorizedAt: Date.now() });
+      ompCredentials.set("antigravity-acp-provider", { refresh: MARKER, authorizedAt: Date.now() });
       fireGeneration();
     },
-    removeMarker: () => { ompCredentials.delete("antigravity-acp"); fireGeneration(); },
+    removeMarker: () => { ompCredentials.delete("antigravity-acp-provider"); fireGeneration(); },
     fireGeneration,
     followedNotices: () => notices.filter(text => text.includes("finished the logout OMP started")),
     emit,
@@ -860,7 +860,7 @@ test("a soft-disable with a retained marker expires before a later real logout",
     const fixture = authCoordinatorFixture();
     fixture.coordinator.watchOmpCredentials(fixture.ctx);
     fixture.storeMarker();
-    fixture.emit("credential_disabled", { provider: "antigravity-acp" });
+    fixture.emit("credential_disabled", { provider: "antigravity-acp-provider" });
     await settle(20);
     fixture.removeMarker();
     await settle(30);
@@ -1097,7 +1097,7 @@ test("an earlier success prevents a later cancellation from restoring stale supp
       const fixture = authCoordinatorFixture();
       fixture.coordinator.watchOmpCredentials(fixture.ctx);
       fixture.storeMarker();
-      fixture.emit("credential_disabled", { provider: "antigravity-acp" });
+      fixture.emit("credential_disabled", { provider: "antigravity-acp-provider" });
       const firstAttempt = await fixture.coordinator.beginFreshGoogleLogin();
       const secondAttempt = await fixture.coordinator.beginFreshGoogleLogin();
       fixture.coordinator.noteLoginSucceeded(firstAttempt);
@@ -1148,7 +1148,7 @@ test("an earlier success prevents a later preparation failure from restoring sta
       });
       fixture.coordinator.watchOmpCredentials(fixture.ctx);
       fixture.storeMarker();
-      fixture.emit("credential_disabled", { provider: "antigravity-acp" });
+      fixture.emit("credential_disabled", { provider: "antigravity-acp-provider" });
       const firstAttempt = await fixture.coordinator.beginFreshGoogleLogin();
       secondLogin = fixture.coordinator.beginFreshGoogleLogin();
       for (let iteration = 0; iteration < 64 && closeCalls !== 2; iteration++) {
@@ -1235,7 +1235,7 @@ test("a refused fresh login keeps an unrelated suppression instead of clearing i
       fixture.coordinator.watchOmpCredentials(fixture.ctx);
       fixture.storeMarker();
       // OMP soft-disabled the provider (for example invalid_grant) before the login.
-      fixture.emit("credential_disabled", { provider: "antigravity-acp" });
+      fixture.emit("credential_disabled", { provider: "antigravity-acp-provider" });
       await assert.rejects(fixture.coordinator.beginFreshGoogleLogin(),
         /Unable to confirm removal of the Antigravity credentials/);
       fixture.removeMarker();

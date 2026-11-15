@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { AntigravityRuntime } from "../extension/runtime.mjs";
 
 const model = {
-  id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp", provider: "antigravity-acp",
+  id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp-provider", provider: "antigravity-acp-provider",
   contextWindow: 524_288, maxTokens: 32_000, reasoning: false, input: ["text"],
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 };

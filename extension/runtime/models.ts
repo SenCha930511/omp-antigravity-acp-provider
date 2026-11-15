@@ -6,8 +6,8 @@ import type {
 	ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
 
-export const PROVIDER_ID = "antigravity-acp";
-export const API_ID = "antigravity-acp";
+export const PROVIDER_ID = "antigravity-acp-provider";
+export const API_ID = "antigravity-acp-provider";
 
 export interface AntigravityModel extends Omit<Model<typeof API_ID>, "baseUrl" | "input" | "compat"> {
 	baseUrl?: string;

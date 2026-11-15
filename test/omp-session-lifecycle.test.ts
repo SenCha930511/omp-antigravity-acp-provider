@@ -27,7 +27,7 @@ function fixture(ownerOf?: (id: string | undefined) => string | undefined) {
 test("OMP closing a planning scope cannot close the main scope or its provider identity", async () => {
   const f = fixture(), main = f.scope(), plan = f.scope();
   f.bind("main", main); f.bind("plan", plan);
-  plan.get("antigravity-acp")!.close();
+  plan.get("antigravity-acp-provider")!.close();
   assert.deepEqual(f.closed, ["plan"]);
   const request = f.lifecycle.capture("main", main);
   await f.lifecycle.ready(request); f.lifecycle.finish(request);
@@ -40,7 +40,7 @@ test("OMP /fresh closes old deferred work; a same-id replacement waits for teard
   f.bind("same-routing-id", scope);
   const old = f.lifecycle.capture("same-routing-id", scope);
   f.gates.set("same-routing-id", gate.promise);
-  scope.get("antigravity-acp")!.close();
+  scope.get("antigravity-acp-provider")!.close();
   const rejected = assert.rejects(f.lifecycle.ready(old), /closed before ACP dispatch/);
   let replacedOwner: OmpProviderSessionState | undefined;
   const next = f.lifecycle.capture("same-routing-id", scope, previous => { replacedOwner = previous; });
@@ -67,7 +67,7 @@ test("idle eviction during preparation preserves the next request and waits for 
   gate.resolve(); await Promise.all([eviction, restoring]);
   const replacement = {}; f.bundles.set("idle", replacement);
   f.lifecycle.attach(waiting, replacement); f.lifecycle.finish(waiting);
-  scope.get("antigravity-acp")!.close();
+  scope.get("antigravity-acp-provider")!.close();
   assert.deepEqual(f.closed, ["idle"], "The scope still owns the replacement after eviction");
   await f.lifecycle.closeAll();
 });
@@ -75,10 +75,10 @@ test("idle eviction during preparation preserves the next request and waits for 
 test("releaseSession retires only the side request and failed preparation retains no lifecycle ownership", async () => {
   const f = fixture(), scope = f.scope();
   f.bind("main", scope); f.bind("main:side:1", scope);
-  scope.get("antigravity-acp")!.releaseSession!("main:side:1");
+  scope.get("antigravity-acp-provider")!.releaseSession!("main:side:1");
   assert.deepEqual(f.closed, ["main:side:1"]);
   for (let i = 0; i < 32; i++) f.lifecycle.finish(f.lifecycle.capture(`failed-${i}`, scope));
-  scope.get("antigravity-acp")!.close();
+  scope.get("antigravity-acp-provider")!.close();
   assert.deepEqual(f.closed, ["main:side:1", "main"]);
   await f.lifecycle.closeAll();
 });
@@ -86,7 +86,7 @@ test("releaseSession retires only the side request and failed preparation retain
 test("releasing a side routing id keeps the parent-owned shadow runtime and its bundle alive", async () => {
   const f = fixture(ownerRoutingId), scope = f.scope();
   f.bind("main", scope); f.bind("main:side:1", scope);
-  scope.get("antigravity-acp")!.releaseSession!("main:side:1");
+  scope.get("antigravity-acp-provider")!.releaseSession!("main:side:1");
   assert.deepEqual(f.closed, [], "a one-shot release must not tear the parent runtime down");
   for (let i = 0; i < 8 && !f.released.length; i++) await Promise.resolve();
   assert.deepEqual(f.released, ["main:side:1"], "only the released id's mapping is retired");
@@ -98,7 +98,7 @@ test("releasing a side routing id keeps the parent-owned shadow runtime and its 
   assert.ok(f.bundles.has("main"));
   f.lifecycle.finish(next);
 
-  scope.get("antigravity-acp")!.close();
+  scope.get("antigravity-acp-provider")!.close();
   assert.deepEqual(f.closed, ["main"], "parent teardown closes the owner runtime exactly once");
   await f.lifecycle.closeAll();
 });
@@ -114,7 +114,7 @@ test("final side release waits for process exit and mapping cleanup before a reu
   const f = fixture(), scope = f.scope(), exit = Promise.withResolvers<void>(), cleanup = Promise.withResolvers<void>();
   f.bind("main", scope); f.bind("side", scope);
   f.gates.set("side", exit.promise); f.releaseGates.set("side", cleanup.promise);
-  scope.get("antigravity-acp")!.releaseSession!("side");
+  scope.get("antigravity-acp-provider")!.releaseSession!("side");
   assert.deepEqual(f.released, []);
   const next = f.lifecycle.capture("side", scope); let ready = false;
   const waiting = f.lifecycle.ready(next).then(() => { ready = true; });
@@ -131,9 +131,9 @@ test("final release still retires saved state after idle eviction, and another s
   f.bind("side", scope); f.bind("other", stranger);
   const bundle = f.bundles.get("side")!; f.bundles.delete("side");
   await f.lifecycle.disposeRuntime("side", bundle, async () => {});
-  stranger.get("antigravity-acp")!.releaseSession!("side");
+  stranger.get("antigravity-acp-provider")!.releaseSession!("side");
   await Promise.resolve(); assert.deepEqual(f.released, []);
-  scope.get("antigravity-acp")!.releaseSession!("side");
+  scope.get("antigravity-acp-provider")!.releaseSession!("side");
   await f.lifecycle.closeAll(); assert.deepEqual(f.released, ["side"]);
 });
 
@@ -153,7 +153,7 @@ test("reloading the adapter closes the prior generation and waits before dispatc
 test("waitClosing awaits synchronous scope.close teardowns from previously visited sessions", async () => {
   const f = fixture(), scope = f.scope(), gate = Promise.withResolvers<void>();
   f.bind("session-a", scope); f.bind("session-b", scope); f.gates.set("session-a", gate.promise);
-  void scope.get("antigravity-acp")!.close();
+  void scope.get("antigravity-acp-provider")!.close();
   let drained = false;
   const waiting = f.lifecycle.waitClosing().then(() => { drained = true; });
   await Promise.resolve(); await Promise.resolve();
