@@ -9,7 +9,7 @@ const built = fs.existsSync(bundle);
 
 test("built writer classifies quota failures before OMP decides to retry", { skip: !built }, async () => {
   const { PiEventWriter } = await import("../extension/runtime.mjs");
-  const writer = new PiEventWriter({ api: "acp", provider: "antigravity-acp", id: "test" });
+  const writer = new PiEventWriter({ api: "acp", provider: "antigravity-acp-provider", id: "test" });
   writer.fail(new Error("You exceeded your monthly limit"));
   const events: any[] = [];
   for await (const event of writer.stream) events.push(event);

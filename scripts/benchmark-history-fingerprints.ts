@@ -96,7 +96,7 @@ function fixture(bytes: number, structured = false) {
   const messages: any[] = [{ role: "system", content: "STATIC RULES", toolsAdded: [{ name: "read", parameters: { type: "object" } }] }];
   const count = structured ? 400 : 100;
   for (let i = 0; i < count; i++) messages.push(i % 2
-    ? { role: "assistant", model: "gemini-3.8-flash", provider: "antigravity-acp", content: [{ type: "toolCall", id: `call-${i}`, name: "read", arguments: structured
+    ? { role: "assistant", model: "gemini-3.8-flash", provider: "antigravity-acp-provider", content: [{ type: "toolCall", id: `call-${i}`, name: "read", arguments: structured
       ? Object.fromEntries(Array.from({ length: 30 }, (_, j) => [`field-${j}`, { text: "中英文\n\"\\𠮷".repeat(8), values: [null, true, 42, undefined] }])) : { path: "fixture.txt" } }] }
     : { role: "toolResult", toolCallId: `call-${i-1}`, toolName: "read", content: [{ type: "text", text: "參考 text line\n".repeat(Math.ceil(bytes / (count / 2) / 20)) }], isError: false });
   messages.push({ role: "user", content: "CURRENT" }); return messages;

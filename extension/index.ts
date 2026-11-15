@@ -606,7 +606,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     // Re-registering without an apiKey does not clear OMP's stored key
     // config; unregister first so a logout report finds no remaining
     // "provider config (fallback)" source.
-    try { pi.unregisterProvider?.("antigravity-acp"); } catch { /* older hosts */ }
+    try { pi.unregisterProvider?.("antigravity-acp-provider"); } catch { /* older hosts */ }
     tryRegisterProvider();
   }
 
@@ -727,7 +727,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     const modelRecord = typeof model === "object" && model !== null ? model : undefined;
     const provider = Reflect.get(event, "provider") ?? Reflect.get(event, "providerId")
       ?? (modelRecord ? Reflect.get(modelRecord, "provider") ?? Reflect.get(modelRecord, "api") : undefined);
-    if (typeof provider === "string" && provider.length > 0) return provider === "antigravity-acp";
+    if (typeof provider === "string" && provider.length > 0) return provider === "antigravity-acp-provider";
     const id = Reflect.get(event, "modelId") ?? (modelRecord ? Reflect.get(modelRecord, "id") : undefined);
     return typeof id === "string"
       && (catalogStore.upstreamModels.has(id) || catalogStore.currentModels.some(candidate => candidate.id === id));
@@ -812,8 +812,8 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   }
 
   function registerProvider(): void {
-    pi.registerProvider("antigravity-acp", {
-        api: "antigravity-acp",
+    pi.registerProvider("antigravity-acp-provider", {
+        api: "antigravity-acp-provider",
         baseUrl: "acp://antigravity",
         // A config apiKey keeps OMP's own logout report claiming a remaining
         // "provider config (fallback)" source, but dropping it entirely hides

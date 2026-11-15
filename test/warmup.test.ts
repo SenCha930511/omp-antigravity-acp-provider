@@ -328,7 +328,7 @@ async function streamOnce(handle: AdapterHandle): Promise<Array<{ type: string }
 }
 
 async function warmStandby(context: TestContext, handle: AdapterHandle): Promise<FakeConnection> {
-  handle.hooks.get("model_select")?.({ provider: "antigravity-acp" }, {});
+  handle.hooks.get("model_select")?.({ provider: "antigravity-acp-provider" }, {});
   await waitFor(context, () => handle.created.length === 1, "the warmup connection");
   const warm = handle.created[0]!;
   await warm.initialized();
@@ -340,7 +340,7 @@ test("no warmup when the environment disables it or the value is unknown", async
   for (const value of ["off", "sometimes"]) {
     const handle = await startAdapter(t, { env: { OMP_ACP_WARMUP: value } });
     try {
-      handle.hooks.get("model_select")?.({ provider: "antigravity-acp" }, {});
+      handle.hooks.get("model_select")?.({ provider: "antigravity-acp-provider" }, {});
       await settle(t);
       assert.equal(handle.created.length, 0, `OMP_ACP_WARMUP=${value} must not spawn`);
     } finally {
@@ -367,14 +367,14 @@ test("switching away closes standby and an active pool skips redundant warmup", 
     handle.hooks.get("model_select")?.({ provider: "openai" }, {});
     await waitFor(t, () => warm.closed, "standby close on provider switch");
 
-    handle.hooks.get("model_select")?.({ provider: "antigravity-acp" }, {});
+    handle.hooks.get("model_select")?.({ provider: "antigravity-acp-provider" }, {});
     await waitFor(t, () => handle.created.length === 2 && handle.created[1]!.initializeCalls === 1, "second warmup");
     const second = handle.created[1]!;
     await second.initialized();
     await settle(t);
 
     await streamOnce(handle);
-    handle.hooks.get("model_select")?.({ provider: "antigravity-acp" }, {});
+    handle.hooks.get("model_select")?.({ provider: "antigravity-acp-provider" }, {});
     await settle(t);
     assert.equal(handle.created.length, 2, "an active pool must not spawn a redundant standby");
   } finally {
@@ -411,7 +411,7 @@ test("no warmup without a usable provider target", async t => {
     configJson: { runtimeSource: "cli" },
   });
   try {
-    handle.hooks.get("model_select")?.({ provider: "antigravity-acp" }, {});
+    handle.hooks.get("model_select")?.({ provider: "antigravity-acp-provider" }, {});
     await settle(t);
     assert.equal(handle.created.length, 0, "a plan without a target must not spawn");
   } finally {
@@ -422,7 +422,7 @@ test("no warmup without a usable provider target", async t => {
 test("no warmup when no local login is ready", async t => {
   const handle = await startAdapter(t, { env: { GEMINI_API_KEY: undefined } });
   try {
-    handle.hooks.get("model_select")?.({ provider: "antigravity-acp" }, {});
+    handle.hooks.get("model_select")?.({ provider: "antigravity-acp-provider" }, {});
     await settle(t);
     assert.equal(handle.created.length, 0, "an unauthenticated adapter must not spawn");
   } finally {
@@ -476,7 +476,7 @@ test("session_start warms only after the startup discovery connection closes", a
 test("an initialize failure is ignored and the next turn spawns cold", async t => {
   const handle = await startAdapter(t, { configure: (connection, index) => { if (index === 0) connection.failInitialize = true; } });
   try {
-    handle.hooks.get("model_select")?.({ provider: "antigravity-acp" }, {});
+    handle.hooks.get("model_select")?.({ provider: "antigravity-acp-provider" }, {});
     await waitFor(t, () => handle.created.length === 1, "the warmup connection");
     const warm = handle.created[0]!;
     await waitFor(t, () => warm.closed, "the failed warmup connection to close");
@@ -495,7 +495,7 @@ test("an initialize failure is ignored and the next turn spawns cold", async t =
 test("an aborted initialize is never published or handed to a turn", async t => {
   const handle = await startAdapter(t, { configure: (connection, index) => { if (index === 0) connection.hangInitialize = true; } });
   try {
-    handle.hooks.get("model_select")?.({ provider: "antigravity-acp" }, {});
+    handle.hooks.get("model_select")?.({ provider: "antigravity-acp-provider" }, {});
     await waitFor(t, () => handle.created.length === 1 && handle.created[0]!.initializeCalls === 1, "the hanging warmup");
     const warm = handle.created[0]!;
 

@@ -26,7 +26,7 @@ test("actual OMP wrapper refreshes tool audit for same-array additions/removals 
     await registerOmpAdapter({ on: (name: string, fn: Function) => hooks.set(name, fn), registerTool() {},
       registerProvider: (_name: string, value: any) => { provider = value; },
       registerCommand() {} }, state);
-    assert.equal(provider.usage?.id, "antigravity-acp");
+    assert.equal(provider.usage?.id, "antigravity-acp-provider");
     assert.equal(typeof provider.usage?.fetchUsage, "function");
     const tools: any[] = [{ name: "read", description: "read", parameters: Type.Object({ path: Type.String() }) }];
     async function audit(): Promise<{ offered: string[]; available: string[]; omitted: Array<{ name: string; reason: string }> }> {
@@ -265,7 +265,7 @@ test("offline fallbacks stay unverified until a real refresh supplies discovered
   const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-catalog-unverified-"));
   try {
     const store = new CatalogStore(path.join(state, "models-cache.json"), {} as any, async () => {}, () => [
-      { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", api: "antigravity-acp", provider: "antigravity-acp",
+      { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", api: "antigravity-acp-provider", provider: "antigravity-acp-provider",
         baseUrl: "", reasoning: true, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 65_536,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         thinkingLevelMap: { low: "gemini-4-hydrogen-low", medium: "gemini-4-hydrogen-medium", high: "gemini-4-hydrogen-high" },

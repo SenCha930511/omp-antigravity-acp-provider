@@ -454,7 +454,7 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       if (value) throw new Error("Usage: /antigravity-acp account");
       const auth = await inspectAcpAuth();
       let ompSource: string | undefined;
-      try { ompSource = ctx?.modelRegistry?.authStorage?.keys?.describe?.("antigravity-acp", sessionIdOf(ctx)); } catch { /* host version dependent */ }
+      try { ompSource = ctx?.modelRegistry?.authStorage?.keys?.describe?.("antigravity-acp-provider", sessionIdOf(ctx)); } catch { /* host version dependent */ }
       // Reading saved state needs no live runtime; show live numbers only
       // when a runtime for this session already exists.
       const bundle = deps.peekRuntimeForSession(sessionIdOf(ctx));

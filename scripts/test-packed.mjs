@@ -108,7 +108,7 @@ try {
     windowsHide: true,
     windowsVerbatimArguments: process.platform === "win32",
   });
-  assert.ok(JSON.parse(catalog.stdout).models.some(model => model.provider === "antigravity-acp"));
+  assert.ok(JSON.parse(catalog.stdout).models.some(model => model.provider === "antigravity-acp-provider"));
   console.log("Installed npm tarball loads in OMP without starting ACP: PASS");
 } finally {
   await rm(temporary, { recursive: true, force: true });

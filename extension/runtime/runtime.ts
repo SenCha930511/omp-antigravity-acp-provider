@@ -391,7 +391,7 @@ export class AntigravityRuntime {
             return {
               ...message,
               role: "assistant",
-              provider: "antigravity-acp",
+              provider: "antigravity-acp-provider",
               model: "",
               content: filtered.length ? filtered : [{ type: "text", text: "" }],
             };

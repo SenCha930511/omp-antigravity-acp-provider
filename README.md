@@ -14,6 +14,8 @@ Google Antigravity's official ACP server, adapted for **Oh My Pi (OMP)**.
 
 This is an independent adaptation, **NOT** an official Google or OMP integration. It uses ACP over stdio. The local HTTP MCP bridge carries tool calls; it is not a model API reverse proxy.
 
+This plugin registers the OMP provider and API name `antigravity-acp-provider`. OMP 18.20+ reserves `antigravity-acp` for its built-in Antigravity provider, so the two can be installed side by side. Select this adapter's models as `antigravity-acp-provider/<model-id>`.
+
 ## Features
 
 - All server-advertised models, including Claude, GPT-OSS and future IDs when the ACP endpoint advertises them.
@@ -97,7 +99,7 @@ Run `/login`, choose **Google Antigravity (ACP)**, and complete Google's consent
 /model
 ```
 
-`refresh` asks the ACP server which models the account can use; `/model` lists them. Set an effort with OMP's thinking control when the model advertises levels. If OMP's `enabledModels` whitelist is configured, add `antigravity-acp/*` to it.
+`refresh` asks the ACP server which models the account can use; `/model` lists them. Set an effort with OMP's thinking control when the model advertises levels. If OMP's `enabledModels` whitelist is configured, add `antigravity-acp-provider/*` to it.
 
 ### 6. Verify
 
@@ -121,7 +123,7 @@ To remove the installed plugin, use `omp plugin uninstall omp-antigravity-acp-pr
 | --- | --- |
 | `omp: command not found` | This is an OMP plugin. Install OMP first; there is no standalone CLI. |
 | No models after `/antigravity-acp refresh` | Run `/antigravity-acp account` to confirm both sides are signed in, then retry with internet access. ACP can advertise fewer models than the Antigravity app. |
-| Two Antigravity providers appear | Remove the older adapter (`antigravity-acp-omp`, the upstream Pi extension, or a duplicate npm install), then restart OMP. |
+| Two Antigravity providers appear | That is expected on OMP 18.20+: the built-in `antigravity-acp` provider and this plugin's `antigravity-acp-provider` coexist. Remove only a second copy of this adapter (`antigravity-acp-omp`, the upstream Pi extension, or a duplicate npm install), then restart OMP. |
 | Login opens the wrong Google account | Both login paths always start a fresh sign-in. Choose the intended account (or "Use another account") on Google's consent screen. |
 | Default `disabled` native-tool mode rejects the session | The official runtime must advertise system-append support (1.4.1+). Upgrade the runtime or run `/antigravity-acp native-tools prefer`. |
 | The first request is slow | Runtime download and cold ACP start happen once; later turns reuse the warm session. |

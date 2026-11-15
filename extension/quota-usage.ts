@@ -67,7 +67,7 @@ export interface QuotaUsageProvider {
   fetchUsage(params: QuotaUsageProviderParams, ctx: QuotaUsageProviderContext): Promise<QuotaUsageReport | null>;
 }
 
-const DEFAULT_PROVIDER = "antigravity-acp";
+const DEFAULT_PROVIDER = "antigravity-acp-provider";
 const WEEK_MS = 604_800_000;
 const FIVE_HOURS_MS = 18_000_000;
 const DAY_MS = 86_400_000;

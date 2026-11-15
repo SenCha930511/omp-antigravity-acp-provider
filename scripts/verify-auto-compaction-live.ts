@@ -17,7 +17,7 @@ try {
   const operation = promisify(execFile)("omp", [
     "--profile", profile, "--no-extensions", "-e", path.join(root, "test/fixtures/auto-compaction-extension.ts"),
     "--config", path.join(root, "test/fixtures/auto-compaction-config.json"),
-    "--model", "antigravity-acp/gemini-3.8-flash", "--smol", "antigravity-acp/gemini-3.8-flash",
+    "--model", "antigravity-acp-provider/gemini-3.8-flash", "--smol", "antigravity-acp-provider/gemini-3.8-flash",
     "--thinking", "low", "--api-key", "pi-antigravity-acp:managed-by-antigravity",
     "--no-tools", "--no-skills", "--no-rules", "--no-title", "--no-session", "--no-prewalk", "--mode", "json",
     "--system-prompt", "You are a diagnostic assistant. Answer briefly without tools.",

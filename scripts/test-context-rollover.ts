@@ -45,7 +45,7 @@ await fs.writeFile(config, JSON.stringify({
 }));
 const args = [
   "--no-extensions", "-e", path.join(root, "test/fixtures/session-switch-extension.ts"),
-  "--model", "antigravity-acp/gemini-3.8-flash", "--smol", "antigravity-acp/gemini-3.8-flash",
+  "--model", "antigravity-acp-provider/gemini-3.8-flash", "--smol", "antigravity-acp-provider/gemini-3.8-flash",
   "--thinking", "off", "--tools", "context_notes,new_context,read,grep",
   "--no-skills", "--no-rules", "--no-context-files", "--no-title", "--no-lsp",
   "--config", config, "--system-prompt", "OFFLINE_FIXTURE",

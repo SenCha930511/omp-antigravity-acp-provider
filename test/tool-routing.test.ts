@@ -464,8 +464,8 @@ test("a runtime without system append keeps full instructions plus legacy omp_ta
     },
   };
   const runtime = new AntigravityRuntime(() => connection as unknown as AntigravityAcpConnection, "yolo");
-  const model: Model<"antigravity-acp"> = {
-    id: "fixture-model", name: "Fixture", api: "antigravity-acp", provider: "antigravity-acp",
+  const model: Model<"antigravity-acp-provider"> = {
+    id: "fixture-model", name: "Fixture", api: "antigravity-acp-provider", provider: "antigravity-acp-provider",
     contextWindow: 524_288, maxTokens: 32_000, reasoning: false, input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   };

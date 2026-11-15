@@ -49,16 +49,16 @@ export class OmpSessionLifecycle {
     let scope = this.fallback, replaced: Scope | undefined;
     if (host) {
       const previous = this.scopes.get(host);
-      if (previous && !previous.closed && host.get("antigravity-acp") === previous) scope = previous;
+      if (previous && !previous.closed && host.get("antigravity-acp-provider") === previous) scope = previous;
       else {
         replaced = previous;
         let predecessor: Promise<void> | undefined;
         try {
-          const existing = host.get("antigravity-acp");
+          const existing = host.get("antigravity-acp-provider");
           if (existing) predecessor = Promise.resolve(existing.close());
         } catch (error) { predecessor = Promise.reject(error); }
         scope = this.newScope(predecessor);
-        this.scopes.set(host, scope); host.set("antigravity-acp", scope);
+        this.scopes.set(host, scope); host.set("antigravity-acp-provider", scope);
       }
     }
     let ticket = scope.sessions.get(id);

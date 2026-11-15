@@ -12,8 +12,8 @@ export interface AdvertisedModel {
 export interface PublicCatalogModel {
   id: string;
   name: string;
-  api: "antigravity-acp";
-  provider: "antigravity-acp";
+  api: "antigravity-acp-provider";
+  provider: "antigravity-acp-provider";
   baseUrl?: string;
   reasoning: boolean;
   input: string[];
@@ -95,7 +95,7 @@ function publicModel(id: string, name: string, map: Record<string, string> = {},
   const defaultLevel = current && (efforts as readonly string[]).includes(current) ? current
     : efforts.includes("high") ? "high" : efforts.includes("medium") ? "medium" : efforts[0];
   return {
-    id, name, api: "antigravity-acp", provider: "antigravity-acp", baseUrl: "",
+    id, name, api: "antigravity-acp-provider", provider: "antigravity-acp-provider", baseUrl: "",
     reasoning: efforts.length > 0, input: ["text", "image"],
     // These are conservative client metadata defaults, not inferred server limits.
     contextWindow: known?.contextWindow ?? 32_768,

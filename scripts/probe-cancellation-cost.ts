@@ -33,7 +33,7 @@ const { AntigravityRuntime, TierConnection, AcpSessionStore, __profile, __setPro
   `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 const base = Object.getPrototypeOf(TierConnection.prototype);
 const state = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cancel-cost-"));
-const model = { id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp", provider: "antigravity-acp",
+const model = { id: "gemini-3.8-flash", name: "Flash", api: "antigravity-acp-provider", provider: "antigravity-acp-provider",
   contextWindow: 524288, maxTokens: 32000, reasoning: false, input: ["text"],
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 const modes = { currentModeId: "yolo", availableModes: [{ id: "yolo", name: "Yolo" }] };
