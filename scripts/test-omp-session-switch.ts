@@ -111,7 +111,7 @@ try {
   assert.match(current(prompts(await trace()).at(-1)), /REQ_FORK_NEXT/);
   console.log("Actual OMP RPC: fork uses a separate ACP conversation: PASS");
 
-  await command("set_model", { provider: "antigravity-acp", modelId: "fixture-other" });
+  await command("set_model", { provider: "antigravity-acp-provider", modelId: "fixture-other" });
   await prompt("REQ_AFTER_MODEL_CHANGE");
   assert.equal(prompts(await trace()).at(-1).model, "fixture-other");
   console.log("Actual OMP RPC: model switch dispatches with the selected model: PASS");

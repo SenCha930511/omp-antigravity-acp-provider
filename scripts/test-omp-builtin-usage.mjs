@@ -36,7 +36,7 @@ function usage(home, commandPath) {
     PATH: commandPath,
   };
   delete env.AGY_ACP_BIN;
-  const result = spawnSync(omp, ["usage", "--provider", "antigravity-acp", "--no-extensions", "-e", path.join(root, "extension/index.ts"), "--json"], {
+  const result = spawnSync(omp, ["usage", "--provider", "antigravity-acp-provider", "--no-extensions", "-e", path.join(root, "extension/index.ts"), "--json"], {
     cwd: root,
     encoding: "utf8",
     timeout: 30_000,
@@ -68,7 +68,7 @@ exit 99
   fs.chmodSync(cli, 0o755);
   const report = usage(cliFixture.home, cliFixture.bin);
   assert.equal(report.reports.length, 1);
-  assert.equal(report.reports[0].provider, "antigravity-acp");
+  assert.equal(report.reports[0].provider, "antigravity-acp-provider");
   const limits = report.reports[0].limits;
   assert.ok(Array.isArray(limits));
   const fiveHour = limits.filter(limit => limit.scope?.tier === "Gemini Models");
