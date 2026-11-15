@@ -23,7 +23,7 @@ after(() => {
   eventLoop.port2.close();
 });
 
-const model = { id: "gemini-3.8-flash", name: "Offline Flash", api: "antigravity-acp", provider: "antigravity-acp",
+const model = { id: "gemini-3.8-flash", name: "Offline Flash", api: "antigravity-acp-provider", provider: "antigravity-acp-provider",
   contextWindow: 524288, maxTokens: 32000, reasoning: false, input: ["text"],
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 const otherModel = { ...model, id: "fixture-other", name: "Offline other" };

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 — 2026-11-16
+
+- Register the provider and API as `antigravity-acp-provider`. OMP 18.20 reserves `antigravity-acp` as a built-in API name and ships its own provider under that name, so the previous registration crashed OMP at startup with `ConfigurationError: Cannot register custom API "antigravity-acp": built-in API names are reserved.` Model references change from `antigravity-acp/<model>` to `antigravity-acp-provider/<model>`; update `enabledModels` whitelists and any pinned `--model` values. The built-in provider and this adapter can now be installed side by side. This release contains no other changes. The `v0.3.0` tag was never published; 0.3.1 is the first release with this fix.
+
 ## 0.2.4 — 2026-11-14
 
 - Move post-publish `test:marketplace` verification after `github-release` and resolve the packed tarball to an unambiguous filesystem path for `npm publish`. The `v0.2.3` tag was created but failed pre-publish `release-verify` before npm publication; `0.2.4` ships the full release.

@@ -28,7 +28,7 @@ const id = `continuity-flash-${Date.now()}`;
 const marker = "EARLY_HISTORY_76B4";
 const messages: any[] = [
   { role: "user", content: `Remember this identifier: ${marker}. The following filler is historical data:\n` + "filler ".repeat(6000), timestamp: 1 },
-  { role: "assistant", provider: "antigravity-acp", model: "gemini-3.8-flash", api: "antigravity-acp", content: [{ type: "text", text: "Identifier noted." }], timestamp: 2 },
+  { role: "assistant", provider: "antigravity-acp-provider", model: "gemini-3.8-flash", api: "antigravity-acp-provider", content: [{ type: "text", text: "Identifier noted." }], timestamp: 2 },
 ];
 const tools = [{ name: "read", description: "Read only synthetic probe://fixture; no real filesystem access.", parameters: Type.Object({ path: Type.String() }) }];
 function rssKiB() {

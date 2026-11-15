@@ -60,8 +60,8 @@ async function probe(plan: RuntimeLaunchPlan, fixture: ProbeCase) {
   const model = {
     id: fixture.modelId,
     name: "No-inference probe model",
-    api: "antigravity-acp",
-    provider: "antigravity-acp",
+    api: "antigravity-acp-provider",
+    provider: "antigravity-acp-provider",
     contextWindow: 1_000_000,
     maxTokens: 65_536,
     reasoning: false,

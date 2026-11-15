@@ -23,13 +23,13 @@ const snapshot: AntigravityQuotaSnapshot = {
 
 test("quota snapshot maps groups, windows, amounts, resets and statuses", () => {
   const report = quotaSnapshotToUsageReport(snapshot);
-  assert.equal(report.provider, "antigravity-acp");
+  assert.equal(report.provider, "antigravity-acp-provider");
   assert.equal(report.fetchedAt, AT);
   assert.deepEqual(report.metadata, { source: "antigravity-acp-quota", groups: 3 });
   assert.equal(report.limits.length, 4);
 
   const fiveHour = report.limits[0]!;
-  assert.equal(fiveHour.scope.provider, "antigravity-acp");
+  assert.equal(fiveHour.scope.provider, "antigravity-acp-provider");
   assert.equal(fiveHour.scope.tier, "Gemini 4 Argon");
   assert.equal(fiveHour.scope.windowId, "5h");
   assert.equal(fiveHour.window?.id, "5h");
@@ -117,13 +117,13 @@ test("unknown windows stay as a slug with no duration", () => {
 
 test("provider maps a snapshot into a usage report", async () => {
   const provider = createQuotaUsageProvider({ loadSnapshot: async () => snapshot });
-  assert.equal(provider.id, "antigravity-acp");
+  assert.equal(provider.id, "antigravity-acp-provider");
   assert.equal(provider.cacheVersion, 2);
   assert.equal(provider.validatesCredentials, false);
   assert.equal(provider.retainLastGoodOnFailure, true);
   assert.equal(provider.failureBackoffMs, 60_000);
   const report = await provider.fetchUsage({}, {});
-  assert.equal(report?.provider, "antigravity-acp");
+  assert.equal(report?.provider, "antigravity-acp-provider");
   assert.equal(report?.limits.length, 4);
 });
 

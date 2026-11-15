@@ -81,7 +81,7 @@ try {
     },
     refreshProvider: async () => { refreshCalls++; },
   } };
-  ompCredentials.set("antigravity-acp", { type: "oauth", refresh: MARKER, access: MARKER, expires: Number.MAX_SAFE_INTEGER, authorizedAt: 1234567890123, email: "marker@example.com" });
+  ompCredentials.set("antigravity-acp-provider", { type: "oauth", refresh: MARKER, access: MARKER, expires: Number.MAX_SAFE_INTEGER, authorizedAt: 1234567890123, email: "marker@example.com" });
   const sessionRecord = {
     piSessionId: "018f24e1-7cbb-7000-8000-000000000001", acpSessionId: "018f24e1-7cbb-7000-8000-000000000002",
     acpModelId: "gemini-3.8-flash", cwd: stateDir, messageCount: 2, historyFingerprint: "f".repeat(64),
@@ -150,7 +150,7 @@ try {
   SessionRuntimePool.prototype.values = function () { return [{ isBusy: () => true }]; } as any;
   await assert.rejects(command.handler("logout", context), /Wait for active Antigravity requests/);
   SessionRuntimePool.prototype.values = originalPoolValues;
-  assert.ok(ompCredentials.has("antigravity-acp"), "Refused logout must keep the OMP marker");
+  assert.ok(ompCredentials.has("antigravity-acp-provider"), "Refused logout must keep the OMP marker");
 
   // logout: real upstream runtime.logout() against isolated directories.
   await fs.writeFile(path.join(geminiHome, "antigravity-acp", "acp_token.json"), JSON.stringify({ refresh_token: "secret-ref" }));
@@ -182,7 +182,7 @@ try {
   const followNotices = () => notices.filter(n => n.includes("finished the logout OMP started"));
   const settle = (ms = 60) => new Promise(resolve => setTimeout(resolve, ms));
   const storeMarker = () => {
-    ompCredentials.set("antigravity-acp", { type: "oauth", refresh: MARKER, access: MARKER, expires: Number.MAX_SAFE_INTEGER, authorizedAt: Date.now() });
+    ompCredentials.set("antigravity-acp-provider", { type: "oauth", refresh: MARKER, access: MARKER, expires: Number.MAX_SAFE_INTEGER, authorizedAt: Date.now() });
     for (const listener of credentialStore.generationListeners) listener();
   };
 
@@ -199,7 +199,7 @@ try {
   flushOnce = true;
   storeMarker();
   assert.equal(registrations[registrations.length - 1], true, "A stored marker restores the config apiKey fallback");
-  await credentialStore.remove("antigravity-acp");
+  await credentialStore.remove("antigravity-acp-provider");
   assert.equal(registrations[registrations.length - 1], false, "Marker removal must drop the fallback in the same tick");
   await settle(1500);
   const followed = followNotices();
@@ -212,15 +212,15 @@ try {
   // Automatic soft-disables (credential_disabled) must not destroy the login.
   storeMarker();
   await fs.writeFile(path.join(geminiHome, "antigravity-acp", "acp_token.json"), JSON.stringify({ refresh_token: "secret-ref" }));
-  const removePromise = credentialStore.remove("antigravity-acp");
-  hooks.get("credential_disabled")?.({ type: "credential_disabled", provider: "antigravity-acp", disabledCause: "oauth refresh failed" });
+  const removePromise = credentialStore.remove("antigravity-acp-provider");
+  hooks.get("credential_disabled")?.({ type: "credential_disabled", provider: "antigravity-acp-provider", disabledCause: "oauth refresh failed" });
   await removePromise;
   await settle();
   assert.equal(followNotices().length, 1, "Automatic credential disables must not trigger the followed logout");
 
   // A quick re-login after removal cancels the cleanup.
   storeMarker();
-  const quickRelogin = credentialStore.remove("antigravity-acp");
+  const quickRelogin = credentialStore.remove("antigravity-acp-provider");
   storeMarker();
   await quickRelogin;
   assert.equal(registrations[registrations.length - 1], true, "A quick re-login restores the fallback");
@@ -231,7 +231,7 @@ try {
   // Command-driven /antigravity-acp login after a logout cancels any pending
   // followed logout and restores the config apiKey fallback.
   storeMarker();
-  const pendingRemove = credentialStore.remove("antigravity-acp");
+  const pendingRemove = credentialStore.remove("antigravity-acp-provider");
   await pendingRemove;
   assert.equal(registrations[registrations.length - 1], false);
   await command.handler("login", context);
@@ -241,7 +241,7 @@ try {
   // OMP_ACP_FOLLOW_LOGOUT=0 keeps OMP /logout marker-only.
   process.env.OMP_ACP_FOLLOW_LOGOUT = "0";
   storeMarker();
-  await credentialStore.remove("antigravity-acp");
+  await credentialStore.remove("antigravity-acp-provider");
   await settle();
   assert.equal(followNotices().length, 1, "The follow behavior must respect OMP_ACP_FOLLOW_LOGOUT=0");
   delete process.env.OMP_ACP_FOLLOW_LOGOUT;
@@ -249,7 +249,7 @@ try {
   // Active requests defer the followed logout until the pool is idle again.
   storeMarker();
   SessionRuntimePool.prototype.values = function () { return [{ isBusy: () => true }]; } as any;
-  await credentialStore.remove("antigravity-acp");
+  await credentialStore.remove("antigravity-acp-provider");
   await settle();
   assert.equal(followNotices().length, 1, "A busy pool must defer the followed logout");
   SessionRuntimePool.prototype.values = originalPoolValues;

@@ -29,8 +29,8 @@ export class PiEventWriter {
 		this.message = {
 			role: "assistant",
 			content: [],
-			api: model.api ?? "antigravity-acp",
-			provider: model.provider ?? "antigravity-acp",
+			api: model.api ?? "antigravity-acp-provider",
+			provider: model.provider ?? "antigravity-acp-provider",
 			model: model.id,
 			usage: emptyUsage(),
 			stopReason: "pending",

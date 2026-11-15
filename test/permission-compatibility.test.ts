@@ -14,8 +14,8 @@ const root = process.cwd();
 const model = {
   id: "gemini-3.8-flash",
   name: "Synthetic Flash",
-  api: "antigravity-acp",
-  provider: "antigravity-acp",
+  api: "antigravity-acp-provider",
+  provider: "antigravity-acp-provider",
   contextWindow: 524288,
   maxTokens: 32000,
   reasoning: false,

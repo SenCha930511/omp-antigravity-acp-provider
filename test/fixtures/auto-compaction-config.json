@@ -1,9 +1,9 @@
 {
   "modelRoles": {
-    "default": "antigravity-acp/gemini-3.8-flash:low",
-    "smol": "antigravity-acp/gemini-3.8-flash:low",
-    "judge": "antigravity-acp/gemini-3.8-flash:low",
-    "slow": "antigravity-acp/gemini-3.8-flash:low"
+    "default": "antigravity-acp-provider/gemini-3.8-flash:low",
+    "smol": "antigravity-acp-provider/gemini-3.8-flash:low",
+    "judge": "antigravity-acp-provider/gemini-3.8-flash:low",
+    "slow": "antigravity-acp-provider/gemini-3.8-flash:low"
   },
   "compaction": {
     "enabled": true,

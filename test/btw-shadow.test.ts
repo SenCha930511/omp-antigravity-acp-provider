@@ -22,7 +22,7 @@ after(() => {
   eventLoop.port2.close();
 });
 
-const model = { id: "gemini-3.8-flash", name: "Offline Flash", api: "antigravity-acp", provider: "antigravity-acp",
+const model = { id: "gemini-3.8-flash", name: "Offline Flash", api: "antigravity-acp-provider", provider: "antigravity-acp-provider",
   contextWindow: 524288, maxTokens: 32000, reasoning: false, input: ["text"],
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 const otherModel = { ...model, id: "fixture-other", name: "Offline other" };
@@ -30,7 +30,7 @@ const DEVELOPER = "<system-reminder>\nEphemeral side-channel turn; reuses curren
   "Tool catalog attached only to keep prompt cache warm; tools NOT available this turn.\n" +
   "Do NOT emit tool calls; reply plain text only. Tool calls discarded without execution.\n</system-reminder>";
 const user = (content: string) => ({ role: "user", content, timestamp: 1 });
-const assistant = (content: string) => ({ role: "assistant", content, provider: "antigravity-acp", model: model.id, timestamp: 2 });
+const assistant = (content: string) => ({ role: "assistant", content, provider: "antigravity-acp-provider", model: model.id, timestamp: 2 });
 
 // Mirrors the observed OMP side context: main history, a developer ephemeral
 // instruction, then the `<btw>` question.

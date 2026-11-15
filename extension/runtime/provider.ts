@@ -14,8 +14,8 @@ import { hasAntigravityAuth } from "./acp/antigravity.ts";
 import { type AntigravityModel, FALLBACK_MODELS, projectModels, PROVIDER_ID } from "./models.ts";
 import { AntigravityRuntime, MANAGED_AUTH_MARKER, type OmpStreamOptions } from "./runtime.ts";
 
-export interface AntigravityProvider extends Omit<Provider<"antigravity-acp">, "auth" | "streamSimple"> {
-	auth: NonNullable<Provider<"antigravity-acp">["auth"]> & {
+export interface AntigravityProvider extends Omit<Provider<"antigravity-acp-provider">, "auth" | "streamSimple"> {
+	auth: NonNullable<Provider<"antigravity-acp-provider">["auth"]> & {
 		oauth: {
 			name: string;
 			loginLabel: string;
@@ -174,4 +174,4 @@ function stream(
 	return runtime.stream(model, context, options).stream;
 }
 
-export const ANTIGRAVITY_ACP_API = "antigravity-acp" satisfies Api;
+export const ANTIGRAVITY_ACP_API = "antigravity-acp-provider" satisfies Api;

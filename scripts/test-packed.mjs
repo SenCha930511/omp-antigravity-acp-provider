@@ -96,7 +96,7 @@ try {
 
   const catalogLaunch = resolveCommandProbe(
     process.env.OMP_ACP_OMP_COMMAND ?? (process.platform === "win32" ? "omp.cmd" : "omp"),
-    ["models", "antigravity-acp", "--no-extensions", "-e", path.join(installed, "extension/index.ts"), "--json"]
+    ["models", "antigravity-acp-provider", "--no-extensions", "-e", path.join(installed, "extension/index.ts"), "--json"]
       .map(argument => process.platform === "win32" ? quoteBatchArgument(argument) : argument),
   );
   const catalog = await execute(catalogLaunch.command, catalogLaunch.args, {
@@ -108,7 +108,7 @@ try {
     windowsHide: true,
     windowsVerbatimArguments: process.platform === "win32",
   });
-  assert.ok(JSON.parse(catalog.stdout).models.some(model => model.provider === "antigravity-acp"));
+  assert.ok(JSON.parse(catalog.stdout).models.some(model => model.provider === "antigravity-acp-provider"));
   console.log("Installed npm tarball loads in OMP without starting ACP: PASS");
 } finally {
   await rm(temporary, { recursive: true, force: true });
