@@ -44,6 +44,12 @@ export const CLOAK_RULES: readonly CloakRule[] = [
   // is sentence-level, so breaking the token chain is what matters.
   { id: "omp-tool-docs", phrase: "for full docs + json schema before first use",
     says: matched => matched.replace(/\+\s*/u, "and ").replace(/schema(?!\s*s)/iu, "schemas") },
+  // Also verified live on 2026-11-16: the canonical smoke-test prompt
+  // "Reply with exactly: OK" alone draws the 429 when it lands in the system
+  // prompt (a recalled memory can carry it there), while the same words as a
+  // user turn or with any other value pass.
+  { id: "omp-eval-prompt", phrase: "reply with exactly: ok",
+    says: matched => matched.replace(/^reply/iu, "Respond") },
 ];
 
 const INVISIBLE_RE = /[\u00ad\u180e\u200b-\u200f\u2060-\u2064\ufeff]/gu;

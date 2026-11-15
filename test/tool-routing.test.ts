@@ -533,3 +533,12 @@ test("cloak rewords the OMP tool-docs guidance sentence the 429 gate refuses", (
   assert.deepEqual(folding.matched, ["omp-tool-docs"]);
   assert.ok(!folding.text.includes("+ JSON schema"), "the refused token chain must not survive");
 });
+
+test("cloak rewords the canonical smoke-test prompt a recalled memory carries", () => {
+  const cloaked = cloakText("- Reply with exactly: OK [coding-agent-transcript] (2026-11-15)");
+  assert.deepEqual(cloaked.matched, ["omp-eval-prompt"]);
+  assert.ok(cloaked.text.includes("- Respond with exactly: OK"), "the verb swap must apply");
+  assert.ok(!cloaked.text.includes("Reply with exactly: OK"), "the refused phrase must not survive");
+  const quiet = cloakText("Reply with exactly: DONE");
+  assert.deepEqual(quiet.matched, []);
+});

@@ -137,7 +137,7 @@ test("explicit quota wording stays quota even when the prompt is fingerprinted",
 });
 
 test("raw quota-exceeded wording stays quota even when the prompt is fingerprinted", () => {
-  const failure = classify("Antigravity quota exceeded for gemini-4-hydrogen. Resets at 2026-11-16T05:00:00Z",
+  const failure = classifyAcpFailure(new Error("Antigravity quota exceeded for gemini-4-hydrogen. Resets at 2026-11-16T05:00:00Z"),
     { promptFingerprinted: true });
   assert.equal(failure.code, "quota");
   assert.doesNotMatch(failure.message, /fingerprint/);
