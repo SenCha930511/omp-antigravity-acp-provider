@@ -1,5 +1,6 @@
 import type { AcpModelInfo } from "./acp/session-state.ts";
 import type { ContextOptions } from "../context-settings.ts";
+import { splitLegacyEffort } from "../efforts.ts";
 import type {
 	Model,
 	ThinkingLevel,
@@ -16,6 +17,45 @@ export interface AntigravityModel extends Omit<Model<typeof API_ID>, "baseUrl" |
 }
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+
+/** Per-model context/output limits for the catalog Antigravity advertises
+ * (data adapted from opencode-antigravity-bridge, MIT). OMP compacts against
+ * contextWindow, so over-reporting a small-context model delays compaction
+ * until the server rejects the request. Unknown IDs keep the generic floor. */
+export const KNOWN_MODEL_LIMITS: Readonly<Record<string, { contextWindow: number; maxTokens: number }>> = Object.freeze({
+	"gemini-4-carbon": { contextWindow: 1_048_576, maxTokens: 262_144 },
+	"gemini-4-argon": { contextWindow: 1_048_576, maxTokens: 65_536 },
+	"gemini-4-hydrogen": { contextWindow: 1_048_576, maxTokens: 262_144 },
+	"gemini-pro-orchestrator": { contextWindow: 1_048_576, maxTokens: 262_144 },
+	"gemini-pro-orchestrator-argon": { contextWindow: 1_048_576, maxTokens: 65_536 },
+	"gemini-flash-worker-agy": { contextWindow: 1_048_576, maxTokens: 262_144 },
+	"gemini-3.8-flash": { contextWindow: 1_048_576, maxTokens: 65_536 },
+	"gemini-3.8-flash-tiered": { contextWindow: 1_048_576, maxTokens: 65_536 },
+	"gemini-3-flash": { contextWindow: 1_048_576, maxTokens: 65_536 },
+	"gemini-3.1-flash-image": { contextWindow: 65_536, maxTokens: 65_536 },
+	"gemini-3.5-flash-lite": { contextWindow: 1_048_576, maxTokens: 65_535 },
+	"gemini-3.1-flash-lite": { contextWindow: 1_048_576, maxTokens: 65_535 },
+	"gemini-2.5-flash": { contextWindow: 1_048_576, maxTokens: 65_535 },
+	"gemini-2.5-flash-thinking": { contextWindow: 1_048_576, maxTokens: 65_535 },
+	"gemini-2.5-flash-lite": { contextWindow: 1_048_576, maxTokens: 65_535 },
+	"gemini-2.5-pro": { contextWindow: 1_048_576, maxTokens: 65_535 },
+	"claude-opus-5-5": { contextWindow: 1_000_000, maxTokens: 128_000 },
+	"claude-sonnet-5-5": { contextWindow: 1_000_000, maxTokens: 128_000 },
+	"claude-opus-4-6": { contextWindow: 250_000, maxTokens: 64_000 },
+	"claude-opus-4-6-thinking": { contextWindow: 250_000, maxTokens: 64_000 },
+	"claude-sonnet-4-6": { contextWindow: 250_000, maxTokens: 64_000 },
+	"gpt-oss-120b": { contextWindow: 131_072, maxTokens: 32_768 },
+	"gpt-oss-120b-medium": { contextWindow: 131_072, maxTokens: 32_768 },
+});
+
+/** Resolve limits for a possibly effort-suffixed model ID. gpt-oss-120b-medium
+ * is itself a catalog ID, so the exact ID wins before stripping the suffix.
+ * The same normalization the catalog uses (all effort suffixes, the models/
+ * alias) keeps both consumers answering identically for one ID. */
+export function modelLimits(id: string): { contextWindow: number; maxTokens: number } {
+	const base = (splitLegacyEffort(id)?.base ?? id).replace(/^models\//iu, "");
+	return KNOWN_MODEL_LIMITS[id.toLowerCase()] ?? KNOWN_MODEL_LIMITS[base.toLowerCase()] ?? { contextWindow: 1_000_000, maxTokens: 65_536 };
+}
 type Effort = "low" | "medium" | "high";
 type Variants = Partial<Record<Effort, string>>;
 
@@ -156,8 +196,7 @@ function baseModel(
 		...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 		input: ["text", "image"],
 		cost: ZERO_COST,
-		contextWindow: 1_000_000,
-		maxTokens: 65_536,
+		...modelLimits(id),
 	};
 }
 

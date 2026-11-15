@@ -1,5 +1,6 @@
 // Public OMP models are derived only from server-advertised IDs and choices.
 import { EFFORTS, splitLegacyEffort } from "./efforts.ts";
+import { KNOWN_MODEL_LIMITS } from "./runtime/models.ts";
 export { EFFORTS, splitLegacyEffort };
 export interface AdvertisedModel {
   modelId: string;
@@ -57,20 +58,18 @@ export function isKnownGemini1MModel(id: string): boolean {
 }
 
 // Client-side metadata for the partner models Antigravity advertises besides
-// Gemini. These are conservative catalog defaults, never server-observed
-// limits: an unknown ID keeps the generic floor, and CatalogStore still lets
-// user context settings override these values.
-// Claude 5.5: platform.claude.com/docs/en/about-claude/models/overview
-// (checked 2026-11-10). The Claude 4.6 entries retire on 2026-11-18 and keep
-// the last published 4.x limits. GPT-OSS 120B: OpenAI-compatible listing.
+// Gemini. Partner limits come from the same CloudCode-observed table the
+// runtime uses (KNOWN_MODEL_LIMITS, adapted from opencode-antigravity-bridge;
+// see THIRD_PARTY_NOTICES.md), so the catalog and the runtime can never
+// disagree. An unknown ID keeps the generic floor, and CatalogStore still
+// lets user context settings override these values.
 export function knownModelMetadata(id: string): { contextWindow: number; maxTokens: number } | undefined {
   // Pricing normalizes the optional "models/" alias prefix too; keep the
   // known partner limits consistent with the ID the server may advertise.
   const base = (splitLegacyEffort(id)?.base ?? id).replace(/^models\//i, "");
+  const known = KNOWN_MODEL_LIMITS[base.toLowerCase()];
+  if (known) return known;
   if (isKnownGemini1MModel(id)) return { contextWindow: 1_000_000, maxTokens: 65_536 };
-  if (/^claude-(?:sonnet|opus)-5-5$/i.test(base)) return { contextWindow: 1_000_000, maxTokens: 64_000 };
-  if (/^claude-(?:sonnet|opus)-4-6$/i.test(base)) return { contextWindow: 200_000, maxTokens: 64_000 };
-  if (/^gpt-oss-120b$/i.test(base)) return { contextWindow: 131_072, maxTokens: 65_536 };
   return undefined;
 }
 

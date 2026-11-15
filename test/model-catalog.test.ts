@@ -63,8 +63,9 @@ test("unknown limits and prices use conservative metadata without copying Gemini
   const [known, gemini25, geminiProAgent, unknown] = projectCatalog(
     ["gemini-4-argon", "gemini-2.5-pro", "gemini-pro-agent", "claude-example"].map(modelId => ({ modelId, name: modelId, selector: true })),
   );
-  assert.equal(known.contextWindow, 1_000_000);
-  assert.equal(gemini25.contextWindow, 1_000_000);
+  assert.equal(known.contextWindow, 1_048_576, "a table-listed Gemini model uses its observed limit, not the generic floor");
+  assert.equal(known.maxTokens, 65_536);
+  assert.equal(gemini25.contextWindow, 1_048_576);
   assert.equal(geminiProAgent.contextWindow, 1_000_000);
   assert.equal(unknown.contextWindow, 32_768);
   assert.equal(unknown.maxTokens, 8192);
@@ -80,24 +81,24 @@ test("unversioned or older Gemini aliases keep conservative limits", () => {
   }
 });
 
-test("advertised Claude and GPT-OSS models carry conservative known limits", () => {
+test("advertised Claude and GPT-OSS models carry CloudCode-observed limits", () => {
   const models = projectCatalog([
     "claude-sonnet-5-5", "claude-opus-5-5", "claude-sonnet-4-6", "claude-opus-4-6", "gpt-oss-120b",
   ].map(modelId => ({ modelId, name: modelId, selector: true })));
   const byId = new Map(models.map(model => [model.id, model]));
   for (const id of ["claude-sonnet-5-5", "claude-opus-5-5"]) {
     assert.equal(byId.get(id)?.contextWindow, 1_000_000, id);
-    assert.equal(byId.get(id)?.maxTokens, 64_000, id);
+    assert.equal(byId.get(id)?.maxTokens, 128_000, id);
   }
   for (const id of ["claude-sonnet-4-6", "claude-opus-4-6"]) {
-    assert.equal(byId.get(id)?.contextWindow, 200_000, id);
+    assert.equal(byId.get(id)?.contextWindow, 250_000, id);
     assert.equal(byId.get(id)?.maxTokens, 64_000, id);
   }
   assert.equal(byId.get("gpt-oss-120b")?.contextWindow, 131_072);
-  assert.equal(byId.get("gpt-oss-120b")?.maxTokens, 65_536);
+  assert.equal(byId.get("gpt-oss-120b")?.maxTokens, 32_768);
   assert.equal(byId.get("gpt-oss-120b")?.reasoning, false);
-  assert.deepEqual(knownModelMetadata("claude-opus-5-5-high"), { contextWindow: 1_000_000, maxTokens: 64_000 });
-  assert.deepEqual(knownModelMetadata("models/claude-opus-5-5"), { contextWindow: 1_000_000, maxTokens: 64_000 });
+  assert.deepEqual(knownModelMetadata("claude-opus-5-5-high"), { contextWindow: 1_000_000, maxTokens: 128_000 });
+  assert.deepEqual(knownModelMetadata("models/claude-opus-5-5"), { contextWindow: 1_000_000, maxTokens: 128_000 });
 });
 
 test("unknown partner IDs keep the generic floor instead of inheriting Claude limits", () => {
@@ -116,7 +117,7 @@ test("partner fallback models mirror the advertised catalog and current limits",
   assert.deepEqual(sonnet.thinking?.efforts, ["low", "medium", "high"]);
   assert.equal(sonnet.thinkingLevelMap?.high, "claude-sonnet-5-5-high");
   assert.equal(sonnet.contextWindow, 1_000_000);
-  assert.equal(sonnet.maxTokens, 64_000);
+  assert.equal(sonnet.maxTokens, 128_000);
   const gpt = PARTNER_FALLBACK_MODELS[2]!;
   assert.equal(gpt.reasoning, false);
   assert.equal(gpt.contextWindow, 131_072);
@@ -129,8 +130,8 @@ test("offline fallback exposes Hydrogen with xhigh and the partner models", () =
   assert.ok(byId.has("gemini-4-hydrogen"), "a fresh install must see Hydrogen without a refresh");
   assert.ok(byId.has("gemini-4-argon"));
   assert.deepEqual(byId.get("gemini-4-hydrogen")?.thinking?.efforts, ["low", "medium", "high", "xhigh"]);
-  assert.equal(byId.get("gemini-4-hydrogen")?.contextWindow, 1_000_000);
-  assert.equal(byId.get("gemini-4-hydrogen")?.maxTokens, 65_536);
+  assert.equal(byId.get("gemini-4-hydrogen")?.contextWindow, 1_048_576);
+  assert.equal(byId.get("gemini-4-hydrogen")?.maxTokens, 262_144);
   assert.equal(selectRuntimeModel(byId.get("gemini-4-hydrogen")!, "xhigh").thinkingLevelMap?.high, "gemini-4-hydrogen-xhigh");
   assert.deepEqual(byId.get("gemini-4-argon")?.thinking?.efforts, ["low", "medium", "high"]);
   assert.ok(byId.has("claude-sonnet-5-5"));
