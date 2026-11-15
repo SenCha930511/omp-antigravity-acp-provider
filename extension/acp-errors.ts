@@ -51,12 +51,13 @@ const QUOTA_RULE: FailureRule = {
 
 // agy answers known third-party harness prompt lines with 429s whatever quota
 // is left. When the session's instructions carried such a phrase, quota is the
-// wrong explanation: say so instead of sending the user to wait for a reset.
+// wrong explanation. Explicit metered-quota wording still wins, because the
+// same 429 text also appears for genuine throttling and rate limits.
 const PROMPT_REJECTED_RULE: FailureRule = {
   code: "prompt_rejected",
-  match: /resource.?exhausted|code\s*[:=]?\s*429|http\s*429|too many requests|quota/i,
+  match: /resource.?exhausted|code\s*[:=]?\s*429|http\s*429|too many requests/i,
   ensure: /fingerprint/i,
-  append: "prompt fingerprint refused by Antigravity; not a quota problem, waiting will not help",
+  append: "prompt fingerprint refused by Antigravity despite remaining quota",
 };
 const RATE_LIMIT_RULE: FailureRule = {
   code: "rate_limit",
@@ -148,7 +149,7 @@ export function classifyAcpFailure(error: unknown, context: AcpFailureContext = 
     const cause = { cause: sanitizedCause(error) };
     if (error.code === "auth") return new AcpFailure("auth", redactSensitiveText(appendHint(error.message, AUTH_RULE)), cause);
     if (error.code === "quota") {
-      if (context.promptFingerprinted && PROMPT_REJECTED_RULE.match.test(error.message)) {
+      if (context.promptFingerprinted && !QUOTA_RULE.ensure.test(error.message) && PROMPT_REJECTED_RULE.match.test(error.message)) {
         return new AcpFailure("prompt_rejected", redactSensitiveText(appendHint(error.message, PROMPT_REJECTED_RULE)), cause);
       }
       return new AcpFailure("quota", redactSensitiveText(appendHint(error.message, QUOTA_RULE)), cause);
@@ -167,7 +168,7 @@ export function classifyAcpFailure(error: unknown, context: AcpFailureContext = 
   if (OAUTH_NETWORK_REFRESH.test(message) && !/invalid_grant/i.test(message)) {
     return new AcpFailure("transport", redactSensitiveText(appendHint(message, TRANSPORT_RULE)), { cause: sanitizedCause(error) });
   }
-  if (context.promptFingerprinted && PROMPT_REJECTED_RULE.match.test(message)) {
+  if (context.promptFingerprinted && !QUOTA_RULE.ensure.test(message) && PROMPT_REJECTED_RULE.match.test(message)) {
     return new AcpFailure("prompt_rejected", redactSensitiveText(appendHint(message, PROMPT_REJECTED_RULE)), { cause: sanitizedCause(error) });
   }
   for (const rule of RULES) {

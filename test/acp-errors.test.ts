@@ -112,7 +112,7 @@ test("a fingerprinted 429 is a prompt rejection, not a quota problem", () => {
     { promptFingerprinted: true });
   assert.ok(failure instanceof AcpFailure);
   assert.equal(failure.code, "prompt_rejected");
-  assert.match(failure.message, /not a quota problem/);
+  assert.match(failure.message, /despite remaining quota/);
 });
 
 test("a 429 without the fingerprint hint stays a quota failure", () => {
@@ -125,5 +125,20 @@ test("a wrapped quota-code failure with the fingerprint hint explains the refusa
   const failure = classifyAcpFailure(new AntigravityAcpError("quota", "resource exhausted"),
     { promptFingerprinted: true });
   assert.equal(failure.code, "prompt_rejected");
-  assert.match(failure.message, /waiting will not help/);
+  assert.match(failure.message, /prompt fingerprint refused/);
+});
+
+test("explicit quota wording stays quota even when the prompt is fingerprinted", () => {
+  const failure = classifyAcpFailure(new AntigravityAcpError("quota",
+    "Antigravity quota exceeded for gemini-4-hydrogen. Resets at 2026-11-16T05:00:00Z"),
+    { promptFingerprinted: true });
+  assert.equal(failure.code, "quota");
+  assert.doesNotMatch(failure.message, /fingerprint/);
+});
+
+test("raw quota-exceeded wording stays quota even when the prompt is fingerprinted", () => {
+  const failure = classify("Antigravity quota exceeded for gemini-4-hydrogen. Resets at 2026-11-16T05:00:00Z",
+    { promptFingerprinted: true });
+  assert.equal(failure.code, "quota");
+  assert.doesNotMatch(failure.message, /fingerprint/);
 });

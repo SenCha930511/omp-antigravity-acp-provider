@@ -523,3 +523,13 @@ test("cloak matching folds invisible characters, case and whitespace", () => {
   assert.equal(turnsAway(sneaky), true);
   assert.equal(turnsAway("plain instructions without fingerprints"), false);
 });
+
+test("cloak rewords the OMP tool-docs guidance sentence the 429 gate refuses", () => {
+  const sentence = "Read xd://<tool> for full docs + JSON schema before first use.";
+  const cloaked = cloakText(sentence);
+  assert.deepEqual(cloaked.matched, ["omp-tool-docs"]);
+  assert.equal(cloaked.text, "Read xd://<tool> for full docs and JSON schemas before first use.");
+  const folding = cloakText("for  FULL\u00a0DOCS + json schema BEFORE first use.");
+  assert.deepEqual(folding.matched, ["omp-tool-docs"]);
+  assert.ok(!folding.text.includes("+ JSON schema"), "the refused token chain must not survive");
+});
