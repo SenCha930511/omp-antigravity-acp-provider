@@ -59,7 +59,7 @@ export function isKnownGemini1MModel(id: string): boolean {
 
 // Client-side metadata for the partner models Antigravity advertises besides
 // Gemini. Partner limits come from the same CloudCode-observed table the
-// runtime uses (KNOWN_MODEL_LIMITS, adapted from opencode-antigravity-bridge;
+// runtime uses (KNOWN_MODEL_LIMITS, adapted from a community Antigravity bridge plugin;
 // see THIRD_PARTY_NOTICES.md), so the catalog and the runtime can never
 // disagree. An unknown ID keeps the generic floor, and CatalogStore still
 // lets user context settings override these values.

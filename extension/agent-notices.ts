@@ -6,7 +6,7 @@
 // block are model text and pass through untouched. Terminal notices and
 // RESOURCE_EXHAUSTED refusals are failure evidence without a log, so their
 // text is captured for the connection to read once the stream ends
-// (taxonomy adapted from opencode-antigravity-bridge, MIT, issue #49).
+// (taxonomy adapted from a community Antigravity bridge plugin, MIT, issue #49).
 const AGENT_RETRY_NOTICE = /^\s*⚠\s*API error \(attempt \d+\)/i;
 const OUTPUT_LIMIT_HEAD = "your previous response was cut off because it exceeded the output token limit";
 const OUTPUT_LIMIT_TAIL = "please continue from where you left off, keeping your response shorter";

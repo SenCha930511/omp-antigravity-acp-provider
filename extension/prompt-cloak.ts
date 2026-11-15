@@ -6,7 +6,7 @@
  * switching models does not help. The known lines are reworded minimally
  * before they reach `systemPrompt.append`: meaning is preserved, the exact
  * fingerprint is not. Phrase list and rewordings adapted from
- * opencode-antigravity-bridge `cloak.mjs` (MIT, DylanLIiii, gitxm, yce; see
+ * a community Antigravity bridge plugin's cloak module (MIT, DylanLIiii, gitxm, yce; see
  * THIRD_PARTY_NOTICES.md); Claude-Code-only long passages and billing-header
  * lines are omitted because OMP instructions cannot contain them.
  */

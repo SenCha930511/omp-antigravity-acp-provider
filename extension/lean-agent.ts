@@ -10,7 +10,7 @@ import path from "node:path";
  * agent definition with `excludeDefaultComponents: true` drops it: agy keeps
  * only the client's system prompt (via `systemPrompt.append`) and the MCP
  * tools declared per session. Measured on agy 1.4.12-1.5.9 with the same
- * frontmatter shape by opencode-antigravity-bridge: "Reply OK" input went
+ * frontmatter shape by a community Antigravity bridge plugin: "Reply OK" input went
  * from 8,357 to 509 tokens.
  *
  * Only the adapter-owned CLI wrapper chain can select the agent: `--agent` is

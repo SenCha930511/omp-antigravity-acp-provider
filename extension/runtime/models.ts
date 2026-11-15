@@ -19,7 +19,7 @@ export interface AntigravityModel extends Omit<Model<typeof API_ID>, "baseUrl" |
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 
 /** Per-model context/output limits for the catalog Antigravity advertises
- * (data adapted from opencode-antigravity-bridge, MIT). OMP compacts against
+ * (data adapted from a community Antigravity bridge plugin, MIT). OMP compacts against
  * contextWindow, so over-reporting a small-context model delays compaction
  * until the server rejects the request. Unknown IDs keep the generic floor. */
 export const KNOWN_MODEL_LIMITS: Readonly<Record<string, { contextWindow: number; maxTokens: number }>> = Object.freeze({
