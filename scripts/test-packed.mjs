@@ -96,7 +96,7 @@ try {
 
   const catalogLaunch = resolveCommandProbe(
     process.env.OMP_ACP_OMP_COMMAND ?? (process.platform === "win32" ? "omp.cmd" : "omp"),
-    ["models", "antigravity-acp", "--no-extensions", "-e", path.join(installed, "extension/index.ts"), "--json"]
+    ["models", "antigravity-acp-provider", "--no-extensions", "-e", path.join(installed, "extension/index.ts"), "--json"]
       .map(argument => process.platform === "win32" ? quoteBatchArgument(argument) : argument),
   );
   const catalog = await execute(catalogLaunch.command, catalogLaunch.args, {

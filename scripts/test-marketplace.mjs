@@ -48,13 +48,13 @@ try {
   console.log("Marketplace add and plugin discovery: PASS");
   await command("plugin", "install", "omp-antigravity-acp-provider@sencha-plugins");
   console.log("Marketplace install and plugin registration: PASS");
-  const cold = await command("models", "antigravity-acp", "--json");
+  const cold = await command("models", "antigravity-acp-provider", "--json");
   const models = JSON.parse(cold.stdout).models;
-  assert.ok(models.some(model => model.provider === "antigravity-acp"));
+  assert.ok(models.some(model => model.provider === "antigravity-acp-provider"));
   console.log("First-load npm preparation and automatic OMP provider loading: PASS");
 
   // An invalid registry proves that a second process needs only the local cache.
-  const warm = await runOmp(["models", "antigravity-acp", "--json"], {
+  const warm = await runOmp(["models", "antigravity-acp-provider", "--json"], {
     env: { ...env, npm_config_offline: "true", npm_config_registry: "http://127.0.0.1:1" },
     timeout: 60_000,
   });
