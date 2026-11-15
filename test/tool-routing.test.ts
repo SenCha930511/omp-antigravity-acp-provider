@@ -11,6 +11,7 @@ import {
   type InitializeMetadata,
   type SessionRpcRequest,
 } from "../extension/tool-routing.ts";
+import { cloakText, turnsAway } from "../extension/prompt-cloak.ts";
 import { TierConnection } from "../extension/tier-connection.ts";
 import { loadNativeToolMode, saveNativeToolMode } from "../extension/tool-policy.ts";
 import { AntigravityRuntime } from "../extension/runtime.mjs";
@@ -485,4 +486,40 @@ test("a runtime without system append keeps full instructions plus legacy omp_ta
   } finally {
     await runtime.close();
   }
+});
+
+test("disabled mode rewords known fingerprint phrases before the append", () => {
+  const fingerprinted = "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n\nYou are a coding assistant running inside pi.\n\nCORE_POLICY";
+  const append = appendOf(sessionRoutingRequest(request, initialize, "disabled", fingerprinted));
+  assert.match(append, /RFC 2119 key words: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL\./);
+  assert.match(append, /coding assistant running within pi\./);
+  assert.doesNotMatch(append, /RFC 2119 keywords/);
+  assert.doesNotMatch(append, /running inside pi/);
+  assert.match(append, /CORE_POLICY/);
+});
+
+test("prefer mode keeps fingerprinted instructions byte-identical", () => {
+  const fingerprinted = "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n\nCORE_POLICY";
+  const append = appendOf(sessionRoutingRequest(request, initialize, "prefer", fingerprinted));
+  assert.ok(append.startsWith(fingerprinted), "prefer mode must not reword the instruction text");
+});
+
+test("the lean agent drops the Antigravity host redirect in disabled mode", () => {
+  const lean = appendOf(sessionRoutingRequest(request, initialize, "disabled", instructions, "main", true, [], true));
+  assert.doesNotMatch(lean, /Ignore any earlier Antigravity host instructions/);
+  assert.ok(lean.startsWith(instructions), "the OMP instruction must lead the lean append");
+  assert.match(lean, /Antigravity-native tools are disabled/);
+  const classic = appendOf(sessionRoutingRequest(request, initialize, "disabled", instructions, "main", true, [], false));
+  assert.match(classic, /Ignore any earlier Antigravity host instructions/);
+});
+
+test("cloak matching folds invisible characters, case and whitespace", () => {
+  const sneaky = "rfc\u00a02119\u00a0keywords:\u00a0 MUST,\u00a0 REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.";
+  const cloaked = cloakText(sneaky);
+  assert.ok(cloaked.text.includes("key words"), "the fingerprint word must be split");
+  assert.ok(!cloaked.text.includes("keywords"), "the fingerprint word must not survive");
+  assert.deepEqual(cloaked.matched, ["rfc2119-keywords"]);
+  assert.equal(cloakText("plain instructions without fingerprints").matched.length, 0);
+  assert.equal(turnsAway(sneaky), true);
+  assert.equal(turnsAway("plain instructions without fingerprints"), false);
 });

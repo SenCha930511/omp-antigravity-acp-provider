@@ -106,3 +106,24 @@ test("wrapped protocol OAuth EOF is still a transport failure", () => {
   assert.equal(failure.code, "transport");
   assert.match(failure.message, /HTTP_PROXY/);
 });
+
+test("a fingerprinted 429 is a prompt rejection, not a quota problem", () => {
+  const failure = classifyAcpFailure(new Error("⚠ RESOURCE_EXHAUSTED (code 429): Resource has been exhausted"),
+    { promptFingerprinted: true });
+  assert.ok(failure instanceof AcpFailure);
+  assert.equal(failure.code, "prompt_rejected");
+  assert.match(failure.message, /not a quota problem/);
+});
+
+test("a 429 without the fingerprint hint stays a quota failure", () => {
+  const failure = classify("RESOURCE_EXHAUSTED (code 429): Resource has been exhausted");
+  assert.equal(failure.code, "quota");
+  assert.doesNotMatch(failure.message, /fingerprint/);
+});
+
+test("a wrapped quota-code failure with the fingerprint hint explains the refusal", () => {
+  const failure = classifyAcpFailure(new AntigravityAcpError("quota", "resource exhausted"),
+    { promptFingerprinted: true });
+  assert.equal(failure.code, "prompt_rejected");
+  assert.match(failure.message, /waiting will not help/);
+});

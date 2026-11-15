@@ -466,7 +466,7 @@ function readManagedVersion(home: string): string | undefined {
   return typeof version === "string" ? version : undefined;
 }
 
-function compareVersions(left: string, right: string): number {
+export function compareVersions(left: string, right: string): number {
   const parse = (value: string) => value.split(".").map(part => Number.parseInt(part, 10) || 0);
   const a = parse(left);
   const b = parse(right);

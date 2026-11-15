@@ -7,7 +7,7 @@ import { choices, resolveSelection, selector } from "./selectors.ts";
 import { normalizeInitializeResponse, sessionRoutingRequest, type NativeToolMode, type SessionRpcRequest, type SessionRoutingKind } from "./tool-routing.ts";
 import { showAcpUpdate } from "./activity-presentation.ts";
 import { alignContextTokens, applyCompactionChunk, applyCompactionUpdate, isTerminalCompaction, type AcpCompactionNotice, type AcpCompactionRecord } from "./acp-compaction.ts";
-import { AgentNoticeFilter } from "./agent-notices.ts";
+import { AgentNoticeFilter, type AgentNoticeCapture } from "./agent-notices.ts";
 import { parseSessionUsage, usageDelta, type SessionUsage } from "./usage-accounting.ts";
 import { conversationDbPath, peekMaxModelStepIdx, readModelStepsAfter, type StepUsageBatch } from "./usage-db.ts";
 import { DEFAULT_USAGE_MODE } from "./context-settings.ts";
@@ -124,6 +124,7 @@ export class TierConnection extends AntigravityAcpConnection {
   private ompSystemInstructions = "";
   private ompSessionKind: SessionRoutingKind = "main";
   private ompProjectedToolNames: readonly string[] = [];
+  private ompLeanAgent = false;
   private readonly steerMode: SteerMode;
   private readonly steerTimings: SteerTimings;
   private readonly maxContinuations: number;
@@ -135,7 +136,7 @@ export class TierConnection extends AntigravityAcpConnection {
   private noticeHandler: UpdateHandler | undefined;
   private readonly noticeClosed = new Set<string>();
 
-  constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompSteerMode?: SteerMode; ompSteerTimings?: SteerTimings; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics; ompPurpose?: "quota"; ompAcpDirectory?: string; ompUsageRetry?: UsageRetryScheduler }) {
+  constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompLeanAgent?: boolean; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompSteerMode?: SteerMode; ompSteerTimings?: SteerTimings; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics; ompPurpose?: "quota"; ompAcpDirectory?: string; ompUsageRetry?: UsageRetryScheduler }) {
     super(options);
     this.cleanup = options.ompCleanup;
     this.diagnostics = options.ompDiagnostics;
@@ -160,6 +161,7 @@ export class TierConnection extends AntigravityAcpConnection {
     if (options.ompNativeTools) {
       this.toolRouting = { nativeTools: options.ompNativeTools, channel: "pending" };
     }
+    this.ompLeanAgent = options.ompLeanAgent ?? false;
   }
 
   // The runtime owns one ACP session per binding. A pre-initialized standby is
@@ -372,7 +374,8 @@ export class TierConnection extends AntigravityAcpConnection {
     const routing = this.toolRouting;
     if (!routing) return request._meta;
     const routed = sessionRoutingRequest(request, await this.initialize(), routing.nativeTools,
-      this.ompSystemInstructions, this.ompSessionKind, this.ompProjectedToolNames.length > 0, this.ompProjectedToolNames);
+      this.ompSystemInstructions, this.ompSessionKind, this.ompProjectedToolNames.length > 0, this.ompProjectedToolNames,
+      this.ompLeanAgent);
     routing.channel = routed === request ? "legacy-prompt" : "system-append";
     return routed._meta;
   }
@@ -471,10 +474,19 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageReads?.delete(id);
     this.noticeFilter?.forget(id);
     this.noticeClosed?.delete(id);
+    // Captured failure evidence outlives the per-turn forget so the finished
+    // turn stays readable; a retired session must not keep it.
+    this.noticeFilter?.consumeCaptured(id);
     this.permissionIdentity?.forget(id);
     this.permissionTurns?.delete(id);
     this.steerMuted?.delete(id);
     this.steerActivity?.delete(id);
+  }
+
+  consumeNoticeCapture(sessionId: string): AgentNoticeCapture | undefined {
+    const captured = this.noticeFilter.captured(sessionId);
+    if (!captured.terminal && !captured.apiDetail && !captured.refusedDetail) return undefined;
+    return this.noticeFilter.consumeCaptured(sessionId);
   }
   private permissionTurn(sessionId: string): number {
     return this.permissionTurns?.get(sessionId) ?? 0;
