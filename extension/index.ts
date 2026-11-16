@@ -9,7 +9,6 @@ import { fetchCliQuota, type AntigravityQuotaSnapshot } from "./usage-accounting
 import { createQuotaUsageProvider } from "./quota-usage.ts";
 import { ensureLoopbackBypass } from "./proxy-env.ts";
 import {
-  compareVersions,
   inspectRuntimeLaunchPlan,
   quotaSourceForPlan,
   resolveAcpPermissionProfile,
