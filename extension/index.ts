@@ -17,7 +17,6 @@ import {
   resolveRuntimeLaunchPlan,
   type RuntimeLaunchPlan,
 } from "./runtime/launch.ts";
-import { ensureLeanAgentWorkspace, leanAgentEligible, LEAN_AGENT_NAME } from "./lean-agent.ts";
 import { loadAdapterConfig, resolveAdapterPermissionMode, type AdapterPermissionMode, type EffectivePermissionMode } from "./adapter-config.ts";
 import { SessionRuntimePool } from "./runtime-pool.ts";
 import { ownerRoutingId, sessionOwnerId } from "./runtime/routing.ts";
@@ -299,24 +298,6 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     // The verified plan target is spawned through the owned supervisor, so the
     // process tree, Windows batch wrappers and node resolution stay owned.
     const launch = resolveLaunchTarget(plan);
-    // Disabled native tools spawn the lean agent when the adapter-owned CLI
-    // wrapper chain can select it: agy's ~8K built-in prompt and tools drop
-    // out, the OMP instruction becomes the whole system prompt, and the append
-    // skips the Antigravity redirect. Prefer mode and non-CLI sources stay
-    // byte-identical to the historical spawn.
-    if (toolPolicy.nativeTools === "disabled" && leanAgentEligible(plan, compareVersions)) {
-      const workspace = ensureLeanAgentWorkspace(stateDir);
-      return {
-        options: {
-          ...options,
-          cwd: workspace,
-          launch: { command: launch.command, args: [...launch.args, "--agent", LEAN_AGENT_NAME] },
-          env,
-          ompLeanAgent: true,
-        },
-        signature: { ...identity, target: `launch:${launch.command}\u0000${launch.args.join("\u0000")}\u0000--agent\u0000${LEAN_AGENT_NAME}` },
-      };
-    }
     return {
       options: { ...options, launch, env },
       signature: { ...identity, target: `launch:${launch.command}\u0000${launch.args.join("\u0000")}` },

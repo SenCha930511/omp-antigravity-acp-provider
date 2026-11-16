@@ -124,7 +124,6 @@ export class TierConnection extends AntigravityAcpConnection {
   private ompSystemInstructions = "";
   private ompSessionKind: SessionRoutingKind = "main";
   private ompProjectedToolNames: readonly string[] = [];
-  private ompLeanAgent = false;
   private readonly steerMode: SteerMode;
   private readonly steerTimings: SteerTimings;
   private readonly maxContinuations: number;
@@ -136,7 +135,7 @@ export class TierConnection extends AntigravityAcpConnection {
   private noticeHandler: UpdateHandler | undefined;
   private readonly noticeClosed = new Set<string>();
 
-  constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompLeanAgent?: boolean; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompSteerMode?: SteerMode; ompSteerTimings?: SteerTimings; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics; ompPurpose?: "quota"; ompAcpDirectory?: string; ompUsageRetry?: UsageRetryScheduler }) {
+  constructor(options: ConstructorParameters<typeof AntigravityAcpConnection>[0] & { ompNativeTools?: NativeToolMode; ompDebugToolUpdates?: boolean; ompUsageMode?: "auto" | "off"; ompSteerMode?: SteerMode; ompSteerTimings?: SteerTimings; ompCleanup?: SessionCleanup; ompDiagnostics?: Diagnostics; ompPurpose?: "quota"; ompAcpDirectory?: string; ompUsageRetry?: UsageRetryScheduler }) {
     super(options);
     this.cleanup = options.ompCleanup;
     this.diagnostics = options.ompDiagnostics;
@@ -161,7 +160,6 @@ export class TierConnection extends AntigravityAcpConnection {
     if (options.ompNativeTools) {
       this.toolRouting = { nativeTools: options.ompNativeTools, channel: "pending" };
     }
-    this.ompLeanAgent = options.ompLeanAgent ?? false;
   }
 
   // The runtime owns one ACP session per binding. A pre-initialized standby is
@@ -374,8 +372,7 @@ export class TierConnection extends AntigravityAcpConnection {
     const routing = this.toolRouting;
     if (!routing) return request._meta;
     const routed = sessionRoutingRequest(request, await this.initialize(), routing.nativeTools,
-      this.ompSystemInstructions, this.ompSessionKind, this.ompProjectedToolNames.length > 0, this.ompProjectedToolNames,
-      this.ompLeanAgent);
+      this.ompSystemInstructions, this.ompSessionKind, this.ompProjectedToolNames.length > 0, this.ompProjectedToolNames);
     routing.channel = routed === request ? "legacy-prompt" : "system-append";
     return routed._meta;
   }

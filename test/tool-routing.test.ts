@@ -504,15 +504,6 @@ test("prefer mode keeps fingerprinted instructions byte-identical", () => {
   assert.ok(append.startsWith(fingerprinted), "prefer mode must not reword the instruction text");
 });
 
-test("the lean agent drops the Antigravity host redirect in disabled mode", () => {
-  const lean = appendOf(sessionRoutingRequest(request, initialize, "disabled", instructions, "main", true, [], true));
-  assert.doesNotMatch(lean, /Ignore any earlier Antigravity host instructions/);
-  assert.ok(lean.startsWith(instructions), "the OMP instruction must lead the lean append");
-  assert.match(lean, /Antigravity-native tools are disabled/);
-  const classic = appendOf(sessionRoutingRequest(request, initialize, "disabled", instructions, "main", true, [], false));
-  assert.match(classic, /Ignore any earlier Antigravity host instructions/);
-});
-
 test("cloak matching folds invisible characters, case and whitespace", () => {
   const sneaky = "rfc\u00a02119\u00a0keywords:\u00a0 MUST,\u00a0 REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.";
   const cloaked = cloakText(sneaky);

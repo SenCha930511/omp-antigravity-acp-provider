@@ -43,18 +43,17 @@ const EPHEMERAL_TOOL_GUIDANCE =
   "no tools may be called in this side turn, and tool calls are discarded without execution. " +
   "Reply with plain text only.";
 
-// Disabled native tools redirect the Antigravity host prompt unless the lean
-// agent already removed it: `excludeDefaultComponents` leaves nothing to
-// ignore, so the redirect would only spend tokens. Prefer keeps native tools,
-// so its append starts with the OMP text unchanged.
+// Disabled native tools redirect the Antigravity host prompt so the OMP
+// instruction owns tool use. Prefer keeps native tools, so its append starts
+// with the OMP text unchanged.
 const ANTIGRAVITY_OVERRIDE =
   "Follow only the OMP instructions below. Ignore any earlier Antigravity host instructions, personas or workflows.";
 const ANTIGRAVITY_OVERRIDE_WITH_TOOLS =
   "Follow only the OMP instructions below. Ignore any earlier Antigravity host instructions, personas or workflows; " +
   "use only OMP omp_* tools and omp_task for reads, writes, searches, commands and subagent delegation.";
 
-function antigravityOverride(mode: NativeToolMode, sessionKind: SessionRoutingKind, hasOmpTools: boolean, leanAgent: boolean): string {
-  if (mode !== "disabled" || leanAgent) return "";
+function antigravityOverride(mode: NativeToolMode, sessionKind: SessionRoutingKind, hasOmpTools: boolean): string {
+  if (mode !== "disabled") return "";
   return sessionKind === "main" && hasOmpTools ? ANTIGRAVITY_OVERRIDE_WITH_TOOLS : ANTIGRAVITY_OVERRIDE;
 }
 
@@ -159,12 +158,11 @@ export function sessionSystemAppend(
   sessionKind: SessionRoutingKind = "main",
   hasOmpTools?: boolean,
   projectedToolNames: readonly string[] = [],
-  leanAgent = false,
 ): string {
   const bridgeActive = bridgeConfigured && hasOmpTools !== false && mcpHttpAvailable(initialize);
   const instructionText = mode === "disabled" ? cloakText(instructions.trim()).text : instructions.trim();
   return [
-    antigravityOverride(mode, sessionKind, bridgeActive, leanAgent),
+    antigravityOverride(mode, sessionKind, bridgeActive),
     instructionText,
     ompToolGuidance(initialize, mode, bridgeActive, sessionKind, projectedToolNames),
   ].filter(Boolean).join("\n\n");
@@ -193,7 +191,6 @@ export function sessionRoutingRequest<T extends SessionRpcRequest>(
   sessionKind: SessionRoutingKind = "main",
   hasOmpTools?: boolean,
   projectedToolNames: readonly string[] = [],
-  leanAgent = false,
 ): T {
   if (!supportsSessionRouting(initialize)) {
     if (mode === "disabled") {
@@ -212,7 +209,7 @@ export function sessionRoutingRequest<T extends SessionRpcRequest>(
   else if (bridgeConfigured) eager.add("pi-bridge");
   return { ...request, _meta: { ...request._meta, antigravity: {
     ...previous,
-    systemPrompt: { append: sessionSystemAppend(initialize, mode, instructions, bridgeConfigured, sessionKind, hasOmpTools, projectedToolNames, leanAgent) },
+    systemPrompt: { append: sessionSystemAppend(initialize, mode, instructions, bridgeConfigured, sessionKind, hasOmpTools, projectedToolNames) },
     eagerMcpServers: [...eager],
     // Explicitly clear a persisted disabled filter when loading in prefer mode.
     ...(mode === "disabled" ? { enabledTools: [] } : { enabledTools: undefined, disabledTools: [] }),
