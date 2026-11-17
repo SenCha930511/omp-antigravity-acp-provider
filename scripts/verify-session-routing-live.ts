@@ -36,7 +36,7 @@ function createRuntime(mode: string, mapping: string) {
         const meta = params._meta?.antigravity;
         const append = meta?.systemPrompt?.append ?? "";
         report.sessions.push({ method, mode, systemAppend: append.includes("Diagnostic only."),
-          taskMapping: append.includes("maps to pi_task"),
+          taskMapping: append.includes("maps to omp_task"),
           eager: meta?.eagerMcpServers, enabledTools: meta?.enabledTools, disabledTools: meta?.disabledTools });
       }
       return send(method, params, ...rest);
@@ -99,7 +99,7 @@ try {
       if (session.mode === "disabled") assert.deepEqual(session.enabledTools, []);
       else { assert.equal(session.enabledTools, undefined); assert.deepEqual(session.disabledTools, []); }
     }
-    assert.ok(report.serverTools.every((title: string) => /pi_(read|edit|bash)/.test(title)), JSON.stringify(report.serverTools));
+    assert.ok(report.serverTools.every((title: string) => /omp_(read|edit|bash)/.test(title)), JSON.stringify(report.serverTools));
     console.log(JSON.stringify(report));
     await runtime.close();
     runtime = undefined;

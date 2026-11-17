@@ -1,11 +1,13 @@
-import { AcpFailure } from "../acp-errors.ts";
+import { AcpFailure, classifyAcpFailure, type AcpFailureContext } from "../acp-errors.ts";
 import { ToolRelay, resolveRelayConfig, relayControlTool, projectedMcpName, TOOL_RELAY_CONTROL_NAME } from "./tools/relay.ts";
+import { RelayDelivery, hasUndeliveredRelay, relayNoticeCallId, type DeliveryBatch, type DeliveryDecision, type DeliveryEntry } from "./tools/delivery.ts";
 import { claimContinuation } from "../continuation-claim.ts";
 import { drainCancelledTurn, isSteerAbort, steerMode } from "../turn-cancellation.ts";
 import { createHistoryFingerprintMemo, createStructuredFingerprintMemo } from "./binding.ts";
 import { captureImageHistoryCheckpoint, matchesImageHistoryCheckpoint, type ImageHistoryCheckpoint } from "./image-history.ts";
 import { HistorySeedError, HistorySeedGuard } from "./history-seed.ts";
-import { ompToolGuidance, type NativeToolMode, type SessionRoutingKind } from "../tool-routing.ts";
+import { cleanOmpSystemInstructions, ompToolGuidance, type NativeToolMode, type SessionRoutingKind } from "../tool-routing.ts";
+import { cloakText, turnsAway } from "../prompt-cloak.ts";
 import type {
 	ContentBlock,
 	InitializeResponse,
@@ -136,7 +138,7 @@ export type ShadowCheckpoint =
 	| { kind: "uncertain"; reason: ShadowRebuildReason };
 
 interface Binding {
- ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedGuard?: HistorySeedGuard; ompImageCheckpoint?: ImageHistoryCheckpoint; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; relayBridge?: PiMcpBridge; relayFingerprint: string;
+ ompFallbackContextTokens?: number; ompInFlight: boolean; ompInvalidated: boolean; ompCompactionInvalidated?: boolean; ompSeeding?: boolean; ompSeedGuard?: HistorySeedGuard; ompImageCheckpoint?: ImageHistoryCheckpoint; ompDropPromise?: Promise<void>; ompExpectedAssistantHasOutput: boolean; ompExpectedAssistantNormalized?: string; ompUnabsorbedToolBoundary?: boolean; ompUnabsorbedToolBoundaryFingerprint?: string; ompUnabsorbedToolBoundaryNormalized?: string; ompConversationFingerprint?: string; ompReleaseLease?: (wait?: boolean) => Promise<void>; pendingConversationFingerprint?: string; relay: ToolRelay; delivery: RelayDelivery; relayBridge?: PiMcpBridge; relayFingerprint: string;
 	ompTerminalStopReason?: PromptResponse["stopReason"];
 	ompCancelledCheckpoint?: boolean;
 	ompCancelledHadOutput?: boolean;
@@ -201,6 +203,16 @@ function normalizeBoundaryContentBlock(block: unknown): Array<TextContent | Tool
 
 function ompRoutingChannel(connection: AntigravityAcpConnection): OmpRoutedConnection["toolRouting"] {
 	return (connection as AntigravityAcpConnection & OmpRoutedConnection).toolRouting;
+}
+
+// The failure classifier only calls a 429 a prompt rejection when the session
+// itself carried a phrase agy refuses. The append channel sends cleaned text
+// and disabled mode cloaks the known phrases away, so the hint must describe
+// what the session received, not the raw OMP instructions.
+function promptFingerprinted(routing: OmpRoutedConnection["toolRouting"], instructions: string): boolean {
+	if (routing?.channel !== "system-append") return turnsAway(instructions);
+	const cleaned = cleanOmpSystemInstructions(instructions);
+	return turnsAway(routing.nativeTools === "disabled" ? cloakText(cleaned).text : cleaned);
 }
 
 export interface PermissionView {
@@ -362,6 +374,24 @@ export class AntigravityRuntime {
             binding.toolFingerprint = nextFp;
             binding.relayFingerprint = this.ompRelayConfig().fingerprint;
           }
+          private ompDeliveryDecision(binding: Binding, context: Context): DeliveryDecision | undefined {
+            if (binding.delivery.open().length === 0) return undefined;
+            const absorbed = binding.pendingContextCount;
+            const prefixIntact = context.messages.length >= absorbed &&
+              this.ompMessagesFingerprint(context.messages.slice(0, absorbed)) === binding.pendingContextFingerprint;
+            const arriving = new Set<string>();
+            for (const message of context.messages.slice(absorbed)) {
+              if (message.role === "toolResult" && typeof message.toolCallId === "string") arriving.add(message.toolCallId);
+            }
+            return binding.delivery.decide({
+              promptLive: binding.turnCompletion !== undefined,
+              reusable: !binding.needsReconstruction && !binding.ompCompactionInvalidated && !binding.abortRequested,
+              prefixIntact,
+              newUserRequest: context.messages.findLastIndex(message => message.role === "user") >= absorbed,
+              arriving,
+              images: binding.initialize.agentCapabilities?.promptCapabilities?.image === true,
+            });
+          }
           private ompNormalizeAssistantForBoundary(message: Context["messages"][number]): Context["messages"][number] {
             if (message.role !== "assistant") return message;
             const raw: unknown = Reflect.get(message, "content");
@@ -386,7 +416,9 @@ export class AntigravityRuntime {
           }
 
 	private readonly bindings = new Map<string, Promise<Binding>>();
+	private readonly authReplayedWriters = new WeakSet<PiEventWriter>();
 	private readonly resolvedBindings = new Set<Binding>();
+	private readonly retainedDelivery = new Map<string, { entries: readonly DeliveryEntry[]; contextCount: number; contextFingerprint: string }>();
 	private disposed = false;
 	private closePromise: Promise<void> | undefined;
 	private bindingEpoch = 0;
@@ -437,12 +469,22 @@ export class AntigravityRuntime {
 				systemPrompt: getCurrentSystemPrompt(transcript.messages),
 				tools: getCurrentTools(transcript.messages),
 			};
-			currentSystemInstructions(resolvedContext);
+			// The fingerprint hint depends on the routed instruction channel, so
+			// each run path sets it once the binding's routing is known.
 			const route = resolveSessionRoute(options.sessionId, options.parentSessionId);
 			const dispatch = route.kind === "shadow"
 				? this.runShadow(route, model, resolvedContext, options, writer)
 				: this.runQueued(model, resolvedContext, options, writer);
 			void dispatch.catch((error: unknown) => {
+				if (error instanceof AcpAuthReplay) {
+					const replay = route.kind === "shadow"
+						? this.runShadow(route, model, resolvedContext, options, writer)
+						: this.runQueued(model, resolvedContext, options, writer);
+					void replay.catch((retryError: unknown) => {
+						writer.fail(retryError, options.signal?.aborted === true || isAbort(retryError));
+					});
+					return;
+				}
 				writer.fail(error, options.signal?.aborted === true || isAbort(error));
 			});
 		} catch (error) {
@@ -767,6 +809,7 @@ export class AntigravityRuntime {
 			cancelPiTools(binding, "Provider shut down before Pi returned the tool result");
 		}
 		this.resolvedBindings.clear();
+		this.retainedDelivery.clear();
 		// Includes authentication/discovery and sessions still initializing, not just warm bindings.
 		await Promise.allSettled([...this.activeConnections].map((connection) => connection.close()));
 		await Promise.allSettled(
@@ -802,6 +845,11 @@ export class AntigravityRuntime {
 			: (this.findContinuationKey(context) ?? `ephemeral:${crypto.randomUUID()}`);
 		const tools = context.tools ?? [];
 		const instructions = currentSystemInstructions(context);
+		const retained = this.retainedDelivery.get(key);
+		if (retained && (context.messages.length < retained.contextCount ||
+			this.ompMessagesFingerprint(context.messages.slice(0, retained.contextCount)) !== retained.contextFingerprint)) {
+			this.retainedDelivery.delete(key);
+		}
 		const acpModelId = resolveAcpModelId(model, options.reasoning);
 		let binding = await this.getBinding(key, mainRoute, model, acpModelId, options.apiKey, writer, tools, instructions, options.signal);
 		if (binding.ompCompactionInvalidated) {
@@ -879,6 +927,9 @@ export class AntigravityRuntime {
 				await claimContinuation(binding, async () => {
 				binding.writer = writer;
 				const continuationTurn = binding.turnCompletion; await this.noteContinuationInstructions(binding, context); if (!continuationTurn || binding.turnCompletion !== continuationTurn || binding.abortRequested || options.signal?.aborted || !binding.connection.process.alive) throw abortError();
+				binding.ompUnabsorbedToolBoundary = false;
+				binding.ompUnabsorbedToolBoundaryFingerprint = undefined;
+				binding.ompUnabsorbedToolBoundaryNormalized = undefined;
 				binding.pendingContextCount = context.messages.length;
 				binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
 			binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
@@ -916,14 +967,28 @@ export class AntigravityRuntime {
 				binding.pendingTools.clear();
 				binding.needsReconstruction = true;
 			} else {
+				const undelivered = hasUndeliveredRelay(binding.delivery, results.map(({ pending }) => pending.invocation.id));
+				if (undelivered) {
+					binding.ompUnabsorbedToolBoundary = true;
+					const boundary = context.messages[binding.pendingContextCount];
+					if (boundary?.role === "assistant") {
+						binding.ompUnabsorbedToolBoundaryFingerprint = this.ompMessageFingerprint(boundary);
+						binding.ompUnabsorbedToolBoundaryNormalized = this.ompMessageFingerprint(this.ompNormalizeAssistantForBoundary(boundary));
+					}
+				}
 				await claimContinuation(binding, async () => {
 				binding.writer = writer;
 				const continuationTurn = binding.turnCompletion; await this.noteContinuationInstructions(binding, context); if (!continuationTurn || binding.turnCompletion !== continuationTurn || binding.abortRequested || options.signal?.aborted || !binding.connection.process.alive) throw abortError();
-				binding.pendingContextCount = context.messages.length;
-				binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
-			binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
-				binding.ompImageCheckpoint = captureImageHistoryCheckpoint(context.messages, message => this.ompMessageFingerprint(message));
-				binding.ompFallbackContextTokens = estimateContextTokens(context);
+				if (!undelivered) {
+					binding.ompUnabsorbedToolBoundary = false;
+					binding.ompUnabsorbedToolBoundaryFingerprint = undefined;
+					binding.ompUnabsorbedToolBoundaryNormalized = undefined;
+					binding.pendingContextCount = context.messages.length;
+					binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
+					binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
+					binding.ompImageCheckpoint = captureImageHistoryCheckpoint(context.messages, message => this.ompMessageFingerprint(message));
+					binding.ompFallbackContextTokens = estimateContextTokens(context);
+				}
 				for (const { pending, message } of results) {
 					binding.pendingTools.delete(pending.invocation.id);
 					pending.resolve(toMcpToolResult(message as ToolResultMessage));
@@ -945,6 +1010,8 @@ export class AntigravityRuntime {
 		let ompDispatched = false;
 		let completeTurn: (() => void) | undefined;
 		let onTurnAbort: (() => void) | undefined;
+		let deliveryBatch: DeliveryBatch | undefined;
+		let deliveryOwner: Binding | undefined;
 		try {
 			await this.modeChanges;
 			this.assertEpoch(epoch);
@@ -983,6 +1050,7 @@ export class AntigravityRuntime {
 				this.ompMessagesFingerprint(context.messages.slice(0, binding.messageCount)) !==
 					binding.historyFingerprint
 			) {
+				if (context.messages.length < binding.messageCount) this.retainedDelivery.delete(key);
 				await this.dropBinding(key, binding, true);
 				binding = await this.getBinding(key, mainRoute, model, acpModelId, options.apiKey, writer, tools, instructions, options.signal);
 			}
@@ -1013,14 +1081,18 @@ export class AntigravityRuntime {
 			// resource even when the agent advertises append support.
 			const routing = ompRoutingChannel(binding.connection);
 			const sessionAppend = routing?.channel === "system-append";
+			writer.noteFailureContext({ promptFingerprinted: promptFingerprinted(routing, instructions) });
 			const bridgeConfigured = binding.initialize.agentCapabilities?.mcpCapabilities?.http === true &&
 				binding.bridge !== undefined && !binding.bridge.empty;
 			const sessionGuidance = sessionAppend
 				? undefined
 				: ompToolGuidance(binding.initialize, routing?.nativeTools ?? "prefer", bridgeConfigured,
 					"main", binding.bridge?.projectedToolNames ?? []);
+			const deliveryDecision = this.ompDeliveryDecision(binding, context);
+			deliveryBatch = deliveryDecision?.batch;
+			deliveryOwner = binding;
 			const parts = adaptPromptToCapabilities(
-				buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy, sessionRouting: sessionAppend, sessionGuidance }, ompRetryResend),
+				buildPromptParts(context, fresh, unseenStart, { contextWindow: model.contextWindow, maxTokens: model.maxTokens, policy: model.ompContextPolicy, sessionRouting: sessionAppend, sessionGuidance, deliveryBlocks: deliveryBatch?.blocks }, ompRetryResend),
 				binding.initialize,
 			);
 			await this.modeChanges;
@@ -1037,6 +1109,9 @@ export class AntigravityRuntime {
 			binding.instructionsFingerprint = instructionFingerprint(context);
 			binding.ompFallbackContextTokens = parts.estimatedContextTokens;
 			binding.needsReconstruction = false;
+			binding.ompUnabsorbedToolBoundary = false;
+			binding.ompUnabsorbedToolBoundaryFingerprint = undefined;
+			binding.ompUnabsorbedToolBoundaryNormalized = undefined;
 			binding.pendingContextCount = context.messages.length;
 			binding.pendingContextFingerprint = this.ompMessagesFingerprint(context.messages);
 			binding.pendingConversationFingerprint = this.ompMessagesFingerprint(context.messages.filter(message => message.role !== 'system'));
@@ -1063,6 +1138,7 @@ export class AntigravityRuntime {
             if (binding.ompInvalidated || !binding.connection.process.alive) throw new AntigravityAcpError('protocol', 'ACP session closed before prompt dispatch');
             if (options.signal?.aborted) throw abortError();
             ompDispatched = true;
+
             let ompSeedUsage: PromptUsageResult | undefined;
             if (parts.seedSteps?.length) {
               const savedWriter = binding.writer;
@@ -1083,9 +1159,21 @@ export class AntigravityRuntime {
                     if (binding.ompInvalidated) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost');
                     if (binding.abortRequested || seedResponse.stopReason === 'cancelled' || options.signal?.aborted) throw abortError();
                     // Quota notices keep their existing handling and are checked
-                    // before the acknowledgement, which they never carry.
-                    const seedQuota = quotaExhaustion(guard.text);
+                    // before the acknowledgement, which they never carry. agy
+                    // banners the filter already dropped still count as quota
+                    // evidence. A capture that only records a transient
+                    // `⚠ API error` retry is not a failure when the step still
+                    // acknowledged OK; a terminal banner, a 429 refusal or a
+                    // non-OK answer fails with its classified cause.
+                    const seedCapture = binding.connection.consumeNoticeCapture?.(binding.session.sessionId);
+                    const seedEvidence = seedCapture
+                      ? [seedCapture.terminal, seedCapture.apiDetail, seedCapture.refusedDetail].filter(Boolean).join("\n")
+                      : "";
+                    const seedQuota = quotaExhaustion(seedEvidence ? `${guard.text}\n${seedEvidence}` : guard.text);
                     if (seedQuota) await this.ompThrowQuota(binding, seedQuota);
+                    if (seedCapture && (seedCapture.terminal !== undefined || seedCapture.refusedDetail !== undefined || guard.text.trim() !== "OK")) {
+                      throw captureFailure(seedCapture, writer.failureContext);
+                    }
                     if (seedResponse.stopReason !== 'end_turn') throw new AntigravityAcpError('protocol', `ACP seed step stopped early with ${seedResponse.stopReason}`);
                     guard.assertAcknowledged();
                     const seedUsage = usageFromPrompt(seedResponse);
@@ -1119,16 +1207,36 @@ export class AntigravityRuntime {
 			if (ompSeedUsage) mergeUsage(usage, ompSeedUsage);
 			activeWriter.message.usage = usage;
 			this.metrics.record(response, usage);
-			const quota = response.stopReason === "cancelled" ? undefined : quotaExhaustion(activeWriter.message.content.map(block => block.type === "text" ? block.text : "").join(""));
+			const noticeCapture = binding.connection.consumeNoticeCapture?.(binding.session.sessionId);
+			const turnText = activeWriter.message.content.map(block => block.type === "text" ? block.text : "").join("");
+			const noticeEvidence = noticeCapture
+				? [noticeCapture.terminal, noticeCapture.apiDetail, noticeCapture.refusedDetail].filter(Boolean).join("\n")
+				: "";
+			const quota = response.stopReason === "cancelled" ? undefined : quotaExhaustion(noticeEvidence ? `${turnText}\n${noticeEvidence}` : turnText);
 			if (quota) await this.ompThrowQuota(binding, quota);
+			// agy reports its own failures as dropped notice lines; an empty turn
+			// with captured failure evidence is a failed turn, not model silence.
+			if (noticeCapture && response.stopReason !== "cancelled" && activeWriter.message.content.length === 0) {
+				throw captureFailure(noticeCapture, activeWriter.failureContext);
+			}
+			// The batch is only delivered once this prompt turn actually consumed
+			// it; a throw, a quota/banner failure or a cancellation leaves the
+			// obligations open for the next turn.
+			if (deliveryBatch && deliveryOwner && response.stopReason !== "cancelled" && response.stopReason !== "refusal") deliveryOwner.delivery.commit(deliveryBatch);
 			activeWriter.message.rawStopReason = response.stopReason;
 			binding.messageCount = binding.pendingContextCount || parts.messageCount;
 			binding.historyFingerprint = binding.pendingContextFingerprint;
 			binding.ompConversationFingerprint = binding.pendingConversationFingerprint;
-            binding.expectedAssistantFingerprint = this.ompMessageFingerprint(activeWriter.message.content.length
-              ? activeWriter.message : { ...activeWriter.message, content: [{ type: 'text', text: '' }] });
-            binding.ompExpectedAssistantNormalized = this.ompMessageFingerprint(this.ompNormalizeAssistantForBoundary(activeWriter.message));
-            binding.ompExpectedAssistantHasOutput = activeWriter.message.content.some(block => block.type !== 'text' || block.text.length > 0);
+            if (binding.ompUnabsorbedToolBoundary && binding.ompUnabsorbedToolBoundaryFingerprint) {
+              binding.expectedAssistantFingerprint = binding.ompUnabsorbedToolBoundaryFingerprint;
+              binding.ompExpectedAssistantNormalized = binding.ompUnabsorbedToolBoundaryNormalized;
+              binding.ompExpectedAssistantHasOutput = true;
+            } else if (!binding.ompUnabsorbedToolBoundary) {
+              binding.expectedAssistantFingerprint = this.ompMessageFingerprint(activeWriter.message.content.length
+                ? activeWriter.message : { ...activeWriter.message, content: [{ type: 'text', text: '' }] });
+              binding.ompExpectedAssistantNormalized = this.ompMessageFingerprint(this.ompNormalizeAssistantForBoundary(activeWriter.message));
+              binding.ompExpectedAssistantHasOutput = activeWriter.message.content.some(block => block.type !== 'text' || block.text.length > 0);
+            }
             binding.ompInFlight = false;
 			if (response.stopReason !== 'cancelled') binding.ompCancelledCheckpoint = false;
 			await this.persistBinding(binding);
@@ -1147,7 +1255,11 @@ export class AntigravityRuntime {
 					activeWriter.done("stop");
 			}
 		} catch (error) {
-			binding.writer?.fail(error, isAbort(error));
+			const replayWriter = binding.writer ?? writer;
+			const authReplay = ompDispatched && !binding.ompInvalidated && !binding.abortRequested && !isAbort(error) &&
+				replayWriter.message.content.length === 0 && !this.authReplayedWriters.has(writer) &&
+				isAuthExpiryFailure(error);
+			if (!authReplay) binding.writer?.fail(error, isAbort(error));
 			if (isAbort(error) || binding.abortRequested) {
 				abortTurn(binding);
 				if (binding.connection.process.alive && !binding.ompInvalidated && !binding.needsReconstruction && !binding.ompSeeding &&
@@ -1162,20 +1274,31 @@ export class AntigravityRuntime {
 					binding.ompCancelledHadOutput = (binding.writer ?? writer).message.content.length > 0;
 					binding.ompExpectedAssistantHasOutput = binding.ompCancelledHadOutput;
 					binding.ompInFlight = false;
-					try { await this.persistBinding(binding); } catch (checkpointError) { await this.invalidateBinding(binding); throw checkpointError; }
+					try { await this.persistBinding(binding); } catch (checkpointError) { this.retainDelivery(binding); await this.invalidateBinding(binding); throw checkpointError; }
 					if (ompWasWarm) await binding.connection.confirmReplacement?.(key, binding.session.sessionId);
-				} else await this.invalidateBinding(binding);
+				} else { this.retainDelivery(binding); await this.invalidateBinding(binding); }
+			} else if (authReplay) {
+				// Drop the binding (and its saved session) so the retry rebuilds on a
+				// fresh process and reseeds history; the half-persisted ACP turn
+				// must not be resumed. Detach the writer first: late chunks from
+				// the expired attempt must not reach the writer the replay reuses.
+				binding.writer = undefined;
+				this.retainDelivery(binding);
+				await this.invalidateBinding(binding);
+				this.authReplayedWriters.add(writer);
+				throw new AcpAuthReplay();
 			} else if (ompDispatched && !binding.ompInvalidated && error instanceof AntigravityAcpError && error.code === "quota") {
 				binding.ompInFlight = false;
-				try { await this.persistBinding(binding); } catch (checkpointError) { await this.invalidateBinding(binding); throw checkpointError; }
-			} else if (ompDispatched && !binding.ompInvalidated) await this.invalidateBinding(binding);
+				try { await this.persistBinding(binding); } catch (checkpointError) { this.retainDelivery(binding); await this.invalidateBinding(binding); throw checkpointError; }
+			} else if (ompDispatched && !binding.ompInvalidated) { this.retainDelivery(binding); await this.invalidateBinding(binding); }
 			else binding.ompInFlight = false;
-			if (!binding.connection.process.alive) await this.dropBinding(key, binding);
+			if (!binding.connection.process.alive) { this.retainDelivery(binding); await this.dropBinding(key, binding); }
 			throw error;
 		} finally {
 			if (onTurnAbort) options.signal?.removeEventListener("abort", onTurnAbort);
 			completeTurn?.();
 			binding.relay.endTurn();
+			if (deliveryBatch && deliveryOwner) deliveryOwner.delivery.abandon(deliveryBatch);
 			binding.turnCompletion = undefined;
 			binding.ompFallbackContextTokens = undefined;
 			binding.abortRequested = false;
@@ -1183,7 +1306,7 @@ export class AntigravityRuntime {
 			release();
 			if (this.queues.get(key) === queue) this.queues.delete(key);
 			binding.ompSeeding = false;
-			if (!persistent || !binding.connection.process.alive) await this.dropBinding(key, binding);
+			if (!persistent || !binding.connection.process.alive) { if (!binding.connection.process.alive) this.retainDelivery(binding); await this.dropBinding(key, binding); }
 		}
 	}
 
@@ -1245,12 +1368,13 @@ export class AntigravityRuntime {
 		const unseenStart = fresh ? 0 : plan.kind === "delta" ? plan.unseenStart : dispatchContext.messages.length;
 		const routing = ompRoutingChannel(binding.connection);
 		const sessionAppend = routing?.channel === "system-append";
+		writer.noteFailureContext({ promptFingerprinted: promptFingerprinted(routing, instructions) });
 		const bridgeConfigured = binding.initialize.agentCapabilities?.mcpCapabilities?.http === true &&
 			binding.bridge !== undefined && !binding.bridge.empty;
 		// A side turn never executes tools. Its legacy prompt guidance must say
-		// so instead of advertising the main pi_task delegation mapping, and the
+		// so instead of advertising the main omp_task delegation mapping, and the
 		// prompt planner must use the ephemeral history/continuation/retry text
-		// that prohibits every tool call rather than only the pi_ guidance.
+		// that prohibits every tool call rather than only the omp_ guidance.
 		const sessionGuidance = sessionAppend
 			? undefined
 			: ompToolGuidance(binding.initialize, routing?.nativeTools ?? "prefer", bridgeConfigured,
@@ -1287,10 +1411,16 @@ export class AntigravityRuntime {
 			if (seedUsage) mergeUsage(usage, seedUsage);
 			activeWriter.message.usage = usage;
 			this.metrics.record(response, usage);
-			const quota = response.stopReason === "cancelled"
-				? undefined
-				: quotaExhaustion(activeWriter.message.content.map(block => block.type === "text" ? block.text : "").join(""));
+			const shadowNoticeCapture = binding.connection.consumeNoticeCapture?.(binding.session.sessionId);
+			const turnText = activeWriter.message.content.map(block => block.type === "text" ? block.text : "").join("");
+			const shadowEvidence = shadowNoticeCapture
+				? [shadowNoticeCapture.terminal, shadowNoticeCapture.apiDetail, shadowNoticeCapture.refusedDetail].filter(Boolean).join("\n")
+				: "";
+			const quota = response.stopReason === "cancelled" ? undefined : quotaExhaustion(shadowEvidence ? `${turnText}\n${shadowEvidence}` : turnText);
 			if (quota) await this.ompThrowQuota(binding, quota);
+			if (shadowNoticeCapture && response.stopReason !== "cancelled" && activeWriter.message.content.length === 0) {
+				throw captureFailure(shadowNoticeCapture, activeWriter.failureContext);
+			}
 			activeWriter.message.rawStopReason = response.stopReason;
 			if (response.stopReason === "cancelled") throw abortError();
 			// The ACP session now holds exactly this side context; the next turn
@@ -1314,7 +1444,20 @@ export class AntigravityRuntime {
 			}
 		} catch (error) {
 			binding.ompInFlight = false;
-			binding.writer?.fail(error, isAbort(error));
+			const replayWriter = binding.writer ?? writer;
+			const authReplay = !binding.ompInvalidated && !binding.abortRequested && !isAbort(error) &&
+				replayWriter.message.content.length === 0 && !this.authReplayedWriters.has(writer) &&
+				isAuthExpiryFailure(error);
+			if (!authReplay) binding.writer?.fail(error, isAbort(error));
+			if (authReplay) {
+				// A side turn has no checkpoint worth keeping: drop the expired
+				// binding and let the replay reseed on a fresh process. Detach the
+				// writer first so late chunks cannot reach the reused writer.
+				binding.writer = undefined;
+				await this.invalidateBinding(binding).catch(() => undefined);
+				this.authReplayedWriters.add(writer);
+				throw new AcpAuthReplay();
+			}
 			binding.shadow = {
 				kind: "uncertain",
 				reason: isAbort(error) || binding.abortRequested ? "cancelled" : "failed",
@@ -1354,8 +1497,15 @@ export class AntigravityRuntime {
 					));
 					if (binding.ompInvalidated) throw new AntigravityAcpError("protocol", "ACP session ownership was lost");
 					if (binding.abortRequested || response.stopReason === "cancelled" || signal?.aborted) throw abortError();
-					const quota = quotaExhaustion(guard.text);
+					const shadowCapture = binding.connection.consumeNoticeCapture?.(binding.session.sessionId);
+					const shadowEvidence = shadowCapture
+						? [shadowCapture.terminal, shadowCapture.apiDetail, shadowCapture.refusedDetail].filter(Boolean).join("\n")
+						: "";
+					const quota = quotaExhaustion(shadowEvidence ? `${guard.text}\n${shadowEvidence}` : guard.text);
 					if (quota) await this.ompThrowQuota(binding, quota);
+					if (shadowCapture && (shadowCapture.terminal !== undefined || shadowCapture.refusedDetail !== undefined || guard.text.trim() !== "OK")) {
+						throw captureFailure(shadowCapture, savedWriter?.failureContext);
+					}
 					if (response.stopReason !== "end_turn") throw new AntigravityAcpError("protocol", `ACP seed step stopped early with ${response.stopReason}`);
 					guard.assertAcknowledged();
 					const stepUsage = usageFromPrompt(response);
@@ -1523,6 +1673,7 @@ export class AntigravityRuntime {
 				: tools.filter((tool) => tool.name !== PERMISSION_TOOL_NAME).map((tool) => ({ name: tool.name, reason: "Agent did not advertise MCP over HTTP" }));
 			const relayConfig = this.ompRelayConfig();
 			const relay = new ToolRelay(relayConfig);
+			const delivery = new RelayDelivery(relay);
 			const relayCollision = relayConfig.enabled ? tools.find(tool => projectedMcpName(tool.name) === TOOL_RELAY_CONTROL_NAME) : undefined;
 			if (relayCollision) throw new AntigravityAcpError("invalid_input", "Tool " + relayCollision.name + " collides with the relay control tool " + TOOL_RELAY_CONTROL_NAME + "; rename it or disable OMP_ACP_TOOL_RELAY_MS");
 			let mcpServer;
@@ -1530,17 +1681,24 @@ export class AntigravityRuntime {
 			if (tools.length > 0 && initialize.agentCapabilities?.mcpCapabilities?.http === true) {
 				bridge = new PiMcpBridge({
 					tools,
-					onCall: (invocation) => relay.call(invocation, () => this.requestPiTool(binding, invocation)),
+					onCall: async (invocation) => {
+						const result = await relay.call(invocation, () => this.requestPiTool(binding, invocation));
+						delivery.observe(invocation, relayNoticeCallId(result));
+						return result;
+					},
 				});
 				mcpServer = await bridge.start();
 				if (relayConfig.enabled) {
 					relayBridge = new PiMcpBridge({
 						tools: [relayControlTool],
-						onCall: (invocation) => {
+						onCall: async (invocation) => {
 							const callId = invocation.arguments.call_id;
-							return typeof callId === "string" && callId
-								? relay.await(callId)
-								: Promise.resolve({ content: [{ type: "text", text: "call_id must be a non-empty string" }], isError: true });
+							if (typeof callId !== "string" || !callId) {
+								return { content: [{ type: "text", text: "call_id must be a non-empty string" }], isError: true };
+							}
+							const result = await relay.await(callId);
+							delivery.consume(callId, result);
+							return result;
 						},
 					});
 					relayServer = await relayBridge.start();
@@ -1598,7 +1756,7 @@ export class AntigravityRuntime {
             ompReleaseLease: releaseLease,
             ompExpectedAssistantHasOutput: restored && (saved?.ompExpectedAssistantHasOutput === true ||
               (saved?.ompExpectedAssistantHasOutput === undefined && Boolean(saved?.expectedAssistantFingerprint))),
-            relay, relayBridge, relayFingerprint: relayConfig.fingerprint,
+            relay, delivery, relayBridge, relayFingerprint: relayConfig.fingerprint,
             pendingConversationFingerprint: this.ompMessagesFingerprint([]),
 				key,
 				route,
@@ -1632,11 +1790,14 @@ export class AntigravityRuntime {
 				restored,
 			};
 			binding = createdBinding;
+			const retainedDelivery = this.retainedDelivery.get(key);
+			if (retainedDelivery !== undefined) createdBinding.delivery.adopt(retainedDelivery.entries);
             (binding.connection as AntigravityAcpConnection & OmpRoutedConnection).setOmpContextWindow?.(binding.session.sessionId, model.contextWindow);
             if (leaseLost) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost during initialization');
 			await this.persistBinding(createdBinding);
 		this.assertEpoch(epoch);
 			this.resolvedBindings.add(createdBinding);
+			this.retainedDelivery.delete(key);
 			void connection.process.exited.then(() => {
             const completion = createdBinding.turnCompletion;
             const retiring = createdBinding.ompDropPromise;
@@ -1797,6 +1958,15 @@ export class AntigravityRuntime {
           if (typeof this.sessionStore?.removeIfMatches === 'function') await this.sessionStore.removeIfMatches(piSessionId, acpSessionId);
           else await this.sessionStore?.remove(piSessionId);
         }
+	private retainDelivery(binding: Binding): void {
+		const entries = binding.delivery.settledOpen();
+		if (entries.length > 0) this.retainedDelivery.set(binding.key, {
+			entries,
+			contextCount: binding.pendingContextCount,
+			contextFingerprint: binding.pendingContextFingerprint,
+		});
+	}
+
         private async dropBinding(key: string, binding: Binding, removeSaved = false): Promise<void> {
           if (removeSaved) binding.ompInvalidated = true;
           if (binding.ompDropPromise) {
@@ -2204,11 +2374,14 @@ function instructionFingerprint(context: Context): string {
 function abortTurn(binding: Binding): void {
 	binding.abortRequested = true;
 	cancelPermission(binding);
-	cancelPiTools(binding, "Pi turn was aborted before returning the tool result");
+	// Cancellation must not erase a settled result that never reached ACP; the
+	// next turn can still deliver it. Intentional disposal still resets.
+	cancelPiTools(binding, "Pi turn was aborted before returning the tool result", false);
 }
 
-function cancelPiTools(binding: Binding, reason: string): void {
+function cancelPiTools(binding: Binding, reason: string, resetDelivery = true): void {
 	binding.relay.cancelAll(reason);
+	if (resetDelivery) binding.delivery.reset();
 	if (binding.toolBatchTimer) clearTimeout(binding.toolBatchTimer);
 	binding.toolBatchTimer = undefined;
 	for (const pending of binding.pendingTools.values()) {
@@ -2225,6 +2398,38 @@ async function raceAuthentication<T>(
 		step.then((value) => ({ authenticated: false as const, value })),
 		authentication.then(() => ({ authenticated: true as const })),
 	]);
+}
+
+// A live agy process never refreshes its OAuth token; the first model call
+// after expiry fails auth before anything streams. The stream re-dispatches
+// once on a fresh process, and the rebuild reseeds history from OMP, so an
+// idle hour costs one seamless retry instead of a sign-in error.
+class AcpAuthReplay extends Error {
+	constructor() {
+		super("Antigravity auth expired mid-session; replaying once on a fresh process");
+	}
+}
+
+function isAuthExpiryFailure(error: unknown): boolean {
+	const classified = classifyAcpFailure(error);
+	return classified instanceof AcpFailure && classified.code === "auth";
+}
+
+// agy banners dropped from the stream still explain the failure: classify the
+// captured detail so the turn ends with the real cause (auth, quota, server).
+// The writer's failure context must reach this classification: without it the
+// quota hint is appended first and the writer's later reclassification can
+// never surface a prompt rejection.
+function captureFailure(
+	capture: { terminal?: string; apiDetail?: string; refusedDetail?: string },
+	context?: AcpFailureContext,
+): AcpFailure {
+	const detail = capture.refusedDetail ?? capture.apiDetail ?? "";
+	if (detail) {
+		const classified = classifyAcpFailure(new Error(detail), context);
+		if (classified instanceof AcpFailure) return classified;
+	}
+	return new AcpFailure("server", `Antigravity ended the turn with its own error banner (${capture.terminal ?? "error"}) and produced no output`);
 }
 
 function isAbort(error: unknown): boolean {

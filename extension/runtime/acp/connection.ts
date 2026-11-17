@@ -377,6 +377,10 @@ export class AntigravityAcpConnection {
 
 	async retireForReplacement(_key: string, _sessionId: string): Promise<void> {}
 
+	consumeNoticeCapture(_sessionId: string): import("../../agent-notices.ts").AgentNoticeCapture | undefined {
+		return undefined;
+	}
+
 	private updateSessionState(sessionId: string, response: unknown): SessionState {
 		const commands = (response as { availableCommands?: AvailableCommand[] | null }).availableCommands;
 		const state = { ...this.sessions.get(sessionId), ...decodeSessionState(response), ...(commands === undefined ? {} : { availableCommands: commands }) };

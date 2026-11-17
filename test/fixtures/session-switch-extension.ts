@@ -97,8 +97,8 @@ export default async function(pi: any) {
           }
           if (currentText.includes("REQ_CONTEXT_NOTES_WITNESS") && !contextNotesCallStarted) {
             contextNotesCallStarted = true;
-            const client = mcpTools.get("pi_context_notes");
-            if (!client) throw new Error("The actual OMP bridge did not advertise pi_context_notes");
+            const client = mcpTools.get("omp_context_notes");
+            if (!client) throw new Error("The actual OMP bridge did not advertise omp_context_notes");
             const calls = [
               { purpose: "supplied-intent", arguments: {
                 i: "Record context rollover witness",
@@ -111,9 +111,9 @@ export default async function(pi: any) {
             ];
             for (const call of calls) {
               log({ kind: "mcp-call", id: c.id, activePrompts: c.activePrompts,
-                name: "pi_context_notes", purpose: call.purpose, arguments: call.arguments });
-              const result = await client.callTool({ name: "pi_context_notes", arguments: call.arguments });
-              log({ kind: "mcp-result", name: "pi_context_notes", purpose: call.purpose, isError: result.isError === true,
+                name: "omp_context_notes", purpose: call.purpose, arguments: call.arguments });
+              const result = await client.callTool({ name: "omp_context_notes", arguments: call.arguments });
+              log({ kind: "mcp-result", name: "omp_context_notes", purpose: call.purpose, isError: result.isError === true,
                 content: (result.content ?? []).filter(block => block.type === "text")
                   .map(block => block.text.slice(0, 4000)) });
             }

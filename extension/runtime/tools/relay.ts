@@ -67,6 +67,13 @@ export const relayControlTool = {
 
 type RelayState = "pending" | "relayed" | "fulfilled" | "failed" | "cancelled";
 
+export type RelayOutcome =
+  | { readonly kind: "unknown" }
+  | { readonly kind: "expired" }
+  | { readonly kind: "outstanding"; readonly state: "pending" | "relayed" }
+  | { readonly kind: "settled"; readonly state: "fulfilled" | "failed"; readonly result: CallToolResult }
+  | { readonly kind: "cancelled"; readonly reason: string };
+
 interface RelayRecord {
   callId: string;
   turn: number;
@@ -168,6 +175,22 @@ export class ToolRelay {
     }
     return outcome.result ?? relayError("The original tool call returned no result");
   }
+  inspect(callId: string): RelayOutcome {
+    const record = this.records.get(callId);
+    if (!record) return { kind: "unknown" };
+    if (record.turn < this.turn - 1) return { kind: "expired" };
+    if (record.state === "cancelled") {
+      return { kind: "cancelled", reason: relayResultText(record.result) };
+    }
+    if (record.state === "fulfilled" || record.state === "failed") {
+      return {
+        kind: "settled",
+        state: record.state,
+        result: record.result ?? relayError("The original tool call returned no result"),
+      };
+    }
+    return { kind: "outstanding", state: record.state };
+  }
 
   cancelAll(reason: string): void {
     const result = relayError(reason);
@@ -225,6 +248,14 @@ export class ToolRelay {
   }
 }
 
+function relayResultText(result: CallToolResult | undefined): string {
+  if (!result) return "The original tool call returned no result";
+  return result.content
+    .filter(block => block.type === "text")
+    .map(block => block.type === "text" ? block.text : "")
+    .join("");
+}
+
 export function relayError(message: string): CallToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
 }
@@ -232,7 +263,7 @@ export function relayNoticeResult(callId: string): CallToolResult {
   return { content: [{ type: "text", text: relayNotice(callId) }], isError: false };
 }
 export function projectedMcpName(name: string): string {
-  return `pi_${name}`.replace(/[^a-zA-Z0-9_-]/gu, "_").slice(0, 64);
+  return `omp_${name}`.replace(/[^a-zA-Z0-9_-]/gu, "_").slice(0, 64);
 }
 
 export function canonicalArguments(value: unknown): string {

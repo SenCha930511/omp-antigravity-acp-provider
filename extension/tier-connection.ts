@@ -7,7 +7,7 @@ import { choices, resolveSelection, selector } from "./selectors.ts";
 import { normalizeInitializeResponse, sessionRoutingRequest, type NativeToolMode, type SessionRpcRequest, type SessionRoutingKind } from "./tool-routing.ts";
 import { showAcpUpdate } from "./activity-presentation.ts";
 import { alignContextTokens, applyCompactionChunk, applyCompactionUpdate, isTerminalCompaction, type AcpCompactionNotice, type AcpCompactionRecord } from "./acp-compaction.ts";
-import { AgentNoticeFilter } from "./agent-notices.ts";
+import { AgentNoticeFilter, type AgentNoticeCapture } from "./agent-notices.ts";
 import { parseSessionUsage, usageDelta, type SessionUsage } from "./usage-accounting.ts";
 import { conversationDbPath, peekMaxModelStepIdx, readModelStepsAfter, type StepUsageBatch } from "./usage-db.ts";
 import { DEFAULT_USAGE_MODE } from "./context-settings.ts";
@@ -471,10 +471,19 @@ export class TierConnection extends AntigravityAcpConnection {
     this.usageReads?.delete(id);
     this.noticeFilter?.forget(id);
     this.noticeClosed?.delete(id);
+    // Captured failure evidence outlives the per-turn forget so the finished
+    // turn stays readable; a retired session must not keep it.
+    this.noticeFilter?.consumeCaptured(id);
     this.permissionIdentity?.forget(id);
     this.permissionTurns?.delete(id);
     this.steerMuted?.delete(id);
     this.steerActivity?.delete(id);
+  }
+
+  consumeNoticeCapture(sessionId: string): AgentNoticeCapture | undefined {
+    const captured = this.noticeFilter.captured(sessionId);
+    if (!captured.terminal && !captured.apiDetail && !captured.refusedDetail) return undefined;
+    return this.noticeFilter.consumeCaptured(sessionId);
   }
   private permissionTurn(sessionId: string): number {
     return this.permissionTurns?.get(sessionId) ?? 0;
@@ -638,6 +647,9 @@ export class TierConnection extends AntigravityAcpConnection {
   override async prompt(request: Parameters<AntigravityAcpConnection["prompt"]>[0], signal?: AbortSignal): Promise<PromptResponse> {
     this.activePrompts++;
     const id = request.sessionId;
+    // A previous turn that threw before its capture was consumed must not leak
+    // that evidence into this turn's failure classification.
+    this.noticeFilter?.consumeCaptured(id);
     this.noticeClosed?.delete(id);
     const permissionTurn = this.permissionTurn(id) + 1;
     this.permissionTurns?.set(id, permissionTurn);

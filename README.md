@@ -14,6 +14,8 @@ Google Antigravity's official ACP server, adapted for **Oh My Pi (OMP)**.
 
 This is an independent adaptation, **NOT** an official Google or OMP integration. It uses ACP over stdio. The local HTTP MCP bridge carries tool calls; it is not a model API reverse proxy.
 
+> **Warning.** Use this adapter at your own risk. It is an independent, unofficial integration, not affiliated with or endorsed by Google or OMP. It can change or lose data, consume account quota, and break when upstream services change. Review the code and your account policies before using it in production.
+
 This plugin registers the OMP provider and API name `antigravity-acp-provider`. OMP 18.20+ reserves `antigravity-acp` for its built-in Antigravity provider, so the two can be installed side by side. Select this adapter's models as `antigravity-acp-provider/<model-id>`.
 
 ## Features
@@ -21,12 +23,12 @@ This plugin registers the OMP provider and API name `antigravity-acp-provider`. 
 - All server-advertised models, including Claude, GPT-OSS and future IDs when the ACP endpoint advertises them.
 - CLI-first selection. When a usable `agy` CLI is on `PATH`, the adapter launches it through a generated `AGY_ACP_BIN` wrapper. The managed runtime is the fallback. An explicit `AGY_ACP_BIN` always wins.
 - Per-model thinking levels, exposed only when the server confirms them. The offline catalog includes Gemini 4 Hydrogen through `xhigh` and known partner models; the first inference after an empty cache attempts real server discovery.
-- OMP tools through an authenticated loopback MCP bridge.
+- OMP tools through an authenticated loopback MCP bridge, exposed to ACP as `omp_*` names.
 - ACP-native tools are disabled by default for strict OMP-only sessions; `/antigravity-acp native-tools prefer` restores them.
 - Standby ACP initialization coordinated with discovery, plus warm session reuse and guarded oldest-image history continuity.
 - `/login` plus `/antigravity-acp` account, usage and cleanup commands.
 - API-equivalent cost estimates from a model-ID rate table, not subscription billing. Native response usage takes precedence, with a read-only SQLite fallback for completed model steps when no supplemental usage query runs.
-- Long-running OMP tools survive the MCP request window through a relay. The model resumes the same result with `pi_omp_await_result`; the control tool is a separate MCP server and never appears in OMP's tool list.
+- Long-running OMP tools survive the MCP request window through a relay. The model resumes the same result with `omp_await_result`; the control tool is a separate MCP server and never appears in OMP's tool list.
 - Permission requests are tied to the originating session, turn and tool call. Forged, conflicting or previous-turn identities fail closed, while normal requests still use OMP's human review.
 - The MCP `tools/list` reflects the current OMP tool set. The offline wire test covers add, remove and restore on one warm ACP session.
 - Tool-argument hardening on the MCP bridge. Habitual alias mistakes such as `path` for `file_path` are corrected only when the tool schema makes the mapping unambiguous, and rejected calls return the missing required keys plus the tool's expected signature instead of a bare schema failure.
@@ -99,7 +101,7 @@ Run `/login`, choose **Google Antigravity (ACP)**, and complete Google's consent
 /model
 ```
 
-`refresh` asks the ACP server which models the account can use; `/model` lists them. Set an effort with OMP's thinking control when the model advertises levels. If OMP's `enabledModels` whitelist is configured, add `antigravity-acp-provider/*` to it.
+`refresh` asks the ACP server which models the account can use; `/model` lists them. Set an effort with OMP's thinking control when the model advertises levels. When OMP already has a non-empty `enabledModels` whitelist, `refresh` adds `antigravity-acp-provider/*` to it automatically, so restart OMP or reopen `/model` if the picker was already open. No whitelist is created when none exists.
 
 ### 6. Verify
 
@@ -122,12 +124,12 @@ To remove the installed plugin, use `omp plugin uninstall omp-antigravity-acp-pr
 | Symptom | Check |
 | --- | --- |
 | `omp: command not found` | This is an OMP plugin. Install OMP first; there is no standalone CLI. |
-| No models after `/antigravity-acp refresh` | Run `/antigravity-acp account` to confirm both sides are signed in, then retry with internet access. ACP can advertise fewer models than the Antigravity app. |
+| No models after `/antigravity-acp refresh` | Run `/antigravity-acp account` to confirm both sides are signed in, then retry with internet access. ACP can advertise fewer models than the Antigravity app. If OMP has an `enabledModels` whitelist, refresh adds `antigravity-acp-provider/*` to it; restart OMP or reopen `/model` when the picker was already open. |
 | Two Antigravity providers appear | That is expected on OMP 18.20+: the built-in `antigravity-acp` provider and this plugin's `antigravity-acp-provider` coexist. Remove only a second copy of this adapter (`antigravity-acp-omp`, the upstream Pi extension, or a duplicate npm install), then restart OMP. |
 | Login opens the wrong Google account | Both login paths always start a fresh sign-in. Choose the intended account (or "Use another account") on Google's consent screen. |
 | Default `disabled` native-tool mode rejects the session | The official runtime must advertise system-append support (1.4.1+). Upgrade the runtime or run `/antigravity-acp native-tools prefer`. |
 | The first request is slow | Runtime download and cold ACP start happen once; later turns reuse the warm session. |
-| A tool call returns a relay notice | The model should call `pi_omp_await_result` with the notice's `call_id`. Lower `OMP_ACP_TOOL_RELAY_MS` or set it to `0` to disable relay. |
+| A tool call returns a relay notice | The model should call `omp_await_result` with the notice's `call_id`. Lower `OMP_ACP_TOOL_RELAY_MS` or set it to `0` to disable relay. |
 
 ## Install: for agents
 
@@ -182,7 +184,7 @@ Create or edit `~/.omp/agent/antigravity-acp-provider/config.json`:
 
 A pinned source never falls back to the other channel and never downloads it. An explicit non-wrapper `AGY_ACP_BIN` still wins over this setting. If `PI_CODING_AGENT_DIR` is set, use its actual path for `config.json`. Other `runtimeSource` values fail provider startup.
 
-Session storage follows the server's own `--app_data_dir`. The generated wrapper pins `antigravity-acp` — the managed runtime's own default — so CLI-launched ACP sessions land in `~/.gemini/antigravity-acp/`, where `/antigravity-acp cleanup` and session ownership tracking operate. Personal `agy` CLI chats stay in `~/.gemini/antigravity-cli/` and are never read or deleted by the adapter. `GEMINI_HOME` relocates the managed runtime's tree (upstream behavior); the `agy` CLI stores under `~/.gemini` regardless.
+Session storage follows the server's own `--app_data_dir`. The generated wrapper pins `antigravity-acp` — the managed runtime's own default — so CLI-launched ACP sessions land in `~/.gemini/antigravity-acp/`, where `/antigravity-acp cleanup` and session ownership tracking operate. Personal `agy` CLI chats stay in `~/.gemini/antigravity-cli/` and are never read or deleted by the adapter. `GEMINI_HOME` relocates the adapter's ACP tree and the token-sync source; the personal `agy` CLI store remains under `~/.gemini` and its token is never copied into an isolated tree. A logout marker blocks later CLI-token sync until a fresh sign-in.
 
 The active channel and its versions are recorded in `~/.omp/agent/antigravity-acp-provider/acp-runtime-source.json` whenever the CLI is chosen.
 
@@ -270,7 +272,7 @@ Inference and `/antigravity-acp refresh` refuse to start ACP when no local Googl
 
 ## Long tools and relay
 
-A tool call that outlives `OMP_ACP_TOOL_RELAY_MS` (default 85000, `0` disables, otherwise 5000 through 165000) returns a relay notice instead of holding the MCP request open. The model calls `pi_omp_await_result` with the notice's `call_id`; the adapter returns the same original result, not a second execution. The control tool is a separate MCP server and is not added to OMP's tool list. If the ACP turn ends before the result arrives, the adapter retries the same result in a fresh ACP turn; it never delivers a stale result to a new writer.
+A tool call that outlives `OMP_ACP_TOOL_RELAY_MS` (default 85000, `0` disables, otherwise 5000 through 165000) returns a relay notice instead of holding the MCP request open. The model calls `omp_await_result` with the notice's `call_id`; the adapter returns the same original result, not a second execution. The control tool is a separate MCP server and is not added to OMP's tool list. If the ACP turn ends before the result arrives, the adapter retries the same result in a fresh ACP turn; it never delivers a stale result to a new writer. If the model never calls the control tool, the next OMP turn carries the completed result as history or a bounded `<tool_result>` envelope; the adapter never re-executes the tool.
 
 Permission requests are correlated by session, turn and `toolCallId` with structured `mcpServerName`/`mcpToolName` metadata. A conflicting update, a previous-turn id, or a permission-before-update that claims MCP identity is rejected with `reject_once` when available, otherwise `cancelled`. Normal requests still go through OMP's human review.
 

@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AcpFailure, classifyAcpFailure } from "../extension/acp-errors.ts";
 import { AntigravityAcpError, redactTail } from "../extension/runtime/acp/errors.ts";
+import { cloakText, turnsAway } from "../extension/prompt-cloak.ts";
+import { cleanOmpSystemInstructions } from "../extension/tool-routing.ts";
 
 function classify(message: string): AcpFailure {
   const failure = classifyAcpFailure(new Error(message));
@@ -105,4 +107,66 @@ test("wrapped protocol OAuth EOF is still a transport failure", () => {
   const failure = classifyAcpFailure(new AntigravityAcpError("protocol", "Antigravity ACP error: oauth2.googleapis.com/token: EOF"));
   assert.equal(failure.code, "transport");
   assert.match(failure.message, /HTTP_PROXY/);
+});
+
+test("a fingerprinted 429 is a prompt rejection, not a quota problem", () => {
+  const failure = classifyAcpFailure(new Error("⚠ RESOURCE_EXHAUSTED (code 429): Resource has been exhausted"),
+    { promptFingerprinted: true });
+  assert.ok(failure instanceof AcpFailure);
+  assert.equal(failure.code, "prompt_rejected");
+  assert.match(failure.message, /despite remaining quota/);
+});
+
+test("a 429 without the fingerprint hint stays a quota failure", () => {
+  const failure = classify("RESOURCE_EXHAUSTED (code 429): Resource has been exhausted");
+  assert.equal(failure.code, "quota");
+  assert.doesNotMatch(failure.message, /fingerprint/);
+});
+
+test("a wrapped quota-code failure with the fingerprint hint explains the refusal", () => {
+  const failure = classifyAcpFailure(new AntigravityAcpError("quota", "resource exhausted"),
+    { promptFingerprinted: true });
+  assert.equal(failure.code, "prompt_rejected");
+  assert.match(failure.message, /prompt fingerprint refused/);
+});
+
+test("explicit quota wording stays quota even when the prompt is fingerprinted", () => {
+  const failure = classifyAcpFailure(new AntigravityAcpError("quota",
+    "Antigravity quota exceeded for gemini-4-hydrogen. Resets at 2026-11-16T05:00:00Z"),
+    { promptFingerprinted: true });
+  assert.equal(failure.code, "quota");
+  assert.doesNotMatch(failure.message, /fingerprint/);
+});
+
+test("raw quota-exceeded wording stays quota even when the prompt is fingerprinted", () => {
+  const failure = classifyAcpFailure(new Error("Antigravity quota exceeded for gemini-4-hydrogen. Resets at 2026-11-16T05:00:00Z"),
+    { promptFingerprinted: true });
+  assert.equal(failure.code, "quota");
+  assert.doesNotMatch(failure.message, /fingerprint/);
+});
+
+// The runtime decides the hint from the instructions the session actually
+// carries: the append channel cleans them, and disabled mode cloaks the known
+// phrases away. Mirror that decision here so the classification contract stays
+// pinned to the sent text.
+const FINGERPRINTED_INSTRUCTIONS = "# OMP session instructions\n\nReply with exactly: OK\n\nBe concise.";
+
+test("a prefer-mode instruction fingerprint turns the 429 banner into a prompt rejection", () => {
+  const hint = { promptFingerprinted: turnsAway(cleanOmpSystemInstructions(FINGERPRINTED_INSTRUCTIONS)) };
+  assert.equal(hint.promptFingerprinted, true);
+  const failure = classifyAcpFailure(new Error("⚠ RESOURCE_EXHAUSTED (code 429): Resource has been exhausted"), hint);
+  assert.ok(failure instanceof AcpFailure);
+  assert.equal(failure.code, "prompt_rejected");
+  assert.match(failure.message, /despite remaining quota/);
+  assert.doesNotMatch(failure.message, /quota exceeded/);
+});
+
+test("disabled-mode cloaked instructions do not set the fingerprint hint", () => {
+  const sent = cloakText(cleanOmpSystemInstructions(FINGERPRINTED_INSTRUCTIONS)).text;
+  assert.equal(turnsAway(sent), false);
+  const failure = classifyAcpFailure(new Error("⚠ RESOURCE_EXHAUSTED (code 429): Resource has been exhausted"),
+    { promptFingerprinted: turnsAway(sent) });
+  assert.ok(failure instanceof AcpFailure);
+  assert.equal(failure.code, "quota");
+  assert.match(failure.message, /quota exceeded/);
 });

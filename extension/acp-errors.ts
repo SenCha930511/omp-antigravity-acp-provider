@@ -6,6 +6,7 @@ import { redactSensitiveText } from "./redact.ts";
 export type AcpFailureCode =
   | "auth"
   | "quota"
+  | "prompt_rejected"
   | "rate_limit"
   | "context"
   | "timeout"
@@ -15,6 +16,11 @@ export type AcpFailureCode =
   | "model"
   | "refusal"
   | "aborted";
+
+export interface AcpFailureContext {
+  /** The session's instructions contained a phrase agy refuses regardless of quota. */
+  promptFingerprinted?: boolean;
+}
 
 export class AcpFailure extends Error {
   constructor(readonly code: AcpFailureCode, message: string, options?: ErrorOptions) {
@@ -41,6 +47,17 @@ const QUOTA_RULE: FailureRule = {
   match: /quota|resource.?exhausted|limit reached|exceeded your|insufficient_quota|out of budget|billing/i,
   ensure: /quota exceeded|insufficient_quota|billing/i,
   append: "quota exceeded",
+};
+
+// agy answers known third-party harness prompt lines with 429s whatever quota
+// is left. When the session's instructions carried such a phrase, quota is the
+// wrong explanation. Explicit metered-quota wording still wins, because the
+// same 429 text also appears for genuine throttling and rate limits.
+const PROMPT_REJECTED_RULE: FailureRule = {
+  code: "prompt_rejected",
+  match: /resource.?exhausted|code\s*[:=]?\s*429|http\s*429|too many requests/i,
+  ensure: /fingerprint/i,
+  append: "prompt fingerprint refused by Antigravity despite remaining quota",
 };
 const RATE_LIMIT_RULE: FailureRule = {
   code: "rate_limit",
@@ -126,12 +143,17 @@ function sanitizedError(error: unknown): Error {
   return sanitized;
 }
 
-export function classifyAcpFailure(error: unknown): Error {
+export function classifyAcpFailure(error: unknown, context: AcpFailureContext = {}): Error {
   if (isAntigravityAcpError(error)) {
     if (error.code === "aborted") return error;
     const cause = { cause: sanitizedCause(error) };
     if (error.code === "auth") return new AcpFailure("auth", redactSensitiveText(appendHint(error.message, AUTH_RULE)), cause);
-    if (error.code === "quota") return new AcpFailure("quota", redactSensitiveText(appendHint(error.message, QUOTA_RULE)), cause);
+    if (error.code === "quota") {
+      if (context.promptFingerprinted && !QUOTA_RULE.ensure.test(error.message) && PROMPT_REJECTED_RULE.match.test(error.message)) {
+        return new AcpFailure("prompt_rejected", redactSensitiveText(appendHint(error.message, PROMPT_REJECTED_RULE)), cause);
+      }
+      return new AcpFailure("quota", redactSensitiveText(appendHint(error.message, QUOTA_RULE)), cause);
+    }
     if (error.code === "timeout") return new AcpFailure("timeout", redactSensitiveText(appendHint(error.message, TIMEOUT_RULE)), cause);
     if (error.code === "spawn" || error.code === "process_exit") return new AcpFailure("transport", redactSensitiveText(appendHint(error.message, TRANSPORT_RULE)), cause);
     if ((error.code === "protocol" || error.code === "invalid_input")
@@ -145,6 +167,9 @@ export function classifyAcpFailure(error: unknown): Error {
   if (!message.trim()) return needsSanitization(error) ? sanitizedError(error) : error instanceof Error ? error : new Error(message);
   if (OAUTH_NETWORK_REFRESH.test(message) && !/invalid_grant/i.test(message)) {
     return new AcpFailure("transport", redactSensitiveText(appendHint(message, TRANSPORT_RULE)), { cause: sanitizedCause(error) });
+  }
+  if (context.promptFingerprinted && !QUOTA_RULE.ensure.test(message) && PROMPT_REJECTED_RULE.match.test(message)) {
+    return new AcpFailure("prompt_rejected", redactSensitiveText(appendHint(message, PROMPT_REJECTED_RULE)), { cause: sanitizedCause(error) });
   }
   for (const rule of RULES) {
     if (rule.match.test(message)) {

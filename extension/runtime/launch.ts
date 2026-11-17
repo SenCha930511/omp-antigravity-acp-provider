@@ -466,7 +466,7 @@ function readManagedVersion(home: string): string | undefined {
   return typeof version === "string" ? version : undefined;
 }
 
-function compareVersions(left: string, right: string): number {
+export function compareVersions(left: string, right: string): number {
   const parse = (value: string) => value.split(".").map(part => Number.parseInt(part, 10) || 0);
   const a = parse(left);
   const b = parse(right);
@@ -498,15 +498,19 @@ function wrapperCommand(file: string, platform: NodeJS.Platform, args: readonly 
   return { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/e:on", "/v:off", "/c", `call "${file}"`, ...args] };
 }
 
+// The wrapper only launches the CLI. Credential sync happens once in
+// prepareRuntime(), where GEMINI_HOME and an atomic, newer-than replacement are
+// known; a shell copy here would hardcode $HOME and could overwrite a newer ACP
+// token with an older CLI one.
 function cliWrapperScript(agyPath: string, platform: NodeJS.Platform = process.platform): string {
   if (platform === "win32") {
     const escaped = agyPath.replace(/%/g, "%%");
-    return `@echo off\r\nsetlocal\r\nset "OMP_ACP_EXTRA="\r\nif "%OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS%"=="1" set "OMP_ACP_EXTRA=--dangerously-skip-permissions"\r\nif exist "%USERPROFILE%\\.gemini\\antigravity-cli\\antigravity-oauth-token" (\r\n  if not exist "%USERPROFILE%\\.gemini\\antigravity-acp" mkdir "%USERPROFILE%\\.gemini\\antigravity-acp" >nul 2>&1\r\n  copy /y "%USERPROFILE%\\.gemini\\antigravity-cli\\antigravity-oauth-token" "%USERPROFILE%\\.gemini\\antigravity-acp\\antigravity-oauth-token" >nul 2>&1\r\n)\r\n"${escaped}" acp --app_data_dir=antigravity-acp %OMP_ACP_EXTRA% %*\r\nexit /b %ERRORLEVEL%\r\n`;
+    return `@echo off\r\nsetlocal\r\nset "OMP_ACP_EXTRA="\r\nif "%OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS%"=="1" set "OMP_ACP_EXTRA=--dangerously-skip-permissions"\r\n"${escaped}" acp --app_data_dir=antigravity-acp %OMP_ACP_EXTRA% %*\r\nexit /b %ERRORLEVEL%\r\n`;
   }
   // --app_data_dir=antigravity-acp is the managed .par's own default: the CLI
   // binary would otherwise default to antigravity-cli, mixing ACP sessions
   // with personal CLI chats outside session cleanup's tracked tree.
-  return `#!/bin/sh\nCLI_TOKEN="$HOME/.gemini/antigravity-cli/antigravity-oauth-token"\nACP_DIR="$HOME/.gemini/antigravity-acp"\nACP_TOKEN="$ACP_DIR/antigravity-oauth-token"\nif [ -f "$CLI_TOKEN" ]; then\n  mkdir -p "$ACP_DIR" 2>/dev/null || true\n  if [ ! -f "$ACP_TOKEN" ] || [ "$CLI_TOKEN" -nt "$ACP_TOKEN" ]; then\n    cp "$CLI_TOKEN" "$ACP_TOKEN" 2>/dev/null || true\n    chmod 600 "$ACP_TOKEN" 2>/dev/null || true\n  fi\nfi\nif [ "\${OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS:-}" = "1" ]; then\n  set -- --dangerously-skip-permissions "$@"\nfi\nexec '${agyPath.replace(/'/g, "'\\''")}' acp --app_data_dir=antigravity-acp "$@"\n`;
+  return `#!/bin/sh\nif [ "\${OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS:-}" = "1" ]; then\n  set -- --dangerously-skip-permissions "$@"\nfi\nexec '${agyPath.replace(/'/g, "'\\''")}' acp --app_data_dir=antigravity-acp "$@"\n`;
 }
 
 export function writeCliWrapper(file: string, script: string): void {

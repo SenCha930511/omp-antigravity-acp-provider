@@ -107,7 +107,7 @@ test("the initial offline catalog includes Argon without spawning ACP", async ()
     const argon = models?.find(model => model.id === "gemini-4-argon");
     assert.ok(argon, "Argon must be selectable before dynamic discovery succeeds");
     assert.equal(argon.name, "Gemini 4 Argon");
-    assert.equal(argon.contextWindow, 1_000_000);
+    assert.equal(argon.contextWindow, 1_048_576);
     assert.equal(argon.maxTokens, 65_536);
     assert.equal(argon.reasoning, true);
     assert.deepEqual(argon.thinking?.efforts, ["low", "medium", "high"]);
@@ -364,8 +364,8 @@ test("first inference on a fresh profile discovers the catalog and republishes x
     assert.ok(updated, "the refreshed provider must still expose the selected model");
     assert.deepEqual(updated.thinking?.efforts, ["low", "medium", "high", "xhigh"]);
     assert.equal(updated.thinking?.defaultLevel, "xhigh");
-    assert.equal(updated.contextWindow, 1_000_000);
-    assert.equal(updated.maxTokens, 65_536);
+    assert.equal(updated.contextWindow, 1_048_576);
+    assert.equal(updated.maxTokens, 262_144);
     assert.deepEqual(parseThoughtRoute(selectRuntimeModel(updated, "xhigh").thinkingLevelMap!.high!),
       { modelId: "gemini-4-hydrogen", effort: "xhigh" });
 

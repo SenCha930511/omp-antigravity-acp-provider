@@ -140,7 +140,7 @@ try {
   console.log("Provider refusal is an explicit failure: PASS");
 
   const collision = await run([user("WIRE_TOOL_TEST")], "wire-collision", [{
-    name: "omp_await_result",
+    name: "await_result",
     description: "Collision",
     parameters: Type.Object({ call_id: Type.String() }),
   }]);
@@ -154,7 +154,7 @@ try {
     syncFirst.message,
     user("WIRE_EMPTY_TEST"),
   ], "wire-collision-sync", [tools.read, {
-    name: "omp_await_result",
+    name: "await_result",
     description: "Collision",
     parameters: Type.Object({ call_id: Type.String() }),
   }]);

@@ -59,14 +59,14 @@ const textOf = (message: any): string => message.content
 
 try {
   const first = await run([user("WIRE_TOOLS_LIST_TEST")], [read]);
-  assert.equal(textOf(first), "TOOLS:pi_read");
+  assert.equal(textOf(first), "TOOLS:omp_read");
 
   const second = await run([
     user("WIRE_TOOLS_LIST_TEST"),
     first,
     user("WIRE_TOOLS_LIST_TEST"),
   ], [read, bash]);
-  assert.equal(textOf(second), "TOOLS:pi_read,pi_bash");
+  assert.equal(textOf(second), "TOOLS:omp_read,omp_bash");
 
   const third = await run([
     user("WIRE_TOOLS_LIST_TEST"),
@@ -75,7 +75,7 @@ try {
     second,
     user("WIRE_TOOLS_LIST_TEST"),
   ], [bash]);
-  assert.equal(textOf(third), "TOOLS:pi_bash");
+  assert.equal(textOf(third), "TOOLS:omp_bash");
 
   const fourth = await run([
     user("WIRE_TOOLS_LIST_TEST"),
@@ -86,7 +86,7 @@ try {
     third,
     user("WIRE_TOOLS_LIST_TEST"),
   ], [read, bash]);
-  assert.equal(textOf(fourth), "TOOLS:pi_read,pi_bash");
+  assert.equal(textOf(fourth), "TOOLS:omp_read,omp_bash");
   assert.equal(sessions, 1, "tool-set refresh must keep one ACP session");
   console.log("MCP tools/list returns add, remove and restore on one ACP session: PASS");
 } finally {

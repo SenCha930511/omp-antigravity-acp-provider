@@ -4,7 +4,12 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { clearAntigravityCredentials, inspectAntigravityAuth, resolveAntigravityAcpDirectory } from "./runtime.mjs";
+import {
+  clearAntigravityCredentials,
+  clearAntigravityLogoutMarker,
+  inspectAntigravityAuth,
+  resolveAntigravityAcpDirectory,
+} from "./runtime.mjs";
 import type { AntigravityAuthHealth } from "./runtime/acp/antigravity.ts";
 import { createSecretService, runSecretTool } from "./secret-service.ts";
 import type { TierConnection } from "./tier-connection.ts";
@@ -411,6 +416,9 @@ export class OmpAuthCoordinator {
   // saved login and keep the previous account.
   noteLoginSucceeded(attempt: FreshGoogleLoginAttempt): void {
     if (!this.activeLogins.delete(attempt)) return;
+    // A completed sign-in ends the durable logout state; a failed or cancelled
+    // one keeps the marker so the next token sync cannot restore the old login.
+    try { clearAntigravityLogoutMarker(); } catch { /* Best effort: the login itself succeeded. */ }
     if (this.activeLogins.size > 0) {
       this.baseSuppressFollow = false;
       this.disabledUntil = 0;

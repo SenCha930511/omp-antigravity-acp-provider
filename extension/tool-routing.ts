@@ -1,5 +1,7 @@
 import type { InitializeResponse } from "@agentclientprotocol/sdk";
 
+import { cloakText } from "./prompt-cloak.ts";
+
 export type NativeToolMode = "prefer" | "disabled";
 
 // A main session may delegate through the pi-bridge; an ephemeral side turn
@@ -10,20 +12,20 @@ export type SessionRoutingKind = "main" | "ephemeral";
 // the pi-bridge MCP server. Keep the mapping short and schema-driven instead of
 // naming an agent roster the runtime cannot verify.
 const PI_BRIDGE_GUIDANCE =
-  "OMP tools exposed by the authenticated pi-bridge MCP server use pi_ names. " +
-  "Native OMP guidance about task maps to pi_task: submit delegated work by calling pi_task, " +
+  "OMP tools exposed by the authenticated pi-bridge MCP server use omp_ names. " +
+  "Native OMP guidance about task maps to omp_task: submit delegated work by calling omp_task, " +
   "and follow the supplied tool schema for agent selection and for delegated or parallel work. " +
   "Use the supplied wait mechanism for completion notifications. " +
-  "Use only supplied pi_* tools that appear in the active tool list. " +
+  "Use only supplied omp_* tools that appear in the active tool list. " +
   "Antigravity-native tools run in a separate runtime with their own permission negotiation; " +
   "their results are not OMP tool results.";
 
 function contextControlGuidance(projectedToolNames: readonly string[]): string {
   return [
     projectedToolNames.includes("context_notes")
-      ? "Native OMP guidance about context_notes maps to pi_context_notes." : "",
+      ? "Native OMP guidance about context_notes maps to omp_context_notes." : "",
     projectedToolNames.includes("new_context")
-      ? "Native OMP guidance about new_context maps to pi_new_context." : "",
+      ? "Native OMP guidance about new_context maps to omp_new_context." : "",
   ].filter(Boolean).join(" ");
 }
 
@@ -41,14 +43,14 @@ const EPHEMERAL_TOOL_GUIDANCE =
   "no tools may be called in this side turn, and tool calls are discarded without execution. " +
   "Reply with plain text only.";
 
-// Two sentences at most: redirect the Antigravity host prompt, then the
-// complete OMP instruction follows unchanged. Only disabled native tools need
-// the redirect; prefer keeps native tools, so its append starts with the OMP text.
+// Disabled native tools redirect the Antigravity host prompt so the OMP
+// instruction owns tool use. Prefer keeps native tools, so its append starts
+// with the OMP text unchanged.
 const ANTIGRAVITY_OVERRIDE =
   "You are operating as the coding assistant for Oh My Pi (OMP). Follow the OMP instructions below.";
 const ANTIGRAVITY_OVERRIDE_WITH_TOOLS =
   "You are operating as the coding assistant for Oh My Pi (OMP). Follow the OMP instructions below; " +
-  "use only OMP pi_* tools and pi_task for reads, writes, searches, commands and subagent delegation.";
+  "use only OMP omp_* tools and omp_task for reads, writes, searches, commands and subagent delegation.";
 
 function antigravityOverride(mode: NativeToolMode, sessionKind: SessionRoutingKind, hasOmpTools: boolean): string {
   if (mode !== "disabled") return "";
@@ -144,19 +146,182 @@ export function ompToolGuidance(
   return [guidance, contextGuidance, ...(mode === "disabled" ? [NATIVE_TOOLS_DISABLED] : [])].filter(Boolean).join("\n\n");
 }
 
-export function cleanOmpSystemInstructions(instructions: string): string {
-  if (!instructions) return "";
-  let cleaned = instructions;
-  cleaned = cleaned.replace(/# Internal URLs[\s\S]*?(?=\n(?:\#{1,6}\s|⁂|<)|$)/g, "");
-  cleaned = cleaned.replace(/(?:#{1,6}\s+functions\s*\n\s*)?namespace functions\s*\{[\s\S]*?\n\}\s*/g, "");
-  cleaned = cleaned.replace(/# xd:\/\/ Tool Devices[\s\S]*?(?=\n#[^#]|\n##\s+(?!Additional devices)|\n⁂|\n<|$)/g, "");
-  cleaned = cleaned.replace(/## MCP Tool Routes[\s\S]*?(?=\n(?:\#{1,6}\s|⁂|<)|$)/g, "");
-  return cleaned.replace(/\n{3,}/g, "\n\n").trim();
+// agy refuses a prompt that embeds OMP's internal tool and device schemas:
+// they are not valid for its runtime and only spend the customization budget.
+// Section removal is line-based with fence tracking, so a `#` or `<` inside a
+// fenced sample never truncates the section, and subheadings stay part of the
+// section they belong to.
+const INTERNAL_SECTIONS: ReadonlyArray<{ readonly level: number; readonly heading: RegExp }> = [
+  { level: 1, heading: /^#\s+Internal URLs\s*$/ },
+  { level: 1, heading: /^#\s+xd:\/\/\s*Tool Devices\s*$/ },
+  { level: 2, heading: /^##\s+MCP Tool Routes\s*$/ },
+];
+
+function headingLevel(line: string): number | undefined {
+  const match = /^(#{1,6})\s/.exec(line);
+  return match ? match[1]!.length : undefined;
 }
 
-// Composes the session append: optional Antigravity override, the unchanged complete
-// OMP instruction, then the existing tool guidance. `hasOmpTools` is only
-// needed when the bridge is registered without ordinary tools.
+interface Fence {
+  readonly char: "`" | "~";
+  readonly length: number;
+}
+
+function openingFence(line: string): Fence | undefined {
+  const match = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!match) return undefined;
+  return { char: match[1]![0] as "`" | "~", length: match[1]!.length };
+}
+
+function closesFence(line: string, open: Fence): boolean {
+  const match = /^\s{0,3}(`{3,}|~{3,})\s*$/.exec(line);
+  return match !== null && match[1]![0] === open.char && match[1]!.length >= open.length;
+}
+
+// Marks every line belonging to a fenced code block, delimiters included.
+// Opening and closing runs are tracked separately: a triple-backtick example
+// inside a four-backtick fence is content, not a close.
+function fencedLines(lines: readonly string[]): boolean[] {
+  const fenced: boolean[] = [];
+  let open: Fence | undefined;
+  for (const line of lines) {
+    if (open !== undefined) {
+      fenced.push(true);
+      if (closesFence(line, open)) open = undefined;
+      continue;
+    }
+    const opening = openingFence(line);
+    if (opening !== undefined) {
+      open = opening;
+      fenced.push(true);
+      continue;
+    }
+    fenced.push(false);
+  }
+  return fenced;
+}
+
+function isSectionBoundary(line: string, level: number): boolean {
+  if (line.startsWith("⁂") || line.startsWith("<")) return true;
+  const heading = headingLevel(line);
+  return heading !== undefined && heading <= level;
+}
+
+function internalSectionRanges(lines: readonly string[], fenced: readonly boolean[]): Array<readonly [number, number]> {
+  const ranges: Array<readonly [number, number]> = [];
+  for (let index = 0; index < lines.length; index++) {
+    if (fenced[index]) continue;
+    const section = INTERNAL_SECTIONS.find(candidate => candidate.heading.test(lines[index]!));
+    if (!section) continue;
+    let end = index + 1;
+    while (end < lines.length && (fenced[end] || !isSectionBoundary(lines[end]!, section.level))) end++;
+    ranges.push([index, end]);
+    index = end - 1;
+  }
+  return ranges;
+}
+
+// Balanced-brace scan for `namespace functions { ... }`, skipping strings and
+// comments so a brace in a type literal or comment cannot end the block early.
+// Returns the closing line, or undefined when the block never closes.
+function namespaceClosingLine(lines: readonly string[], start: number): number | undefined {
+  const openColumn = lines[start]!.indexOf("{");
+  if (openColumn < 0) return undefined;
+  let depth = 0;
+  let blockComment = false;
+  let quote: "'" | '"' | "`" | undefined;
+  for (let line = start; line < lines.length; line++) {
+    const text = lines[line]!;
+    for (let column = line === start ? openColumn : 0; column < text.length; column++) {
+      const char = text[column];
+      if (blockComment) {
+        if (char === "*" && text[column + 1] === "/") {
+          blockComment = false;
+          column++;
+        }
+        continue;
+      }
+      if (quote !== undefined) {
+        if (char === "\\") column++;
+        else if (char === quote) quote = undefined;
+        continue;
+      }
+      if (char === "/" && text[column + 1] === "/") break;
+      if (char === "/" && text[column + 1] === "*") {
+        blockComment = true;
+        column++;
+        continue;
+      }
+      if (char === "'" || char === '"' || char === "`") {
+        quote = char;
+        continue;
+      }
+      if (char === "{") {
+        depth++;
+      } else if (char === "}") {
+        depth--;
+        if (depth === 0) return line;
+      }
+    }
+  }
+  return undefined;
+}
+
+// The heading directly above the block and a trailing `// namespace functions`
+// comment belong to the same generated schema fragment.
+function namespaceRange(
+  lines: readonly string[],
+  fenced: readonly boolean[],
+  start: number,
+  closing: number,
+): readonly [number, number] {
+  let from = start;
+  for (let line = start - 1; line >= 0; line--) {
+    if (lines[line]!.trim() === "") continue;
+    if (!fenced[line] && /^#{1,6}\s+functions\s*$/.test(lines[line]!)) from = line;
+    break;
+  }
+  let to = closing + 1;
+  for (let line = closing + 1; line < lines.length; line++) {
+    const text = lines[line]!.trim();
+    if (text === "") continue;
+    if (/^\/\/\s*namespace functions\b/.test(text)) {
+      to = line + 1;
+      continue;
+    }
+    break;
+  }
+  return [from, to];
+}
+
+export function cleanOmpSystemInstructions(instructions: string): string {
+  if (!instructions) return "";
+  const lines = instructions.split("\n");
+  const fenced = fencedLines(lines);
+  const dropped = lines.map(() => false);
+  for (const [from, to] of internalSectionRanges(lines, fenced)) {
+    for (let line = from; line < to; line++) dropped[line] = true;
+  }
+  for (let line = 0; line < lines.length; line++) {
+    if (fenced[line]) continue;
+    if (!/^\s*namespace\s+functions\s*\{/.test(lines[line]!)) continue;
+    const closing = namespaceClosingLine(lines, line);
+    // An unbalanced block is left alone: truncating the rest of the prompt
+    // would delete user instructions instead of internal schema text.
+    if (closing === undefined) continue;
+    const [from, to] = namespaceRange(lines, fenced, line, closing);
+    for (let index = from; index < to; index++) dropped[index] = true;
+    line = to - 1;
+  }
+  if (!dropped.some(Boolean)) return instructions;
+  return lines.filter((_, index) => !dropped[index]).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// Composes the session append: optional Antigravity override, the cleaned
+// complete OMP instruction, then the existing tool guidance. Disabled mode
+// also rewords known fingerprint phrases agy refuses with 429s; prefer stays
+// byte-identical apart from the cleaning above.
+// `hasOmpTools` is only needed when the bridge is registered without tools.
 export function sessionSystemAppend(
   initialize: InitializeMetadata | undefined,
   mode: NativeToolMode,
@@ -167,9 +332,11 @@ export function sessionSystemAppend(
   projectedToolNames: readonly string[] = [],
 ): string {
   const bridgeActive = bridgeConfigured && hasOmpTools !== false && mcpHttpAvailable(initialize);
+  const cleaned = cleanOmpSystemInstructions(instructions);
+  const instructionText = mode === "disabled" ? cloakText(cleaned).text : cleaned;
   return [
     antigravityOverride(mode, sessionKind, bridgeActive),
-    cleanOmpSystemInstructions(instructions),
+    instructionText,
     ompToolGuidance(initialize, mode, bridgeActive, sessionKind, projectedToolNames),
   ].filter(Boolean).join("\n\n");
 }
@@ -210,7 +377,7 @@ export function sessionRoutingRequest<T extends SessionRpcRequest>(
   const bridgeConfigured = request.mcpServers?.some(server => server.name === "pi-bridge") === true;
   // A registered bridge normally implies tools; the explicit false override
   // keeps an externally registered empty bridge from being eagerly connected
-  // or advertised as pi_ tools.
+  // or advertised as omp_ tools.
   if (hasOmpTools === false) eager.delete("pi-bridge");
   else if (bridgeConfigured) eager.add("pi-bridge");
   return { ...request, _meta: { ...request._meta, antigravity: {

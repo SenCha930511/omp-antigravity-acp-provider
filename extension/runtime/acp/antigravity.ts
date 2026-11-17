@@ -49,6 +49,11 @@ export type AntigravityAuthStatus =
 	| "corrupt"
 	| "missing";
 
+/** Adapter-owned marker recording a logout the server's own stores cannot
+ * express: it stops the CLI token sync from copying a personal login back into
+ * this ACP tree and keeps auth inspection logged out until a fresh login. */
+export const ANTIGRAVITY_LOGOUT_MARKER = "logged-out";
+
 export interface AntigravityAuthHealth {
 	status: AntigravityAuthStatus;
 	authType?: string;
@@ -67,6 +72,33 @@ export function resolveAntigravityAcpDirectory(env: NodeJS.ProcessEnv = process.
 	const geminiHome = env.GEMINI_HOME?.trim();
 	const base = geminiHome ? expandHome(geminiHome, home) : path.join(home, ".gemini");
 	return path.join(base, "antigravity-acp");
+}
+
+/** The agy CLI's own token file. It follows the same home rules as the ACP tree
+ * so an explicit `GEMINI_HOME` never mixes the isolated tree with the real
+ * user's CLI login. */
+export function resolveAntigravityCliTokenPath(env: NodeJS.ProcessEnv = process.env): string {
+	const home = effectiveHome(env);
+	const geminiHome = env.GEMINI_HOME?.trim();
+	const base = geminiHome ? expandHome(geminiHome, home) : path.join(home, ".gemini");
+	return path.join(base, "antigravity-cli", "antigravity-oauth-token");
+}
+
+export function isAntigravityLoggedOut(directory = resolveAntigravityAcpDirectory()): boolean {
+	return regularFile(path.join(directory, ANTIGRAVITY_LOGOUT_MARKER));
+}
+
+export function markAntigravityLoggedOut(directory = resolveAntigravityAcpDirectory()): void {
+	fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+	fs.writeFileSync(
+		path.join(directory, ANTIGRAVITY_LOGOUT_MARKER),
+		`${JSON.stringify({ loggedOutAt: new Date().toISOString() })}\n`,
+		{ mode: 0o600 },
+	);
+}
+
+export function clearAntigravityLogoutMarker(directory = resolveAntigravityAcpDirectory()): void {
+	fs.rmSync(path.join(directory, ANTIGRAVITY_LOGOUT_MARKER), { force: true });
 }
 
 /** Structural local health only. A network probe is required to call an OAuth
@@ -93,6 +125,11 @@ export function inspectAntigravityAuth(
 		}
 	}
 	if (env.GEMINI_API_KEY) return { status: "api-key-env", authType: "gemini-api-key", tokenFile, settingsFile };
+	// A recorded logout survives restarts and cannot be undone by a later CLI
+	// token sync. Without a token file it reports the logged-out state instead of
+	// the settings file's stale auth choice; a token stored by a real login
+	// (including one this adapter never observed) is inspected normally.
+	if (!tokenFile && isAntigravityLoggedOut(directory)) return { status: "missing", tokenFile, settingsFile };
 	if (tokenFile) {
 		try {
 			const token = JSON.parse(fs.readFileSync(tokenPath, "utf8")) as { refresh_token?: unknown };
@@ -115,11 +152,15 @@ export function hasAntigravityAuth(): boolean {
 }
 
 /** Local logout. Google currently advertises logout as an agent command rather
- * than an ACP SDK RPC, so this removes the local refresh token and auth choice. */
+ * than an ACP SDK RPC, so this removes the local refresh token and auth choice.
+ * The marker goes first: a logout that cannot be recorded leaves the credentials
+ * untouched instead of letting the next token sync restore the login. */
 export function clearAntigravityCredentials(
 	directory = resolveAntigravityAcpDirectory(),
 ): void {
+	markAntigravityLoggedOut(directory);
 	fs.rmSync(path.join(directory, "acp_token.json"), { force: true });
+	fs.rmSync(path.join(directory, "antigravity-oauth-token"), { force: true });
 	const settingsPath = path.join(directory, "settings.json");
 	let parsed: unknown;
 	try { parsed = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch { return; }

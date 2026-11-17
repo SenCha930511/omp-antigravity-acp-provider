@@ -425,7 +425,7 @@ test("shadow routing: only a strict :side: marker borrows the parent runtime", (
   second.release();
 });
 
-test("shadow routing: the side append says no tools may run while main keeps pi_task", async () => {
+test("shadow routing: the side append says no tools may run while main keeps omp_task", async () => {
   const f = await fixture({ routing: true });
   try {
     const tool = { name: "read", description: "Read a file", parameters: Type.Object({ path: Type.String() }) };
@@ -436,7 +436,7 @@ test("shadow routing: the side append says no tools may run while main keeps pi_
     assert.equal(mainConnection.sessionKind, "main");
     const mainAppend = mainConnection.sessionRequests[0]?._meta?.antigravity?.systemPrompt?.append;
     assert.equal(typeof mainAppend, "string");
-    assert.match(mainAppend, /maps to pi_task/);
+    assert.match(mainAppend, /maps to omp_task/);
     assert.doesNotMatch(mainAppend, /no tools may be called/);
 
     const sideEvents = await f.side(main, "BTW_ROUTED", { tools: [tool] });
@@ -448,8 +448,8 @@ test("shadow routing: the side append says no tools may run while main keeps pi_
     assert.ok(sideAppend.startsWith("FIXTURE_RULES"), "the complete main instruction is still carried");
     assert.match(sideAppend, /no tools may be called in this side turn/);
     assert.match(sideAppend, /tool calls are discarded without execution/);
-    assert.doesNotMatch(sideAppend, /maps to pi_task/);
-    assert.doesNotMatch(sideAppend, /use pi_ names|pi_read|pi_write|supplied tool schema|supplied wait mechanism/);
+    assert.doesNotMatch(sideAppend, /maps to omp_task/);
+    assert.doesNotMatch(sideAppend, /use omp_ names|omp_read|omp_write|supplied tool schema|supplied wait mechanism/);
     assert.doesNotMatch(payload(shadowConnection.prompts[0]), /FIXTURE_RULES/,
       "the append channel must not duplicate the instructions in the side prompt");
   } finally { await f.close(); }
@@ -466,7 +466,7 @@ test("shadow: seed, warm delta and retry prompts never authorize a discarded too
       const mainEvents = await f.turn(main, { sessionId: "MAIN", tools: [tool] });
       assert.ok(f.reply(mainEvents));
       const mainPrompt = payload(f.connections[0].prompts[0]);
-      assert.match(mainPrompt, /including another pi_task/, "the main request keeps delegation");
+      assert.match(mainPrompt, /including another omp_task/, "the main request keeps delegation");
       assert.doesNotMatch(mainPrompt, /No tools may be called in this side turn/);
 
       const seeded = await f.side(main, "BTW_SEED", { tools: [tool] });
@@ -476,19 +476,19 @@ test("shadow: seed, warm delta and retry prompts never authorize a discarded too
       assert.match(seed, /MAIN_ASK/, "the seed carries the main history");
       assert.match(seed, /No tools may be called in this side turn/);
       assert.match(seed, /tool calls are discarded without execution/);
-      assert.doesNotMatch(seed, /including another pi_task|New tool calls|Make any new tool calls|maps to pi_task/);
+      assert.doesNotMatch(seed, /including another omp_task|New tool calls|Make any new tool calls|maps to omp_task/);
 
       await f.side(main, "BTW_WARM", { sessionId: "MAIN:side:conversation:btw:b:0", tools: [tool] });
       const warm = payload(shadowConnection.prompts[1]);
       assert.match(warm, /BTW_WARM/);
       assert.match(warm, /No tools may be called in this side turn/);
-      assert.doesNotMatch(warm, /including another pi_task|New tool calls|Make any new tool calls|maps to pi_task/);
+      assert.doesNotMatch(warm, /including another omp_task|New tool calls|Make any new tool calls|maps to omp_task/);
 
       await f.side(main, "BTW_WARM", { sessionId: "MAIN:side:conversation:btw:c:0", tools: [tool] });
       const retried = payload(shadowConnection.prompts[2]);
       assert.match(retried, /# OMP retry request/);
       assert.match(retried, /No tools may be called in this side turn/);
-      assert.doesNotMatch(retried, /including another pi_task|Make any new tool calls|maps to pi_task/);
+      assert.doesNotMatch(retried, /including another omp_task|Make any new tool calls|maps to omp_task/);
       assert.equal(shadowConnection.newSessions, 1, "seed, delta and retry reuse one shadow session");
     } finally { await f.close(); }
   }

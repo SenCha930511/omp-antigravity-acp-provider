@@ -103,6 +103,182 @@ function plainEntries(value: object, budget: ProjectionBudget): Array<[string, u
 	return entries;
 }
 
+// agy compiles every projected `pattern` with Go's RE2 engine, while JSON
+// Schema patterns are ECMA-262: Unicode escapes and lookarounds make agy fail
+// "building toolbox" and abort the whole turn before any model call. Translate
+// the escapes RE2 can express, keep a pattern only when nothing RE2 cannot
+// express (or would reinterpret) remains, and otherwise drop the field while
+// preserving the original as a description hint for the model.
+const PATTERN_HINT_PREFIX = "pattern: ";
+const HIGH_SURROGATE_START = 0xd800;
+const HIGH_SURROGATE_END = 0xdbff;
+const LOW_SURROGATE_START = 0xdc00;
+const LOW_SURROGATE_END = 0xdfff;
+
+function isHighSurrogate(cp: number): boolean {
+	return cp >= HIGH_SURROGATE_START && cp <= HIGH_SURROGATE_END;
+}
+
+function isLowSurrogate(cp: number): boolean {
+	return cp >= LOW_SURROGATE_START && cp <= LOW_SURROGATE_END;
+}
+
+function joinSurrogates(high: number, low: number): number {
+	return 0x10000 + ((high - HIGH_SURROGATE_START) << 10) + (low - LOW_SURROGATE_START);
+}
+
+// Recognizes `\uXXXX` and `\u{...}` starting at `index`.
+function parseUnicodeEscape(source: string, index: number): { end: number; cp: number } | undefined {
+	if (source[index] !== "\\") return undefined;
+	const rest = source.slice(index + 1);
+	let match = /^u\{([0-9a-fA-F]+)\}/.exec(rest);
+	if (match) return { end: index + 1 + match[0].length, cp: Number.parseInt(match[1]!, 16) };
+	match = /^u([0-9a-fA-F]{4})/.exec(rest);
+	if (match) return { end: index + 1 + match[0].length, cp: Number.parseInt(match[1]!, 16) };
+	return undefined;
+}
+
+function emitCodePoint(cp: number): string {
+	const digits = cp.toString(16).toUpperCase();
+	return `\\x{${cp <= 0xffff ? digits.padStart(4, "0") : digits}}`;
+}
+
+// Escape-aware translation of ECMA-262 Unicode escapes into RE2 `\x{...}`
+// escapes, joining adjacent UTF-16 surrogate pairs (escaped or raw) into one
+// code point so an astral pattern character stays a single RE2 atom.
+// `\\u00e9` (a literal backslash before the letters u00e9) is left alone, and
+// the `\x{...}` output is never re-translated, so the rewrite is idempotent.
+function translateUnicodeEscapes(source: string): string {
+	let out = "";
+	let index = 0;
+	while (index < source.length) {
+		const parsed = parseUnicodeEscape(source, index);
+		if (parsed) {
+			const next = parseUnicodeEscape(source, parsed.end);
+			if (isHighSurrogate(parsed.cp) && next && isLowSurrogate(next.cp)) {
+				out += emitCodePoint(joinSurrogates(parsed.cp, next.cp));
+				index = next.end;
+				continue;
+			}
+			// An escaped high surrogate followed by a raw low surrogate.
+			if (isHighSurrogate(parsed.cp) && isLowSurrogate(source.charCodeAt(parsed.end))) {
+				out += emitCodePoint(joinSurrogates(parsed.cp, source.charCodeAt(parsed.end)));
+				index = parsed.end + 1;
+				continue;
+			}
+			out += emitCodePoint(parsed.cp);
+			index = parsed.end;
+			continue;
+		}
+		if (source[index] === "\\") {
+			out += source[index++]!;
+			if (index < source.length) out += source[index++]!;
+			continue;
+		}
+		const code = source.charCodeAt(index);
+		if (isHighSurrogate(code)) {
+			const next = parseUnicodeEscape(source, index + 1);
+			if (next && isLowSurrogate(next.cp)) {
+				out += emitCodePoint(joinSurrogates(code, next.cp));
+				index = next.end;
+				continue;
+			}
+			if (isLowSurrogate(source.charCodeAt(index + 1))) {
+				out += emitCodePoint(joinSurrogates(code, source.charCodeAt(index + 1)));
+				index += 2;
+				continue;
+			}
+		}
+		out += source[index++]!;
+	}
+	return out;
+}
+
+// Only these escape letters keep their JavaScript meaning in RE2. Everything
+// else after a backslash is rejected: `\u`/`\U`/`\c` are invalid there,
+// backreferences `\1`-`\9` and `\k<name>` do not exist, and letters like `\a`
+// (BEL), `\A`, `\z`, `\K`, `\Q…\E`, `\e` change or lose their meaning. A
+// digit is never safe (RE2 reads octal, JavaScript reads a backreference), and
+// a lone trailing backslash is invalid in both engines.
+const RE2_SAFE_ESCAPE_LETTERS = new Set(["f", "n", "r", "t", "v", "d", "D", "s", "S", "w", "W", "b", "B", "x", "0"]);
+
+// Lookaheads `(?=` / `(?!` and lookbehinds `(?<=` / `(?<!` have no RE2 form.
+// `(?<name>` groups are fine and stay. Go also rejects `\b`/`\B` inside a
+// character class and an `\x` not followed by two hex digits or `{hex}`.
+// Property escapes (`\p{Emoji}`, `\P{L}`) depend on a Go property table this
+// projection cannot verify, so they are dropped instead of aborting agy's
+// toolbox build.
+function isRE2Safe(source: string): boolean {
+	let inClass = false;
+	let classStart = -1;
+	for (let index = 0; index < source.length; index++) {
+		const char = source[index];
+		if (char === "\\") {
+			const next = source[++index];
+			if (next === undefined) return false;
+			if (inClass && (next === "b" || next === "B")) return false;
+			if (next === "p" || next === "P") return false;
+			if (next === "x") {
+				const braced = /^\{([0-9a-fA-F]+)\}/.exec(source.slice(index + 1));
+				if (braced) {
+					if (Number.parseInt(braced[1]!, 16) > 0x10ffff) return false;
+					index += braced[0].length;
+					continue;
+				}
+				if (!/^[0-9a-fA-F]{2}/.test(source.slice(index + 1))) return false;
+				index += 2;
+				continue;
+			}
+			if (/[a-zA-Z0-9]/u.test(next) && !RE2_SAFE_ESCAPE_LETTERS.has(next)) return false;
+			continue;
+		}
+		if (inClass) {
+			// `[:alpha:]` is a POSIX name, not a nested class: its `]` must not
+			// end the enclosing class before the real closer.
+			if (char === "[" && source[index + 1] === ":") {
+				const end = source.indexOf(":]", index + 2);
+				if (end >= 0) {
+					index = end + 1;
+					continue;
+				}
+			}
+			if (char === "]" && index > classStart) inClass = false;
+			continue;
+		}
+		if (char === "[") {
+			inClass = true;
+			classStart = source[index + 1] === "^" ? index + 2 : index + 1;
+			continue;
+		}
+		if (char === "(" && source[index + 1] === "?") {
+			const ahead = source[index + 2];
+			if (ahead === "=" || ahead === "!") return false;
+			if (ahead === "<" && (source[index + 3] === "=" || source[index + 3] === "!")) return false;
+		}
+	}
+	if (inClass) return false;
+	return true;
+}
+
+// The RE2-safe rewrite of a pattern, or undefined when it must be dropped.
+function toRE2Pattern(original: string): string | undefined {
+	const translated = translateUnicodeEscapes(original);
+	return isRE2Safe(translated) ? translated : undefined;
+}
+
+// Bridge-style hint: appended in parentheses after an existing description,
+// standing alone when there was none. Re-projecting a hinted node is a no-op.
+function appendPatternHint(node: Record<string, unknown>, hint: string, budget: ProjectionBudget): void {
+	const description = node.description;
+	if (typeof description === "string" && description.trim() && !description.includes(hint)) {
+		node.description = `${description} (${hint})`;
+		spend(budget, 0, hint.length + 3);
+	} else if (typeof description !== "string" || !description.trim()) {
+		node.description = hint;
+		spend(budget, 0, hint.length + 2);
+	}
+}
+
 function sanitizeSchema(value: unknown, depth: number, budget: ProjectionBudget): Projection {
 	if (depth > MAX_SCHEMA_DEPTH) return { reason: "too_deep" };
 	if (!value || typeof value !== "object") return { reason: "invalid_keyword_value" };
@@ -123,6 +299,7 @@ function sanitizeNode(value: object, depth: number, budget: ProjectionBudget): P
 	if (!entries) return { reason: "unsupported_keyword" };
 	const output: Record<string, unknown> = {};
 	let typeUnion: string[] | undefined;
+	let patternHint: string | undefined;
 	for (const [key, candidate] of entries) {
 		if (key.startsWith("~")) {
 			if (!HIDDEN_KEYS.has(key)) return { reason: "unsupported_keyword" };
@@ -139,6 +316,17 @@ function sanitizeNode(value: object, depth: number, budget: ProjectionBudget): P
 			if (jsonScalar(candidate)) {
 				spend(budget, 0, key.length + 3 + scalarChars(candidate));
 				output.default = candidate;
+			}
+			continue;
+		}
+		if (key === "pattern") {
+			if (typeof candidate !== "string") return { reason: "invalid_keyword_value" };
+			const rewritten = toRE2Pattern(candidate);
+			if (rewritten === undefined) {
+				patternHint = `${PATTERN_HINT_PREFIX}${candidate}`;
+			} else {
+				spend(budget, 0, key.length + 3 + scalarChars(rewritten));
+				output.pattern = rewritten;
 			}
 			continue;
 		}
@@ -245,6 +433,7 @@ function sanitizeNode(value: object, depth: number, budget: ProjectionBudget): P
 		spend(budget, 0, 9 + scalarChars(output.const as null | string | number | boolean));
 		output.enum = [output.const];
 	}
+	if (patternHint !== undefined) appendPatternHint(output, patternHint, budget);
 	// Never infer a type: beside const/enum/combinators that could contradict
 	// a valid typeless schema. Empty nested schemas legitimately allow anything.
 	return { schema: output };

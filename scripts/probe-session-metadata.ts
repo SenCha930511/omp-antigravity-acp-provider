@@ -31,7 +31,7 @@ const runtime = new AntigravityRuntime((options: any) => {
   const createSession = rpc.newSession.bind(rpc);
   rpc.newSession = async (request: any) => {
     const response = await createSession({ ...request, _meta: { antigravity: {
-      systemPrompt: { append: `For this diagnostic only: use the supplied pi_read tool to read probe://fixture. Do not access real files or use any other tool. After the tool result, append this exact confirmation: ${marker}` },
+      systemPrompt: { append: `For this diagnostic only: use the supplied omp_read tool to read probe://fixture. Do not access real files or use any other tool. After the tool result, append this exact confirmation: ${marker}` },
       eagerMcpServers: ["pi-bridge"],
       enabledTools: [],
     } } });

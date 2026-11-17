@@ -1,4 +1,4 @@
-import { classifyAcpFailure } from "../../acp-errors.ts";
+import { classifyAcpFailure, type AcpFailureContext } from "../../acp-errors.ts";
 import {
 	type Api,
 	type AssistantMessage,
@@ -19,12 +19,20 @@ export class PiEventWriter {
 	private open: { kind: "text" | "thinking"; index: number } | undefined;
 	private started = false;
 	private terminal = false;
+	private context: AcpFailureContext;
 
 	get finished(): boolean {
 		return this.terminal;
 	}
 
-	constructor(model: Pick<Model<Api>, "id"> & Partial<Pick<Model<Api>, "api" | "provider">>) {
+	// Read-only for the turn runner: a captured banner must be classified with
+	// the same hint the writer will use when it reports the failure.
+	get failureContext(): AcpFailureContext {
+		return this.context;
+	}
+
+	constructor(model: Pick<Model<Api>, "id"> & Partial<Pick<Model<Api>, "api" | "provider">>, failureContext: AcpFailureContext = {}) {
+		this.context = failureContext;
 		this.stream = createAssistantMessageEventStream();
 		this.message = {
 			role: "assistant",
@@ -36,6 +44,13 @@ export class PiEventWriter {
 			stopReason: "pending",
 			timestamp: Date.now(),
 		};
+	}
+
+	// Stream setup resolves the routed instructions after the writer exists;
+	// the fingerprint hint must reach the failure classifier before any turn
+	// error is written.
+	noteFailureContext(context: AcpFailureContext): void {
+		this.context = context;
 	}
 
 	text(delta: string): void {
@@ -92,7 +107,7 @@ export class PiEventWriter {
 		this.closeOpen();
 		this.terminal = true;
 		this.message.stopReason = aborted ? "aborted" : "error";
-		this.message.errorMessage = errorMessage(classifyAcpFailure(cause));
+		this.message.errorMessage = errorMessage(classifyAcpFailure(cause, this.context));
 		this.stream.push({
 			type: "error",
 			reason: aborted ? "aborted" : "error",
