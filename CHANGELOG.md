@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 — 2026-11-17
+
+- Harden relay and turn-boundary delivery: carry a completed but unawaited relay result into the next OMP turn as history or a bounded `<tool_result>` envelope, settle batches at turn boundaries, preserve settled results across cancellation, refusal and non-quota failures, discard them on rewind, and keep late chunks from an expired auth attempt away from the replay writer. ACP tools now use `omp_*` names with `omp_await_result` as the relay control.
+- Replay an expired-auth turn once on a fresh process, fail banner-only empty turns, classify `agy` diagnostic banners as turn failures, and keep a logout marker authoritative when CLI token sync runs. Auto-approve permission requests in headless or non-interactive OMP sessions, and group shared quota buckets while preserving five-hour limits.
+- Add prompt-fingerprint cloaking for refused and quota wording, strip internal schemas and URLs from OMP system instructions before ACP dispatch, retain disabled native-tool mode through system-append routing, and remove the lean-agent spawn because `agy` hides session MCP tools from it.
+- Resolve per-model context and output limits from a shared CloudCode-observed table, extend offline catalog limits and rates, and add `antigravity-acp-provider/*` to an existing non-empty OMP `enabledModels` whitelist on refresh.
+- Keep bridged tool schemas RE2-safe and inside the `agy` MCP budget, reject ambiguous aliases, report missing required keys with the expected signature, and preserve parallel or out-of-order relay results.
+- Add runtime-delivery, tool-delivery, tool-schema, model-limit, whitelist and headless-permission coverage, skip the POSIX mode assertion on Windows, and document the unofficial/at-your-own-risk status and generic bridge-source attribution.
+
 ## 0.3.1 — 2026-11-16
 
 - Register the provider and API as `antigravity-acp-provider`. OMP 18.20 reserves `antigravity-acp` as a built-in API name and ships its own provider under that name, so the previous registration crashed OMP at startup with `ConfigurationError: Cannot register custom API "antigravity-acp": built-in API names are reserved.` Model references change from `antigravity-acp/<model>` to `antigravity-acp-provider/<model>`; update `enabledModels` whitelists and any pinned `--model` values. The built-in provider and this adapter can now be installed side by side. This release contains no other changes. The `v0.3.0` tag was never published; 0.3.1 is the first release with this fix.
