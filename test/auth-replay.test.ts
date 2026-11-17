@@ -12,6 +12,8 @@ const AUTH_EXPIRED = new Error("Antigravity ACP error: authentication required (
 
 interface FixtureOptions {
   prompt: (connection: any, handlers: { onUpdate: (n: unknown) => void }) => Promise<unknown>;
+  capture?: () => { terminal?: string; apiDetail?: string; refusedDetail?: string } | undefined;
+  routing?: { nativeTools: "prefer" | "disabled"; channel: "pending" | "system-append" | "legacy-prompt" };
 }
 
 async function fixture(options: FixtureOptions) {
@@ -21,7 +23,9 @@ async function fixture(options: FixtureOptions) {
     const process = { alive: true, exited: exit.promise };
     let id = randomUUID();
     const connection: any = {
+      prompts: [] as any[],
       process,
+      ...(options.routing ? { toolRouting: { ...options.routing } } : {}),
       async initialize() {
         return { protocolVersion: 1, agentCapabilities: { promptCapabilities: { embeddedContext: true } } };
       },
@@ -29,6 +33,7 @@ async function fixture(options: FixtureOptions) {
       getSessionState() { return { modes, models }; },
       consumeNoticeCapture() { return options.capture?.(); },
       async prompt(request: any) {
+        connection.prompts.push(structuredClone(request));
         return options.prompt({ ...connection, request }, connectionOptions.handlers);
       },
       async close() { if (!process.alive) return; process.alive = false; exit.resolve({ code: 0 }); },
@@ -36,11 +41,17 @@ async function fixture(options: FixtureOptions) {
     connections.push(connection);
     return connection;
   }, "yolo");
-  async function turn(sessionId: string, parentSessionId?: string) {
+  async function turn(
+    sessionId: string,
+    parentSessionId?: string,
+    messages: any[] = [{ role: "user", content: "KEEP_WORKING", timestamp: 1 }],
+    systemPrompt?: string,
+  ) {
     const events: any[] = [];
     for await (const event of runtime.stream(model as any, {
       tools: [],
-      messages: [{ role: "user", content: "KEEP_WORKING", timestamp: 1 }],
+      messages,
+      ...(systemPrompt === undefined ? {} : { systemPrompt }),
     }, { sessionId, ...(parentSessionId ? { parentSessionId } : {}) }).stream) {
       events.push(structuredClone(event));
     }
@@ -127,6 +138,116 @@ test("a banner-only empty shadow turn becomes an error", async () => {
     assert.ok(result.error, "a banner-only empty side reply must fail, not stream silence");
     assert.match(result.error, /error banner/);
     assert.equal(result.message, undefined);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("an auth expiry on a shadow turn replays once on a fresh process", async () => {
+  const { runtime, connections, turn } = await fixture({
+    prompt: async (connection, handlers) => {
+      if (connections.length === 1) throw AUTH_EXPIRED;
+      handlers.onUpdate({ sessionId: connection.request.sessionId, update: {
+        sessionUpdate: "agent_message_chunk", content: { type: "text", text: "SIDE_RECOVERED" } } });
+      return { stopReason: "end_turn" };
+    },
+  });
+  try {
+    const result = await turn("shadow-auth:side:conversation:btw:a:0", "shadow-auth");
+    assert.equal(result.error, undefined, `the replayed side turn must succeed, got ${result.error}`);
+    assert.match(result.message.content[0].text, /SIDE_RECOVERED/);
+    assert.equal(connections.length, 2, "the expired side process must be replaced exactly once");
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("a prefer-mode fingerprint explains an empty 429 banner as a prompt rejection", async () => {
+  const { runtime, turn } = await fixture({
+    prompt: async () => ({ stopReason: "end_turn" }),
+    capture: () => ({ apiDetail: "⚠ RESOURCE_EXHAUSTED (code 429): Resource has been exhausted" }),
+    routing: { nativeTools: "prefer", channel: "system-append" },
+  });
+  try {
+    const result = await turn("fingerprint-prefer", undefined, undefined, "Reply with exactly: OK");
+    assert.ok(result.error, "an empty 429 banner must fail the turn");
+    assert.match(result.error, /despite remaining quota/);
+    assert.doesNotMatch(result.error, /quota exceeded/);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("disabled-mode cloaked instructions keep an empty 429 banner a quota failure", async () => {
+  const { runtime, turn } = await fixture({
+    prompt: async () => ({ stopReason: "end_turn" }),
+    capture: () => ({ apiDetail: "⚠ RESOURCE_EXHAUSTED (code 429): Resource has been exhausted" }),
+    routing: { nativeTools: "disabled", channel: "system-append" },
+  });
+  try {
+    const result = await turn("fingerprint-disabled", undefined, undefined, "Reply with exactly: OK");
+    assert.ok(result.error, "an empty 429 banner must fail the turn");
+    assert.match(result.error, /quota exceeded/);
+    assert.doesNotMatch(result.error, /fingerprint/);
+  } finally {
+    await runtime.close();
+  }
+});
+
+const BIG = "x".repeat(75_000);
+const assistantTurn = (text: string, timestamp: number) => ({
+  role: "assistant", content: [{ type: "text", text }], provider: "antigravity-acp", model: model.id, timestamp,
+});
+const seededHistory = [
+  { role: "user", content: "SEED_ONE_" + BIG, timestamp: 1 },
+  assistantTurn("SEED_TWO_" + BIG, 2),
+  { role: "user", content: "SEED_THREE_" + BIG, timestamp: 3 },
+  assistantTurn("SEED_FOUR_" + BIG, 4),
+  { role: "user", content: "FINAL_ASK", timestamp: 5 },
+];
+const seedStepPrompts = (connection: any) =>
+  connection.prompts.filter((request: any) => JSON.stringify(request).includes("Reply only with: OK"));
+
+test("a transient API retry capture does not fail a seed step that acknowledged OK", async () => {
+  const { runtime, connections, turn } = await fixture({
+    prompt: async (connection, handlers) => {
+      const seed = JSON.stringify(connection.request).includes("Reply only with: OK");
+      handlers.onUpdate({ sessionId: connection.request.sessionId, update: {
+        sessionUpdate: "agent_message_chunk", content: { type: "text", text: seed ? "OK" : "FINAL_ANSWER" } } });
+      return { stopReason: "end_turn" };
+    },
+    capture: () => ({ apiDetail: "⚠ API error (attempt 1): upstream reset" }),
+  });
+  try {
+    const result = await turn("seed-transient", undefined, seededHistory);
+    assert.equal(result.error, undefined, `a retried seed step must not fail the turn, got ${result.error}`);
+    assert.match(result.message.content[0].text, /FINAL_ANSWER/);
+    assert.ok(seedStepPrompts(connections[0]).length > 0, "the fixture must actually dispatch hidden seed steps");
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("a transient API retry capture does not fail a shadow seed step that acknowledged OK", async () => {
+  const { runtime, connections, turn } = await fixture({
+    prompt: async (connection, handlers) => {
+      const seed = JSON.stringify(connection.request).includes("Reply only with: OK");
+      handlers.onUpdate({ sessionId: connection.request.sessionId, update: {
+        sessionUpdate: "agent_message_chunk", content: { type: "text", text: seed ? "OK" : "SIDE_ANSWER" } } });
+      return { stopReason: "end_turn" };
+    },
+    capture: () => ({ apiDetail: "⚠ API error (attempt 1): upstream reset" }),
+  });
+  const side = [
+    ...seededHistory.slice(0, 4),
+    { role: "developer", content: "Ephemeral side-channel turn.", timestamp: 9 },
+    { role: "user", content: "<btw>\nSIDE_QUESTION\n</btw>", timestamp: 10 },
+  ];
+  try {
+    const result = await turn("shadow-seed:side:conversation:btw:a:0", "shadow-seed", side);
+    assert.equal(result.error, undefined, `a retried shadow seed step must not fail the turn, got ${result.error}`);
+    assert.match(result.message.content[0].text, /SIDE_ANSWER/);
+    assert.ok(seedStepPrompts(connections[0]).length > 0, "the fixture must actually dispatch hidden side seed steps");
   } finally {
     await runtime.close();
   }

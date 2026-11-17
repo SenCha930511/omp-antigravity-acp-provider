@@ -234,6 +234,8 @@ export class PiMcpBridge {
 	readonly omissions: ToolOmission[] = [];
 	private readonly token = crypto.randomUUID().replaceAll("-", "");
 	private tools: BridgeTool[];
+	private revision = 0;
+	private fitted: { revision: number; tools: BridgeToolListing[] } | undefined;
 	private server: ReturnType<typeof createServer> | undefined;
 	private url: string | undefined;
 	private readonly responses = new Set<ServerResponse>();
@@ -247,6 +249,8 @@ export class PiMcpBridge {
 		this.omissions.length = 0;
 		this.tools = projectTools(tools, this.omissions);
 		this.fingerprint = projectionFingerprint(this.tools, this.omissions);
+		this.revision++;
+		this.fitted = undefined;
 	}
 
 	get empty(): boolean {
@@ -302,6 +306,24 @@ export class PiMcpBridge {
 		};
 	}
 
+	// agy loads these entries into one shared customization budget; the
+	// alwaysLoad meta keeps each tool loaded and the fitting trims only
+	// description prose when the budget would otherwise drop tools. The
+	// fitted listing depends only on the projected tools, so a revision
+	// counter lets repeated tools/list calls reuse it.
+	private listing(): BridgeToolListing[] {
+		const cached = this.fitted;
+		if (cached !== undefined && cached.revision === this.revision) return cached.tools;
+		const tools = fitToolsToBudget(this.tools.map((tool) => ({
+			name: tool.mcpName,
+			description: tool.description,
+			inputSchema: tool.inputSchema as { type: "object"; properties?: Record<string, object> },
+			_meta: { ...tool.meta, "antigravity/alwaysLoad": true },
+		})));
+		this.fitted = { revision: this.revision, tools };
+		return tools;
+	}
+
 	private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
 		this.responses.add(response);
 		response.once("close", () => this.responses.delete(response));
@@ -328,17 +350,7 @@ export class PiMcpBridge {
 			{ name: "pi-antigravity-acp-tools", version: PACKAGE_VERSION },
 			{ capabilities: { tools: {} } },
 		);
-		protocol.setRequestHandler(ListToolsRequestSchema, () => ({
-			// agy loads these entries into one shared customization budget; the
-			// alwaysLoad meta keeps each tool loaded and the fitting trims only
-			// description prose when the budget would otherwise drop tools.
-			tools: fitToolsToBudget(this.tools.map((tool) => ({
-				name: tool.mcpName,
-				description: tool.description,
-				inputSchema: tool.inputSchema as { type: "object"; properties?: Record<string, object> },
-				_meta: { ...tool.meta, "antigravity/alwaysLoad": true },
-			}))),
-		}));
+		protocol.setRequestHandler(ListToolsRequestSchema, () => ({ tools: this.listing() }));
 		protocol.setRequestHandler(CallToolRequestSchema, async (call) => {
 			const tool = this.tools.find((candidate) => candidate.mcpName === call.params.name);
 			if (!tool) return toolError("Unknown or inactive Pi tool");

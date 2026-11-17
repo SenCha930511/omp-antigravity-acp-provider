@@ -301,6 +301,7 @@ try {
     bindings: new Map(),
     resolvedBindings: new Set(),
     activeConnections: new Set(),
+    retainedDelivery: new Map(),
     ompSystemMemo: { clear() {} },
     ompToolsMemo: { clear() {} },
     sessionStore: { flush: () => flushGate.promise, clear: async () => {} },

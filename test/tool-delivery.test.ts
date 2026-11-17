@@ -34,7 +34,7 @@ test("a completed unawaited result becomes one prompt envelope and is committed 
   const delivery = setup(outcomes);
   const decision = delivery.decide(boundary());
   assert.equal(decision.batch?.entries.length, 1);
-  assert.match(String(decision.batch?.blocks[0]?.text), /<tool_result id="call-1" name="read">/);
+  assert.match(String(decision.batch?.blocks[0]?.text), /<tool_result id="call-1" name="omp_read">/);
   assert.match(String(decision.batch?.blocks[0]?.text), /done/);
   assert.equal(delivery.open().length, 1, "a claimed batch is not delivered until commit");
   delivery.commit(decision.batch!);
@@ -161,4 +161,20 @@ test("envelope truncation counts UTF-8 bytes without splitting astral characters
   assert.match(text, /😀/);
   assert.doesNotMatch(text, /�/);
   assert.doesNotMatch(text, /😀😀/);
+});
+
+test("the envelope names the projected omp_ tool the model actually sees", () => {
+  const blocks = toolResultEnvelope([{
+    callId: "call-1",
+    toolName: "read",
+    result: result("done"),
+  }], "continuation", { images: false, maxBytes: 96_000 });
+  assert.match(String(blocks[0]?.text), /<tool_result id="call-1" name="omp_read">/);
+
+  const projected = toolResultEnvelope([{
+    callId: "call-2",
+    toolName: "mcp.some tool",
+    result: result("done"),
+  }], "continuation", { images: false, maxBytes: 96_000 });
+  assert.match(String(projected[0]?.text), /<tool_result id="call-2" name="omp_mcp_some_tool">/);
 });

@@ -148,3 +148,45 @@ function patternOf(projected: { schema: { properties?: { value?: { pattern?: str
 function patternSchema(pattern: string): unknown {
   return { type: "object", properties: { value: { type: "string", pattern } }, required: ["value"] };
 }
+
+test("RE2 rejects word-boundary escapes inside a character class", () => {
+  for (const pattern of ["[\\b]", "[^\\B]", "^[\\b]$", "[[:alpha:]\\b]"]) {
+    const projected = projectToolSchema(patternSchema(pattern));
+    assert.equal(patternOf(projected), undefined, `${pattern} must lose the pattern field`);
+    assert.equal(descriptionOf(projected), `pattern: ${pattern}`);
+  }
+  for (const pattern of ["\\bword\\B", "[[:alpha:]]"]) {
+    const projected = projectToolSchema(patternSchema(pattern));
+    assert.equal(patternOf(projected), pattern);
+    assert.equal(descriptionOf(projected), "");
+  }
+});
+
+test("RE2 rejects hex escapes that are not two digits or a braced code point", () => {
+  for (const pattern of ["a\\xZZ", "\\x4", "\\x{}", "\\x{110000}"]) {
+    const projected = projectToolSchema(patternSchema(pattern));
+    assert.equal(patternOf(projected), undefined, `${pattern} must lose the pattern field`);
+    assert.equal(descriptionOf(projected), `pattern: ${pattern}`);
+  }
+  const safe = projectToolSchema(patternSchema("\\x41\\x{1F600}"));
+  assert.equal(patternOf(safe), "\\x41\\x{1F600}");
+  assert.equal(descriptionOf(safe), "");
+});
+
+test("RE2 rejects Unicode property escapes Go does not support", () => {
+  for (const pattern of ["\\p{Emoji}", "\\P{L}", "\\pL", "[\\p{L}]"]) {
+    const projected = projectToolSchema(patternSchema(pattern));
+    assert.equal(patternOf(projected), undefined, `${pattern} must lose the pattern field`);
+    assert.equal(descriptionOf(projected), `pattern: ${pattern}`);
+  }
+});
+
+test("RE2 rejects unterminated character classes", () => {
+  for (const pattern of ["[", "[abc", "[^a"]) {
+    const projected = projectToolSchema(patternSchema(pattern));
+    assert.equal(patternOf(projected), undefined, `${pattern} must lose the pattern field`);
+    assert.equal(descriptionOf(projected), `pattern: ${pattern}`);
+  }
+  const safe = projectToolSchema(patternSchema("[abc]"));
+  assert.equal(patternOf(safe), "[abc]");
+});

@@ -31,6 +31,13 @@ export interface WhitelistFileUpdate {
 }
 
 const KEY_PATTERN = /^enabledModels[ \t]*:/;
+// A global wildcard already admits this provider's models; appending a
+// provider selector would only duplicate the same permission.
+const ANY_MODEL_SELECTORS = new Set(["*", "*/*"]);
+
+function providerAlreadyEnabled(entries: readonly string[], prefix: string): boolean {
+  return entries.some(entry => ANY_MODEL_SELECTORS.has(entry) || entry.startsWith(prefix));
+}
 
 function splitLines(text: string): string[] {
   return text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
@@ -213,7 +220,7 @@ export function enableProviderInWhitelist(text: string, provider = "antigravity-
   const flow = parseFlowEntries(text, open);
   if (!flow) return unchanged(text, "unsupported");
   if (flow.entries.length === 0) return unchanged(text, "empty-whitelist", flow.entries);
-  if (flow.entries.some(entry => entry.startsWith(prefix))) return unchanged(text, "already-enabled", flow.entries);
+  if (providerAlreadyEnabled(flow.entries, prefix)) return unchanged(text, "already-enabled", flow.entries);
   const beforeClose = text.slice(open + 1, flow.close);
   const trimmedBefore = beforeClose.trimEnd();
   const separator = trimmedBefore === "" ? "" : trimmedBefore.endsWith(",") ? " " : ", ";
@@ -248,7 +255,7 @@ function enableBlockList(text: string, lines: string[], keyIndex: number, prefix
     lastItem = index;
   }
   if (lastItem < 0) return unchanged(text, "empty-whitelist", entries);
-  if (entries.some(entry => entry.startsWith(prefix))) return unchanged(text, "already-enabled", entries);
+  if (providerAlreadyEnabled(entries, prefix)) return unchanged(text, "already-enabled", entries);
 
   const insertion = `${indent}- "${selector}"`;
   const updated = [...lines];
@@ -293,7 +300,7 @@ export async function ensureProviderModelsEnabled(file: string, provider?: strin
   const release = await lockFile(target, {
     realpath: false,
     stale: 30_000,
-    retries: 0,
+    retries: 2,
     onCompromised: error => { compromised = error; },
   });
   try {

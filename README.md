@@ -14,6 +14,8 @@ Google Antigravity's official ACP server, adapted for **Oh My Pi (OMP)**.
 
 This is an independent adaptation, **NOT** an official Google or OMP integration. It uses ACP over stdio. The local HTTP MCP bridge carries tool calls; it is not a model API reverse proxy.
 
+> **Warning.** Use this adapter at your own risk. It is an independent, unofficial integration, not affiliated with or endorsed by Google or OMP. It can change or lose data, consume account quota, and break when upstream services change. Review the code and your account policies before using it in production.
+
 This plugin registers the OMP provider and API name `antigravity-acp-provider`. OMP 18.20+ reserves `antigravity-acp` for its built-in Antigravity provider, so the two can be installed side by side. Select this adapter's models as `antigravity-acp-provider/<model-id>`.
 
 ## Features
@@ -182,7 +184,7 @@ Create or edit `~/.omp/agent/antigravity-acp-provider/config.json`:
 
 A pinned source never falls back to the other channel and never downloads it. An explicit non-wrapper `AGY_ACP_BIN` still wins over this setting. If `PI_CODING_AGENT_DIR` is set, use its actual path for `config.json`. Other `runtimeSource` values fail provider startup.
 
-Session storage follows the server's own `--app_data_dir`. The generated wrapper pins `antigravity-acp` — the managed runtime's own default — so CLI-launched ACP sessions land in `~/.gemini/antigravity-acp/`, where `/antigravity-acp cleanup` and session ownership tracking operate. Personal `agy` CLI chats stay in `~/.gemini/antigravity-cli/` and are never read or deleted by the adapter. `GEMINI_HOME` relocates the managed runtime's tree (upstream behavior); the `agy` CLI stores under `~/.gemini` regardless.
+Session storage follows the server's own `--app_data_dir`. The generated wrapper pins `antigravity-acp` — the managed runtime's own default — so CLI-launched ACP sessions land in `~/.gemini/antigravity-acp/`, where `/antigravity-acp cleanup` and session ownership tracking operate. Personal `agy` CLI chats stay in `~/.gemini/antigravity-cli/` and are never read or deleted by the adapter. `GEMINI_HOME` relocates the adapter's ACP tree and the token-sync source; the personal `agy` CLI store remains under `~/.gemini` and its token is never copied into an isolated tree. A logout marker blocks later CLI-token sync until a fresh sign-in.
 
 The active channel and its versions are recorded in `~/.omp/agent/antigravity-acp-provider/acp-runtime-source.json` whenever the CLI is chosen.
 

@@ -104,3 +104,51 @@ test("fitToolsToBudget returns an already-fitting list unchanged", () => {
   const tools = [{ name: "small", description: "Tiny.", inputSchema: { type: "object" } }];
   assert.equal(fitToolsToBudget(tools, 18000), tools);
 });
+
+async function listTools(server: { url: string; headers?: Array<{ name: string; value: string }> }): Promise<Array<{ name?: string; description?: string }>> {
+  const authorization = server.headers?.find(header => header.name === "Authorization")?.value;
+  assert.ok(authorization);
+  const response = await fetch(server.url, {
+    method: "POST",
+    headers: { authorization, "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  });
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  const events = text.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice("data: ".length));
+  assert.ok(events.length > 0, "the bridge must answer tools/list with a data event");
+  const body = JSON.parse(events[events.length - 1]!) as { result?: { tools?: Array<{ name?: string; description?: string }> } };
+  return body.result?.tools ?? [];
+}
+
+test("repeated tools/list reuses the fitted listing and a tool update invalidates it", async () => {
+  const bigTool = (name: string) => ({
+    name,
+    label: name,
+    description: "x".repeat(3000),
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "p".repeat(3000) } },
+    },
+  }) as Tool;
+  const tools = Array.from({ length: 10 }, (_, index) => bigTool(`tool_${index}`));
+  const bridge = new PiMcpBridge({ tools, onCall: async () => ({ content: [] }) });
+  const server = await bridge.start();
+  assert.ok(server);
+  try {
+    const first = await listTools(server);
+    const second = await listTools(server);
+    assert.deepEqual(second, first, "an unchanged tool set must list identically");
+    assert.equal(first.length, 10);
+    for (const entry of first) {
+      assert.ok(typeof entry.description === "string" && entry.description.length > 0 && entry.description.length < 3000,
+        "the over-budget listing must carry shortened descriptions");
+    }
+    bridge.updateTools([...tools, bigTool("tool_10")]);
+    const third = await listTools(server);
+    assert.equal(third.length, 11, "a tool update must invalidate the fitted listing");
+    assert.equal(third.at(-1)?.name, "omp_tool_10");
+  } finally {
+    await bridge.close();
+  }
+});

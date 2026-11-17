@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { applyApiCostEstimate } from "./pricing.ts";
 import { fetchCliQuota, type AntigravityQuotaSnapshot } from "./usage-accounting.ts";
 import { createQuotaUsageProvider } from "./quota-usage.ts";
@@ -47,7 +48,6 @@ import { classifyAcpFailure } from "./acp-errors.ts";
 import {
   AcpSessionStore,
   AntigravityRuntime,
-  clearAntigravityCredentials,
   FALLBACK_MODELS,
   PERMISSION_RESULT_KIND,
   PERMISSION_TOOL_NAME,
@@ -55,10 +55,14 @@ import {
   SessionCleanup,
   TierConnection,
   Type,
+  clearAntigravityCredentials,
   createAntigravityProvider,
+  isAntigravityLoggedOut,
   loadConfig,
   planToolProjection,
   prepareManagedRuntime,
+  resolveAntigravityAcpDirectory,
+  resolveAntigravityCliTokenPath,
   usableApiKey,
 } from "./runtime.mjs";
 
@@ -140,9 +144,14 @@ interface WarmupSignature {
 // at its next generation check, so teardown only waits this long.
 const WARMUP_STOP_TIMEOUT_MS = 1_000;
 
+// Auto-approval is a permission-mode decision, not a fallback: a headless host
+// cannot prompt, so only a mode that already trusts the agent may answer here.
+// `default` must deny rather than silently grant what an interactive user would
+// have been asked about.
 export async function resolvePermissionDecision(
   request: { id: string; title: string; options: Array<{ id?: string; label?: string; kind?: string }> },
   ctx: { hasUI?: boolean; ui?: { select?: (title: string, options: string[]) => Promise<string | undefined> } },
+  permissionMode: EffectivePermissionMode,
 ): Promise<{ optionId: string | undefined; text: string; cancelled: boolean }> {
   const labels = request.options.map(option => option.label ?? option.id ?? "");
   let selected: string | undefined;
@@ -155,13 +164,9 @@ export async function resolvePermissionDecision(
   }
   let optionId = selected !== undefined ? request.options[labels.indexOf(selected)]?.id : undefined;
   let text = optionId ? `Permission: ${selected}` : "Permission denied.";
-  if (!optionId && (ctx?.hasUI === false || !ctx?.ui?.select)) {
-    const allowOption = request.options.find((opt: { id?: string; kind?: string }) =>
-      opt.kind === "allow_once" || opt.kind === "allow_always" || opt.id === "allow" ||
-      opt.id === "allow_once" || opt.id === "allow_always" ||
-      (typeof opt.kind === "string" && opt.kind.startsWith("allow")) ||
-      (typeof opt.id === "string" && opt.id.startsWith("allow"))
-    );
+  if (!optionId && (ctx?.hasUI === false || !ctx?.ui?.select)
+    && (permissionMode === "auto_edit" || permissionMode === "yolo")) {
+    const allowOption = autoApprovableOption(request.options);
     if (allowOption?.id) {
       optionId = allowOption.id;
       text = `Permission: ${allowOption.label ?? allowOption.id}`;
@@ -170,28 +175,64 @@ export async function resolvePermissionDecision(
   return { optionId, text, cancelled: !optionId };
 }
 
-export function syncAntigravityOAuthToken(homeDir = os.homedir()): boolean {
+// A one-shot grant keeps the user's later choices open; `allow_always` is only
+// used when the server offers nothing narrower.
+function autoApprovableOption(
+  options: Array<{ id?: string; label?: string; kind?: string }>,
+): { id?: string; label?: string; kind?: string } | undefined {
+  const rankOf = (option: { id?: string; kind?: string }): number | undefined => {
+    const kind = option.kind ?? "";
+    const id = option.id ?? "";
+    if (kind === "allow_once" || id === "allow_once") return 0;
+    if (kind === "allow_always" || id === "allow_always") return 1;
+    if (kind === "allow" || id === "allow") return 2;
+    if (kind.startsWith("allow") || id.startsWith("allow")) return 3;
+    return undefined;
+  };
+  let best: { id?: string; label?: string; kind?: string } | undefined;
+  let bestRank = Number.POSITIVE_INFINITY;
+  for (const option of options) {
+    if (!option.id) continue;
+    const rank = rankOf(option);
+    if (rank === undefined || rank >= bestRank) continue;
+    best = option;
+    bestRank = rank;
+  }
+  return best;
+}
+
+// The CLI token sync is an isolated-tree convenience, never the login itself:
+// it is skipped after a logout, resolves both sides from the same environment
+// rules as the ACP tree, and replaces the target atomically so concurrent
+// preparations can never leave a truncated token behind.
+export function syncAntigravityOAuthToken(env: NodeJS.ProcessEnv = process.env): boolean {
   try {
-    const cliToken = path.join(homeDir, ".gemini", "antigravity-cli", "antigravity-oauth-token");
-    const geminiBase = process.env.GEMINI_HOME?.trim() || path.join(homeDir, ".gemini");
-    const acpDir = path.join(geminiBase, "antigravity-acp");
+    const acpDir = resolveAntigravityAcpDirectory(env);
+    if (isAntigravityLoggedOut(acpDir)) return false;
+    const cliToken = resolveAntigravityCliTokenPath(env);
     const acpToken = path.join(acpDir, "antigravity-oauth-token");
-    if (!fs.existsSync(cliToken)) return false;
     const cliStat = fs.statSync(cliToken);
-    let shouldCopy = false;
+    if (!cliStat.isFile()) return false;
     try {
-      const acpStat = fs.statSync(acpToken);
-      if (cliStat.mtimeMs > acpStat.mtimeMs) shouldCopy = true;
-    } catch {
-      shouldCopy = true;
+      if (fs.statSync(acpToken).mtimeMs >= cliStat.mtimeMs) return false;
+    } catch { /* A missing target is always replaced. */ }
+    fs.mkdirSync(acpDir, { recursive: true, mode: 0o700 });
+    const temporary = `${acpToken}.${randomUUID()}.tmp`;
+    try {
+      fs.copyFileSync(cliToken, temporary);
+      try { fs.chmodSync(temporary, 0o600); } catch { /* Windows has no POSIX mode. */ }
+      fs.renameSync(temporary, acpToken);
+      // Logout writes its marker before deleting credentials. If it landed
+      // during this copy, the marker wins and the copied token must not revive
+      // the login.
+      if (isAntigravityLoggedOut(acpDir)) {
+        fs.rmSync(acpToken, { force: true });
+        return false;
+      }
+    } finally {
+      fs.rmSync(temporary, { force: true });
     }
-    if (shouldCopy) {
-      fs.mkdirSync(acpDir, { recursive: true, mode: 0o700 });
-      fs.copyFileSync(cliToken, acpToken);
-      try { fs.chmodSync(acpToken, 0o600); } catch { /* best effort */ }
-      return true;
-    }
-    return false;
+    return true;
   } catch {
     // Best effort: never fail runtime preparation if token sync encounters filesystem errors.
     return false;
@@ -727,7 +768,7 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     async execute(_id: string, params: { requestId: string }, _signal: unknown, _update: unknown, ctx: OmpCommandContext) {
       const request = runtimes.values().map(bundle => bundle.runtime.getPermission(params.requestId)).find(Boolean);
       if (!request) throw new Error("Permission request expired or missing");
-      const decision = await resolvePermissionDecision(request, ctx);
+      const decision = await resolvePermissionDecision(request, ctx, permissionMode);
       return {
         content: [{ type: "text", text: decision.text }],
         details: { kind: PERMISSION_RESULT_KIND, requestId: request.id, optionId: decision.optionId, cancelled: decision.cancelled },

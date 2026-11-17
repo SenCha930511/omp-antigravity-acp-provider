@@ -105,13 +105,25 @@ test("holds a partial 429 banner and resolves it with the detail captured", () =
   assert.equal(filter.captured("s").refusedDetail, "⚠ RESOURCE_EXHAUSTED (code 429): Quota resource has been exhausted.");
 });
 
-test("drops stream-interrupted and invalid-output notices without capturing", () => {
+test("keeps an interruption a notice but captures invalid output as terminal", () => {
   const filter = new AgentNoticeFilter();
   assert.equal(filter.accept("s", "⚠ The stream was interrupted. Please continue the task you were working on.\n"), undefined);
+  assert.equal(filter.terminalNotice("s"), undefined);
+  // Invalid output means the turn produced nothing usable: a banner-only
+  // end_turn must fail with evidence instead of looking like model silence.
   assert.equal(filter.accept("s", "⚠ Model produced invalid output.\n"), undefined);
   assert.equal(filter.dropped, 2);
-  assert.equal(filter.terminalNotice("s"), undefined);
+  assert.equal(filter.terminalNotice("s"), "⚠ Model produced invalid output.");
   assert.equal(filter.captured("s").apiDetail, undefined);
+  assert.equal(filter.consumeCaptured("s").terminal, "⚠ Model produced invalid output.");
+});
+
+test("holds a split invalid-output banner until the chunk settles it", () => {
+  const filter = new AgentNoticeFilter();
+  assert.equal(filter.accept("s", "⚠ Model produced inva"), undefined);
+  assert.equal(filter.accept("s", "lid output.\n"), undefined);
+  assert.equal(filter.dropped, 1);
+  assert.equal(filter.terminalNotice("s"), "⚠ Model produced invalid output.");
 });
 
 test("passes notice-looking lines inside a code fence through untouched", () => {
@@ -176,6 +188,32 @@ test("TierConnection filters notices before forwarding ACP updates", async () =>
     assert.equal(seen.length, 1);
     assert.equal(seen[0].update.content.text, "answer");
   } finally {
+    await connection.close();
+  }
+});
+
+test("TierConnection drops a stale capture before the next prompt", async () => {
+  const connection: any = new TierConnection({
+    cwd: process.cwd(),
+    command: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 1000)"],
+    handlers: { onUpdate: async () => undefined },
+  });
+  const original = AntigravityAcpConnection.prototype.prompt;
+  AntigravityAcpConnection.prototype.prompt = async () => ({ stopReason: "end_turn" });
+  try {
+    const banner = (sessionId: string) => ({
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "⚠ Agent execution terminated due to error.\n" } },
+    });
+    await connection.handlers.onUpdate(banner("stale"));
+    await connection.handlers.onUpdate(banner("kept"));
+    await connection.prompt({ sessionId: "stale", prompt: [] });
+    assert.equal(connection.consumeNoticeCapture("stale"), undefined,
+      "a turn that threw before its capture was consumed must not leak it into the next turn");
+    assert.equal(connection.consumeNoticeCapture("kept")?.terminal, "⚠ Agent execution terminated due to error.");
+  } finally {
+    AntigravityAcpConnection.prototype.prompt = original;
     await connection.close();
   }
 });

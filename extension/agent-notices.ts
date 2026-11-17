@@ -247,7 +247,10 @@ export class AgentNoticeFilter {
     if (complete && (line.trimEnd() === NETWORK_LINE || line.trimEnd() === CREDITS_LINE)) return "terminal";
     if (!complete && (couldBecome(line, NETWORK_LINE) || couldBecome(line, CREDITS_LINE))) return "hold";
     if (line.startsWith("⚠")) {
-      if (complete && (line.trimEnd() === INTERRUPT_LINE || line.trimEnd() === INVALID_LINE)) return "notice";
+      // An invalid-output banner means the turn produced nothing usable, so it
+      // is terminal evidence; a stream interruption invites a continuation.
+      if (complete && line.trimEnd() === INVALID_LINE) return "terminal";
+      if (complete && line.trimEnd() === INTERRUPT_LINE) return "notice";
       if (API_FULL.test(line) || EXHAUSTED_FULL.test(line) || AGENT_RETRY_NOTICE.test(line)) return "api";
       if (!complete) {
         if (couldBecome(line, INTERRUPT_LINE) || couldBecome(line, INVALID_LINE)) return "hold";

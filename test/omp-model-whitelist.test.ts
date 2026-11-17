@@ -234,3 +234,27 @@ test("the original mode survives a restrictive umask", async t => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a global wildcard already enables this provider and stays idempotent", () => {
+  for (const text of [
+    "enabledModels: [\"*\"]\n",
+    "enabledModels: [nchc/one, \"*/*\"]\n",
+    "enabledModels:\n  - \"*\"\n",
+    "enabledModels:\n  - '*/*'\n",
+  ]) {
+    const first = enableProviderInWhitelist(text);
+    assert.equal(first.changed, false, `${JSON.stringify(text)} must not gain a selector`);
+    assert.equal(first.reason, "already-enabled");
+    assert.equal(first.text, text);
+    const second = enableProviderInWhitelist(first.text);
+    assert.equal(second.changed, false);
+    assert.equal(second.reason, "already-enabled");
+    assert.equal(second.text, text);
+  }
+});
+
+test("a provider selector is still appended beside a non-wildcard list", () => {
+  const update = enableProviderInWhitelist("enabledModels: [nchc/one]\n");
+  assert.equal(update.changed, true);
+  assert.equal(update.text, "enabledModels: [nchc/one, \"antigravity-acp-provider/*\"]\n");
+});

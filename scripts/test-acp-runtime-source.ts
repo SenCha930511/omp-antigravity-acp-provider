@@ -151,6 +151,10 @@ function assertPlanUntouched(stateDir: string, env: NodeJS.ProcessEnv, label: st
   const script = fs.readFileSync(wrapper, "utf8");
   assert.ok(script.startsWith("#!/bin/sh\n"));
   assert.ok(script.includes(`exec '${path.join(bin, "agy")}' acp --app_data_dir=antigravity-acp "$@"`));
+  // Token sync belongs to prepareRuntime(), which honors GEMINI_HOME and
+  // replaces the target atomically; the wrapper must not copy credentials.
+  assert.doesNotMatch(script, /antigravity-oauth-token/);
+  assert.doesNotMatch(script, /\$HOME/);
   fs.accessSync(wrapper, fs.constants.X_OK);
   const record = JSON.parse(fs.readFileSync(recordPath(stateDir), "utf8"));
   assert.equal(record.source, "cli");
@@ -376,6 +380,11 @@ if (process.platform !== "win32") {
   assert.match(script, /acp --app_data_dir=antigravity-acp/);
   assert.match(script, /if "%OMP_ACP_DANGEROUSLY_SKIP_PERMISSIONS%"=="1" set "OMP_ACP_EXTRA=--dangerously-skip-permissions"/);
   assert.doesNotMatch(script, /if defined[^\r\n]*\(/);
+  // No credential copy: an unconditional `copy /y` here could replace a newer
+  // ACP token with an older CLI one and ignores GEMINI_HOME.
+  assert.doesNotMatch(script, /antigravity-oauth-token/);
+  assert.doesNotMatch(script, /copy \/y/);
+  assert.doesNotMatch(script, /USERPROFILE/);
   // Windows cannot spawn a .cmd file directly, so the wrapper goes through the
   // command processor; the plan still names the exact wrapper path.
   const winSpawn = resolveLaunchSpawn(plan, "win32");

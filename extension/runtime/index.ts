@@ -10,7 +10,10 @@ export {
   inspectAntigravityAuth,
   hasAntigravityAuth,
   clearAntigravityCredentials,
+  clearAntigravityLogoutMarker,
+  isAntigravityLoggedOut,
   resolveAntigravityAcpDirectory,
+  resolveAntigravityCliTokenPath,
 } from "./acp/antigravity.ts";
 export { describeCredentialStorage } from "./acp/credential-storage.ts";
 export { FALLBACK_MODELS, projectModels } from "./models.ts";

@@ -647,6 +647,9 @@ export class TierConnection extends AntigravityAcpConnection {
   override async prompt(request: Parameters<AntigravityAcpConnection["prompt"]>[0], signal?: AbortSignal): Promise<PromptResponse> {
     this.activePrompts++;
     const id = request.sessionId;
+    // A previous turn that threw before its capture was consumed must not leak
+    // that evidence into this turn's failure classification.
+    this.noticeFilter?.consumeCaptured(id);
     this.noticeClosed?.delete(id);
     const permissionTurn = this.permissionTurn(id) + 1;
     this.permissionTurns?.set(id, permissionTurn);

@@ -2,6 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { parseRelayCallId, TOOL_RELAY_CONTROL_NAME } from "../../tool-relay-protocol.mjs";
 import type { TransferBlock } from "../prompt.ts";
+import { projectedMcpName } from "./relay.ts";
 import type { RelayInvocation, RelayOutcome } from "./relay.ts";
 
 export interface DeliveryBoundary {
@@ -47,6 +48,8 @@ interface Obligation {
   readonly toolName: string;
   state: ObligationState;
   batchId?: number;
+  // Kept so a binding replacement can hand a settled result to its successor.
+  result?: CallToolResult;
 }
 
 export function hasUndeliveredRelay(delivery: Pick<RelayDelivery, "open">, callIds: Iterable<string>): boolean {
@@ -90,6 +93,10 @@ export class RelayDelivery {
     if (result && relayNoticeCallId(result) === callId) return;
     const obligation = this.obligations.get(callId);
     if (!obligation || obligation.state === "delivered") return;
+    if (obligation.result) {
+      obligation.state = "delivered";
+      return;
+    }
     const outcome = this.relay.inspect(callId);
     if (outcome.kind === "settled") obligation.state = "delivered";
   }
@@ -108,7 +115,9 @@ export class RelayDelivery {
     }
     for (const obligation of this.obligations.values()) {
       if (obligation.state !== "open") continue;
-      const outcome = this.relay.inspect(obligation.callId);
+      const outcome = obligation.result
+        ? { kind: "settled" as const, state: obligation.result.isError ? "failed" as const : "fulfilled" as const, result: obligation.result }
+        : this.relay.inspect(obligation.callId);
       if (outcome.kind === "unknown" || outcome.kind === "expired" || outcome.kind === "cancelled") {
         this.obligations.delete(obligation.callId);
         dropped.push({ callId: obligation.callId, reason: `relay-${outcome.kind}` });
@@ -126,6 +135,7 @@ export class RelayDelivery {
         obligation.state = "delivered";
         continue;
       }
+      obligation.result = outcome.result;
       entries.push({ callId: obligation.callId, toolName: obligation.toolName, result: outcome.result });
     }
     if (entries.length === 0) return { deferred, dropped };
@@ -168,6 +178,27 @@ export class RelayDelivery {
     }
   }
 
+  settledOpen(): DeliveryEntry[] {
+    const entries: DeliveryEntry[] = [];
+    for (const obligation of this.obligations.values()) {
+      if (obligation.state === "delivered" || obligation.result === undefined) continue;
+      entries.push({ callId: obligation.callId, toolName: obligation.toolName, result: obligation.result });
+    }
+    return entries;
+  }
+
+  adopt(entries: readonly DeliveryEntry[]): void {
+    for (const entry of entries) {
+      if (this.obligations.has(entry.callId)) continue;
+      this.obligations.set(entry.callId, {
+        callId: entry.callId,
+        toolName: entry.toolName,
+        state: "open",
+        result: entry.result,
+      });
+    }
+  }
+
   reset(): void {
     this.obligations.clear();
   }
@@ -190,7 +221,7 @@ export function toolResultEnvelope(
     const truncated = text !== full;
     blocks.push({
       type: "text",
-      text: `<tool_result id="${entry.callId}" name="${entry.toolName}"${entry.result.isError ? ' error="true"' : ""}>\n` +
+      text: `<tool_result id="${entry.callId}" name="${projectedMcpName(entry.toolName)}"${entry.result.isError ? ' error="true"' : ""}>\n` +
         `${escapeClosingTag(text)}${truncated ? "\n[tool result truncated for delivery]" : ""}\n</tool_result>\n\n`,
     });
     for (const block of entry.result.content) {

@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AcpFailure, classifyAcpFailure } from "../extension/acp-errors.ts";
 import { AntigravityAcpError, redactTail } from "../extension/runtime/acp/errors.ts";
+import { cloakText, turnsAway } from "../extension/prompt-cloak.ts";
+import { cleanOmpSystemInstructions } from "../extension/tool-routing.ts";
 
 function classify(message: string): AcpFailure {
   const failure = classifyAcpFailure(new Error(message));
@@ -141,4 +143,30 @@ test("raw quota-exceeded wording stays quota even when the prompt is fingerprint
     { promptFingerprinted: true });
   assert.equal(failure.code, "quota");
   assert.doesNotMatch(failure.message, /fingerprint/);
+});
+
+// The runtime decides the hint from the instructions the session actually
+// carries: the append channel cleans them, and disabled mode cloaks the known
+// phrases away. Mirror that decision here so the classification contract stays
+// pinned to the sent text.
+const FINGERPRINTED_INSTRUCTIONS = "# OMP session instructions\n\nReply with exactly: OK\n\nBe concise.";
+
+test("a prefer-mode instruction fingerprint turns the 429 banner into a prompt rejection", () => {
+  const hint = { promptFingerprinted: turnsAway(cleanOmpSystemInstructions(FINGERPRINTED_INSTRUCTIONS)) };
+  assert.equal(hint.promptFingerprinted, true);
+  const failure = classifyAcpFailure(new Error("⚠ RESOURCE_EXHAUSTED (code 429): Resource has been exhausted"), hint);
+  assert.ok(failure instanceof AcpFailure);
+  assert.equal(failure.code, "prompt_rejected");
+  assert.match(failure.message, /despite remaining quota/);
+  assert.doesNotMatch(failure.message, /quota exceeded/);
+});
+
+test("disabled-mode cloaked instructions do not set the fingerprint hint", () => {
+  const sent = cloakText(cleanOmpSystemInstructions(FINGERPRINTED_INSTRUCTIONS)).text;
+  assert.equal(turnsAway(sent), false);
+  const failure = classifyAcpFailure(new Error("⚠ RESOURCE_EXHAUSTED (code 429): Resource has been exhausted"),
+    { promptFingerprinted: turnsAway(sent) });
+  assert.ok(failure instanceof AcpFailure);
+  assert.equal(failure.code, "quota");
+  assert.match(failure.message, /quota exceeded/);
 });

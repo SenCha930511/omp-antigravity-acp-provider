@@ -200,17 +200,54 @@ function translateUnicodeEscapes(source: string): string {
 // (BEL), `\A`, `\z`, `\K`, `\Q…\E`, `\e` change or lose their meaning. A
 // digit is never safe (RE2 reads octal, JavaScript reads a backreference), and
 // a lone trailing backslash is invalid in both engines.
-const RE2_SAFE_ESCAPE_LETTERS = new Set(["f", "n", "r", "t", "v", "d", "D", "s", "S", "w", "W", "b", "B", "x", "p", "P", "0"]);
+const RE2_SAFE_ESCAPE_LETTERS = new Set(["f", "n", "r", "t", "v", "d", "D", "s", "S", "w", "W", "b", "B", "x", "0"]);
 
 // Lookaheads `(?=` / `(?!` and lookbehinds `(?<=` / `(?<!` have no RE2 form.
-// `(?<name>` groups are fine and stay.
+// `(?<name>` groups are fine and stay. Go also rejects `\b`/`\B` inside a
+// character class and an `\x` not followed by two hex digits or `{hex}`.
+// Property escapes (`\p{Emoji}`, `\P{L}`) depend on a Go property table this
+// projection cannot verify, so they are dropped instead of aborting agy's
+// toolbox build.
 function isRE2Safe(source: string): boolean {
+	let inClass = false;
+	let classStart = -1;
 	for (let index = 0; index < source.length; index++) {
 		const char = source[index];
 		if (char === "\\") {
 			const next = source[++index];
 			if (next === undefined) return false;
+			if (inClass && (next === "b" || next === "B")) return false;
+			if (next === "p" || next === "P") return false;
+			if (next === "x") {
+				const braced = /^\{([0-9a-fA-F]+)\}/.exec(source.slice(index + 1));
+				if (braced) {
+					if (Number.parseInt(braced[1]!, 16) > 0x10ffff) return false;
+					index += braced[0].length;
+					continue;
+				}
+				if (!/^[0-9a-fA-F]{2}/.test(source.slice(index + 1))) return false;
+				index += 2;
+				continue;
+			}
 			if (/[a-zA-Z0-9]/u.test(next) && !RE2_SAFE_ESCAPE_LETTERS.has(next)) return false;
+			continue;
+		}
+		if (inClass) {
+			// `[:alpha:]` is a POSIX name, not a nested class: its `]` must not
+			// end the enclosing class before the real closer.
+			if (char === "[" && source[index + 1] === ":") {
+				const end = source.indexOf(":]", index + 2);
+				if (end >= 0) {
+					index = end + 1;
+					continue;
+				}
+			}
+			if (char === "]" && index > classStart) inClass = false;
+			continue;
+		}
+		if (char === "[") {
+			inClass = true;
+			classStart = source[index + 1] === "^" ? index + 2 : index + 1;
 			continue;
 		}
 		if (char === "(" && source[index + 1] === "?") {
@@ -219,6 +256,7 @@ function isRE2Safe(source: string): boolean {
 			if (ahead === "<" && (source[index + 3] === "=" || source[index + 3] === "!")) return false;
 		}
 	}
+	if (inClass) return false;
 	return true;
 }
 

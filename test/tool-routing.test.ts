@@ -578,3 +578,89 @@ test("cleanOmpSystemInstructions strips internal OMP tool/device schemas while p
   const edgeCaseBareFn = "namespace functions {\ntype read = (_: { path: string });\n}\n\n# Policy\n- Standard.";
   assert.equal(cleanOmpSystemInstructions(edgeCaseBareFn), "# Policy\n- Standard.");
 });
+
+test("cleanOmpSystemInstructions removes a namespace block with nested braces and its trailing comment", () => {
+  const text = [
+    "# Policy",
+    "- Keep.",
+    "",
+    "## functions",
+    "namespace functions {",
+    "type config = { nested: { deep: string } };",
+    "type read = (_: { path: string });",
+    "}",
+    "// namespace functions",
+    "",
+    "# Coding Standards",
+    "- Clean.",
+  ].join("\n");
+  assert.equal(cleanOmpSystemInstructions(text), "# Policy\n- Keep.\n\n# Coding Standards\n- Clean.");
+
+  const inlineComment = "namespace functions {\ntype read = (_: { path: string });\n} // namespace functions\n\n# Policy\n- Keep.";
+  assert.equal(cleanOmpSystemInstructions(inlineComment), "# Policy\n- Keep.");
+});
+
+test("cleanOmpSystemInstructions keeps removal through fenced headings and boundaries", () => {
+  const fenced = [
+    "# Internal URLs",
+    "- xd://read",
+    "",
+    "```md",
+    "# Not a heading",
+    "<not a boundary>",
+    "```",
+    "",
+    "# Coding Standards",
+    "- Clean.",
+  ].join("\n");
+  assert.equal(cleanOmpSystemInstructions(fenced), "# Coding Standards\n- Clean.");
+
+  // A fenced sample inside a preserved section is never treated as an
+  // internal section start or a namespace declaration.
+  const preserved = "# Coding Standards\n```md\n# Internal URLs\n<device>\n```\n- Clean.";
+  assert.equal(cleanOmpSystemInstructions(preserved), preserved);
+
+  const fencedNamespace = "```ts\nnamespace functions {\ntype read = (_: { path: string });\n}\n```";
+  assert.equal(cleanOmpSystemInstructions(fencedNamespace), fencedNamespace);
+});
+
+test("cleanOmpSystemInstructions keeps nested fence examples opaque", () => {
+  const text = [
+    "````md",
+    "```ts",
+    "# Internal URLs",
+    "namespace functions {",
+    "type read = (_: { path: string });",
+    "}",
+    "```",
+    "````",
+    "# Coding Standards",
+    "- Clean.",
+  ].join("\n");
+  assert.equal(cleanOmpSystemInstructions(text), text);
+});
+
+test("cleanOmpSystemInstructions leaves unchanged text byte-identical", () => {
+  const text = "```md\nline\n\n\nline\n```\n\n";
+  assert.equal(cleanOmpSystemInstructions(text), text);
+});
+
+test("cleanOmpSystemInstructions removes subheadings with their section", () => {
+  const text = [
+    "# Internal URLs",
+    "- xd://read",
+    "## Sub",
+    "- nested",
+    "### Deeper",
+    "- deeper",
+    "",
+    "# Coding Standards",
+    "- Clean.",
+  ].join("\n");
+  assert.equal(cleanOmpSystemInstructions(text), "# Coding Standards\n- Clean.");
+});
+
+test("cleanOmpSystemInstructions leaves an unbalanced namespace block untouched", () => {
+  const text = "namespace functions {\ntype read = string;\n\n# Policy\n- Keep.";
+  assert.equal(cleanOmpSystemInstructions(text), text);
+});
