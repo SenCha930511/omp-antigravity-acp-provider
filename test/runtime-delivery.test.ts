@@ -236,3 +236,27 @@ test("a refusal leaves the settled batch open for the next turn", async () => {
     await f.close();
   }
 });
+
+test("a rewind discards a retained batch from an earlier failed turn", async () => {
+  const f = fixture();
+  try {
+    const first = await f.run([user("FIRST_ASK")]);
+    assert.ok(first.message);
+    const binding = f.binding();
+    assert.ok(binding);
+    await seedSettledRelay(binding, "call-1");
+
+    f.actions.push("throw");
+    const failed = await f.run([user("FIRST_ASK"), first.message, user("NEXT_ASK")]);
+    assert.ok(failed.error);
+
+    // The retained batch belongs to the three-message context. A shorter
+    // context is a rewind and must not resurrect the old tool result.
+    const rewound = await f.run([user("FIRST_ASK")]);
+    assert.equal(rewound.error, undefined, `the rewound turn must succeed, got ${rewound.error}`);
+    assert.doesNotMatch(promptText(f.connections.at(-1)), /<tool_result/,
+      "a rewound conversation must not receive the old envelope");
+  } finally {
+    await f.close();
+  }
+});

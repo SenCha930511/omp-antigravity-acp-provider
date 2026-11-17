@@ -14,6 +14,7 @@ interface FixtureOptions {
   prompt: (connection: any, handlers: { onUpdate: (n: unknown) => void }) => Promise<unknown>;
   capture?: () => { terminal?: string; apiDetail?: string; refusedDetail?: string } | undefined;
   routing?: { nativeTools: "prefer" | "disabled"; channel: "pending" | "system-append" | "legacy-prompt" };
+  onConnection?: (count: number) => void;
 }
 
 async function fixture(options: FixtureOptions) {
@@ -39,6 +40,7 @@ async function fixture(options: FixtureOptions) {
       async close() { if (!process.alive) return; process.alive = false; exit.resolve({ code: 0 }); },
     };
     connections.push(connection);
+    options.onConnection?.(connections.length);
     return connection;
   }, "yolo");
   async function turn(
@@ -77,6 +79,40 @@ test("an auth expiry mid-turn replays once on a fresh process", async () => {
     assert.equal(result.error, undefined, `the replayed turn must succeed, got ${result.error}`);
     assert.match(result.message.content[0].text, /RECOVERED/);
     assert.equal(connections.length, 2, "the expired process must be replaced exactly once");
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("late chunks from the expired auth attempt do not reach the replay writer", async () => {
+  const secondReady = Promise.withResolvers<void>();
+  const lateDone = Promise.withResolvers<void>();
+  let attempts = 0;
+  const { runtime, connections, turn } = await fixture({
+    onConnection: count => { if (count === 2) secondReady.resolve(); },
+    prompt: async (connection, handlers) => {
+      attempts++;
+      if (attempts === 1) {
+        void secondReady.promise.then(() => {
+          handlers.onUpdate({ sessionId: connection.request.sessionId, update: {
+            sessionUpdate: "agent_message_chunk", content: { type: "text", text: "STALE" } } });
+          lateDone.resolve();
+        });
+        throw AUTH_EXPIRED;
+      }
+      await lateDone.promise;
+      handlers.onUpdate({ sessionId: connection.request.sessionId, update: {
+        sessionUpdate: "agent_message_chunk", content: { type: "text", text: "RECOVERED" } } });
+      return { stopReason: "end_turn" };
+    },
+  });
+  try {
+    const result = await turn("auth-replay-late");
+    assert.equal(attempts, 2, "the auth expiry must replay exactly once");
+    assert.equal(connections.length, 2, "the expired process must be replaced");
+    assert.match(result.message.content[0].text, /RECOVERED/);
+    assert.doesNotMatch(result.message.content[0].text, /STALE/,
+      "late output from the expired connection must not reach the reused writer");
   } finally {
     await runtime.close();
   }

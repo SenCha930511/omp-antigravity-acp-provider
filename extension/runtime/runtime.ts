@@ -418,7 +418,7 @@ export class AntigravityRuntime {
 	private readonly bindings = new Map<string, Promise<Binding>>();
 	private readonly authReplayedWriters = new WeakSet<PiEventWriter>();
 	private readonly resolvedBindings = new Set<Binding>();
-	private readonly retainedDelivery = new Map<string, readonly DeliveryEntry[]>();
+	private readonly retainedDelivery = new Map<string, { entries: readonly DeliveryEntry[]; contextCount: number; contextFingerprint: string }>();
 	private disposed = false;
 	private closePromise: Promise<void> | undefined;
 	private bindingEpoch = 0;
@@ -845,6 +845,11 @@ export class AntigravityRuntime {
 			: (this.findContinuationKey(context) ?? `ephemeral:${crypto.randomUUID()}`);
 		const tools = context.tools ?? [];
 		const instructions = currentSystemInstructions(context);
+		const retained = this.retainedDelivery.get(key);
+		if (retained && (context.messages.length < retained.contextCount ||
+			this.ompMessagesFingerprint(context.messages.slice(0, retained.contextCount)) !== retained.contextFingerprint)) {
+			this.retainedDelivery.delete(key);
+		}
 		const acpModelId = resolveAcpModelId(model, options.reasoning);
 		let binding = await this.getBinding(key, mainRoute, model, acpModelId, options.apiKey, writer, tools, instructions, options.signal);
 		if (binding.ompCompactionInvalidated) {
@@ -1045,6 +1050,7 @@ export class AntigravityRuntime {
 				this.ompMessagesFingerprint(context.messages.slice(0, binding.messageCount)) !==
 					binding.historyFingerprint
 			) {
+				if (context.messages.length < binding.messageCount) this.retainedDelivery.delete(key);
 				await this.dropBinding(key, binding, true);
 				binding = await this.getBinding(key, mainRoute, model, acpModelId, options.apiKey, writer, tools, instructions, options.signal);
 			}
@@ -1276,6 +1282,7 @@ export class AntigravityRuntime {
 				// fresh process and reseeds history; the half-persisted ACP turn
 				// must not be resumed. Detach the writer first: late chunks from
 				// the expired attempt must not reach the writer the replay reuses.
+				binding.writer = undefined;
 				this.retainDelivery(binding);
 				await this.invalidateBinding(binding);
 				this.authReplayedWriters.add(writer);
@@ -1784,15 +1791,13 @@ export class AntigravityRuntime {
 			};
 			binding = createdBinding;
 			const retainedDelivery = this.retainedDelivery.get(key);
-			if (retainedDelivery !== undefined) {
-				createdBinding.delivery.adopt(retainedDelivery);
-				this.retainedDelivery.delete(key);
-			}
+			if (retainedDelivery !== undefined) createdBinding.delivery.adopt(retainedDelivery.entries);
             (binding.connection as AntigravityAcpConnection & OmpRoutedConnection).setOmpContextWindow?.(binding.session.sessionId, model.contextWindow);
             if (leaseLost) throw new AntigravityAcpError('protocol', 'ACP session ownership was lost during initialization');
 			await this.persistBinding(createdBinding);
 		this.assertEpoch(epoch);
 			this.resolvedBindings.add(createdBinding);
+			this.retainedDelivery.delete(key);
 			void connection.process.exited.then(() => {
             const completion = createdBinding.turnCompletion;
             const retiring = createdBinding.ompDropPromise;
@@ -1955,7 +1960,11 @@ export class AntigravityRuntime {
         }
 	private retainDelivery(binding: Binding): void {
 		const entries = binding.delivery.settledOpen();
-		if (entries.length > 0) this.retainedDelivery.set(binding.key, entries);
+		if (entries.length > 0) this.retainedDelivery.set(binding.key, {
+			entries,
+			contextCount: binding.pendingContextCount,
+			contextFingerprint: binding.pendingContextFingerprint,
+		});
 	}
 
         private async dropBinding(key: string, binding: Binding, removeSaved = false): Promise<void> {
