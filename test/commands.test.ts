@@ -38,6 +38,7 @@ function makeHandler() {
     configPath: path.join(state, "config.json"),
     contextPath: path.join(state, "context.json"),
     toolPolicyPath: path.join(state, "omp-tools.json"),
+    ompAgentDir: state,
     cleanup: { status: () => ({ mode: "off", idleDays: 7, file: "", scope: "" }), configure() {}, start() {}, stop() {} } as CommandControllerDeps["cleanup"],
     connections: new Set(),
     auth: { watchOmpCredentials() {} } as CommandControllerDeps["auth"],
@@ -133,6 +134,50 @@ test("usage, account and refresh report without instantiating a runtime", async 
   assert.match(fixture.notices[2]!, /Models:\s+none advertised/);
   assert.equal(fixture.runtimeCreates(), 0);
   fs.rmSync(fixture.state, { recursive: true, force: true });
+});
+
+test("refresh adds the adapter to an existing model whitelist and reports it", async t => {
+  const fixture = makeHandler();
+  const config = path.join(fixture.state, "config.yml");
+  fs.writeFileSync(config, "enabledModels:\n  - nchc/one\n");
+  fixture.deps.catalog = {
+    refresh: async () => [{ id: "gemini-3.8-flash" }],
+    currentModels: [],
+  } as unknown as CommandControllerDeps["catalog"];
+  await fixture.handler("refresh", fixture.ctx);
+  const notice = fixture.notices.at(-1)!;
+  assert.match(notice, /Models:\s+gemini-3\.8-flash/);
+  assert.match(notice, /OMP whitelist:\s+antigravity-acp-provider\/\* added to .*config\.yml/);
+  assert.match(fs.readFileSync(config, "utf8"), /- "antigravity-acp-provider\/\*"/);
+  t.after(() => fs.rmSync(fixture.state, { recursive: true, force: true }));
+});
+
+test("refresh with no advertised models leaves the model whitelist untouched", async t => {
+  const fixture = makeHandler();
+  const config = path.join(fixture.state, "config.yml");
+  const before = "enabledModels:\n  - nchc/one\n";
+  fs.writeFileSync(config, before);
+  await fixture.handler("refresh", fixture.ctx);
+  assert.equal(fs.readFileSync(config, "utf8"), before);
+  assert.doesNotMatch(fixture.notices.at(-1)!, /OMP whitelist/);
+  t.after(() => fs.rmSync(fixture.state, { recursive: true, force: true }));
+});
+
+test("refresh warns without failing when the model whitelist shape is unsupported", async t => {
+  const fixture = makeHandler();
+  const config = path.join(fixture.state, "config.yml");
+  const before = "enabledModels: [nchc/one, # note\n]\n";
+  fs.writeFileSync(config, before);
+  fixture.deps.catalog = {
+    refresh: async () => [{ id: "gemini-3.8-flash" }],
+    currentModels: [],
+  } as unknown as CommandControllerDeps["catalog"];
+  await fixture.handler("refresh", fixture.ctx);
+  const notice = fixture.notices.at(-1)!;
+  assert.match(notice, /OMP whitelist warning/);
+  assert.match(notice, /not a supported YAML shape/);
+  assert.equal(fs.readFileSync(config, "utf8"), before);
+  t.after(() => fs.rmSync(fixture.state, { recursive: true, force: true }));
 });
 
 test("account retains credential-store errors without starting a runtime", async () => {

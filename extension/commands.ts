@@ -4,6 +4,8 @@ import { antigravityAccountEmail, authReady, formatLogoutSummary, inspectAcpAuth
 import { parseNativeToolMode, type NativeToolMode } from "./tool-routing.ts";
 import { saveToolPolicy, type ToolPolicy } from "./tool-policy.ts";
 import { DEFAULT_USAGE_MODE, updateContextSettings, resolveContextOptions, saveContextSettings, type ContextSettings } from "./context-settings.ts";
+import { ensureProviderModelsEnabled, PROVIDER_MODEL_SELECTOR, resolveOmpConfigPath } from "./omp-model-whitelist.ts";
+import { errorMessageOf } from "./fs-atomic.ts";
 import type { CatalogStore, ConfiguredCatalogModel } from "./catalog-store.ts";
 import type { SessionCleanup, CleanupMode } from "./session-cleanup.ts";
 import type { TierConnection } from "./tier-connection.ts";
@@ -67,6 +69,9 @@ export interface CommandControllerDeps {
   configPath: string;
   contextPath: string;
   toolPolicyPath: string;
+  // OMP's agent directory. Refresh resolves the config file at use time so a
+  // config created after startup is still found.
+  ompAgentDir?: string;
   cleanup: SessionCleanup;
   connections: Set<TierConnection>;
   auth: OmpAuthCoordinator;
@@ -528,7 +533,25 @@ export function createAntigravityCommandHandler(deps: CommandControllerDeps) {
       if (value !== undefined) throw new Error("Usage: /antigravity-acp refresh");
       const refreshed = await deps.catalog.refresh(deps.getContextSettings());
       deps.onModelsUpdated(refreshed);
-      ctx.ui.notify(section("ACP model cache refreshed", [["Models", refreshed.length ? refreshed.map(model => model.id).join(", ") : "none advertised"]]), "info");
+      const fields: DisplayField[] = [["Models", refreshed.length ? refreshed.map(model => model.id).join(", ") : "none advertised"]];
+      // Only a successful catalog makes the selector meaningful; a config
+      // write must never turn a refresh into a failure.
+      if (refreshed.length > 0 && deps.ompAgentDir) {
+        try {
+          const ompConfigPath = resolveOmpConfigPath(deps.ompAgentDir);
+          if (ompConfigPath) {
+            const whitelist = await ensureProviderModelsEnabled(ompConfigPath);
+            if (whitelist.changed) {
+              fields.push(["OMP whitelist", `${PROVIDER_MODEL_SELECTOR} added to ${whitelist.path}. Restart OMP or reopen /model to list the models.`]);
+            } else if (whitelist.reason === "unsupported") {
+              fields.push(["OMP whitelist warning", `${whitelist.path}: enabledModels is not a supported YAML shape; add ${PROVIDER_MODEL_SELECTOR} manually.`]);
+            }
+          }
+        } catch (error) {
+          fields.push(["OMP whitelist warning", `OMP config in ${deps.ompAgentDir}: ${errorMessageOf(error)}`]);
+        }
+      }
+      ctx.ui.notify(section("ACP model cache refreshed", fields), "info");
       return;
     }
 

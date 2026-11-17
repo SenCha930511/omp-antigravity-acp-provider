@@ -99,7 +99,7 @@ Run `/login`, choose **Google Antigravity (ACP)**, and complete Google's consent
 /model
 ```
 
-`refresh` asks the ACP server which models the account can use; `/model` lists them. Set an effort with OMP's thinking control when the model advertises levels. If OMP's `enabledModels` whitelist is configured, add `antigravity-acp-provider/*` to it.
+`refresh` asks the ACP server which models the account can use; `/model` lists them. Set an effort with OMP's thinking control when the model advertises levels. When OMP already has a non-empty `enabledModels` whitelist, `refresh` adds `antigravity-acp-provider/*` to it automatically, so restart OMP or reopen `/model` if the picker was already open. No whitelist is created when none exists.
 
 ### 6. Verify
 
@@ -122,7 +122,7 @@ To remove the installed plugin, use `omp plugin uninstall omp-antigravity-acp-pr
 | Symptom | Check |
 | --- | --- |
 | `omp: command not found` | This is an OMP plugin. Install OMP first; there is no standalone CLI. |
-| No models after `/antigravity-acp refresh` | Run `/antigravity-acp account` to confirm both sides are signed in, then retry with internet access. ACP can advertise fewer models than the Antigravity app. |
+| No models after `/antigravity-acp refresh` | Run `/antigravity-acp account` to confirm both sides are signed in, then retry with internet access. ACP can advertise fewer models than the Antigravity app. If OMP has an `enabledModels` whitelist, refresh adds `antigravity-acp-provider/*` to it; restart OMP or reopen `/model` when the picker was already open. |
 | Two Antigravity providers appear | That is expected on OMP 18.20+: the built-in `antigravity-acp` provider and this plugin's `antigravity-acp-provider` coexist. Remove only a second copy of this adapter (`antigravity-acp-omp`, the upstream Pi extension, or a duplicate npm install), then restart OMP. |
 | Login opens the wrong Google account | Both login paths always start a fresh sign-in. Choose the intended account (or "Use another account") on Google's consent screen. |
 | Default `disabled` native-tool mode rejects the session | The official runtime must advertise system-append support (1.4.1+). Upgrade the runtime or run `/antigravity-acp native-tools prefer`. |

@@ -21,3 +21,6 @@ export { PiEventWriter } from "./stream/pi-events.ts";
 export { TierConnection } from "../tier-connection.ts";
 export { SessionCleanup } from "../session-cleanup.ts";
 export { Type } from "typebox";
+// Adapter config edits need the same cross-process lock the bundled stores
+// use, and a bare package import cannot be resolved from the load-time graph.
+export { lock as lockFile } from "proper-lockfile";
