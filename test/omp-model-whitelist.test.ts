@@ -128,7 +128,7 @@ test("ensureProviderModelsEnabled rewrites an existing whitelist atomically and 
     assert.equal(update.path, file);
     assert.deepEqual(update.entries, ["nchc/one", PROVIDER_MODEL_SELECTOR]);
     assert.equal(fs.readFileSync(file, "utf8"), "enabledModels:\n  - nchc/one\n  - \"antigravity-acp-provider/*\"\n");
-    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     assert.deepEqual(fs.readdirSync(dir), ["config.yml"]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
