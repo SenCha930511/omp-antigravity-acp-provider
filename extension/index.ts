@@ -138,7 +138,65 @@ interface WarmupSignature {
 
 // Discovery and install can outlive a shutdown request; the standby task stops
 // at its next generation check, so teardown only waits this long.
-const WARMUP_STOP_TIMEOUT_MS = 2_000;
+const WARMUP_STOP_TIMEOUT_MS = 1_000;
+
+export async function resolvePermissionDecision(
+  request: { id: string; title: string; options: Array<{ id?: string; label?: string; kind?: string }> },
+  ctx: { hasUI?: boolean; ui?: { select?: (title: string, options: string[]) => Promise<string | undefined> } },
+): Promise<{ optionId: string | undefined; text: string; cancelled: boolean }> {
+  const labels = request.options.map(option => option.label ?? option.id ?? "");
+  let selected: string | undefined;
+  if (ctx?.hasUI !== false && ctx?.ui?.select) {
+    try {
+      selected = await ctx.ui.select(request.title, labels);
+    } catch {
+      selected = undefined;
+    }
+  }
+  let optionId = selected !== undefined ? request.options[labels.indexOf(selected)]?.id : undefined;
+  let text = optionId ? `Permission: ${selected}` : "Permission denied.";
+  if (!optionId && (ctx?.hasUI === false || !ctx?.ui?.select)) {
+    const allowOption = request.options.find((opt: { id?: string; kind?: string }) =>
+      opt.kind === "allow_once" || opt.kind === "allow_always" || opt.id === "allow" ||
+      opt.id === "allow_once" || opt.id === "allow_always" ||
+      (typeof opt.kind === "string" && opt.kind.startsWith("allow")) ||
+      (typeof opt.id === "string" && opt.id.startsWith("allow"))
+    );
+    if (allowOption?.id) {
+      optionId = allowOption.id;
+      text = `Permission: ${allowOption.label ?? allowOption.id}`;
+    }
+  }
+  return { optionId, text, cancelled: !optionId };
+}
+
+export function syncAntigravityOAuthToken(homeDir = os.homedir()): boolean {
+  try {
+    const cliToken = path.join(homeDir, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+    const geminiBase = process.env.GEMINI_HOME?.trim() || path.join(homeDir, ".gemini");
+    const acpDir = path.join(geminiBase, "antigravity-acp");
+    const acpToken = path.join(acpDir, "antigravity-oauth-token");
+    if (!fs.existsSync(cliToken)) return false;
+    const cliStat = fs.statSync(cliToken);
+    let shouldCopy = false;
+    try {
+      const acpStat = fs.statSync(acpToken);
+      if (cliStat.mtimeMs > acpStat.mtimeMs) shouldCopy = true;
+    } catch {
+      shouldCopy = true;
+    }
+    if (shouldCopy) {
+      fs.mkdirSync(acpDir, { recursive: true, mode: 0o700 });
+      fs.copyFileSync(cliToken, acpToken);
+      try { fs.chmodSync(acpToken, 0o600); } catch { /* best effort */ }
+      return true;
+    }
+    return false;
+  } catch {
+    // Best effort: never fail runtime preparation if token sync encounters filesystem errors.
+    return false;
+  }
+}
 
 export default async function (pi: OmpHostApi) {
   return registerOmpAdapter(pi, resolveAdapterStateDir());
@@ -209,7 +267,9 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
   let launchPlan: Promise<RuntimeLaunchPlan | undefined> | undefined;
   let selectedLaunchPlan: RuntimeLaunchPlan | undefined;
   const currentPermissionProfile = () => resolveAcpPermissionProfile(selectedLaunchPlan, permissionMode);
+
   function prepareRuntime() {
+    syncAntigravityOAuthToken();
     launchPlan ??= resolveRuntimeLaunchPlan(stateDir).then(plan => {
       selectedLaunchPlan = plan;
       return plan;
@@ -667,12 +727,10 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     async execute(_id: string, params: { requestId: string }, _signal: unknown, _update: unknown, ctx: OmpCommandContext) {
       const request = runtimes.values().map(bundle => bundle.runtime.getPermission(params.requestId)).find(Boolean);
       if (!request) throw new Error("Permission request expired or missing");
-      const labels = request.options.map((option: { label: string }) => option.label);
-      const selected = await ctx.ui.select?.(request.title, labels);
-      const optionId = selected !== undefined ? request.options[labels.indexOf(selected)]?.id : undefined;
+      const decision = await resolvePermissionDecision(request, ctx);
       return {
-        content: [{ type: "text", text: optionId ? `Permission: ${selected}` : "Permission denied." }],
-        details: { kind: PERMISSION_RESULT_KIND, requestId: request.id, optionId, cancelled: !optionId },
+        content: [{ type: "text", text: decision.text }],
+        details: { kind: PERMISSION_RESULT_KIND, requestId: request.id, optionId: decision.optionId, cancelled: decision.cancelled },
       };
     },
   });

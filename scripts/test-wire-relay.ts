@@ -86,11 +86,13 @@ try {
     .filter(event => event.type === "toolcall_end")
     .map(event => event.toolCall);
   assert.equal(batchCalls.length, 2, "two parallel tools must produce two OMP tool calls");
+  const firstCall = batchCalls.find((c: any) => c.arguments?.path === "/first") ?? batchCalls[0];
+  const secondCall = batchCalls.find((c: any) => c.arguments?.path === "/second") ?? batchCalls[1];
   const batchSecond = await run([
     user("WIRE_TOOL_BATCH_TEST"),
     batchFirst.message,
-    toolResult(batchCalls[1], "SECOND_RESULT"),
-    toolResult(batchCalls[0], "FIRST_RESULT"),
+    toolResult(secondCall, "SECOND_RESULT"),
+    toolResult(firstCall, "FIRST_RESULT"),
   ], "wire-batch");
   assert.equal(batchSecond.events.filter(event => event.type === "toolcall_end").length, 0);
   const batchText = batchSecond.message.content
