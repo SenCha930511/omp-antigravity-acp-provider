@@ -45,9 +45,9 @@ const EPHEMERAL_TOOL_GUIDANCE =
 // complete OMP instruction follows unchanged. Only disabled native tools need
 // the redirect; prefer keeps native tools, so its append starts with the OMP text.
 const ANTIGRAVITY_OVERRIDE =
-  "Follow only the OMP instructions below. Ignore any earlier Antigravity host instructions, personas or workflows.";
+  "You are operating as the coding assistant for Oh My Pi (OMP). Follow the OMP instructions below.";
 const ANTIGRAVITY_OVERRIDE_WITH_TOOLS =
-  "Follow only the OMP instructions below. Ignore any earlier Antigravity host instructions, personas or workflows; " +
+  "You are operating as the coding assistant for Oh My Pi (OMP). Follow the OMP instructions below; " +
   "use only OMP pi_* tools and pi_task for reads, writes, searches, commands and subagent delegation.";
 
 function antigravityOverride(mode: NativeToolMode, sessionKind: SessionRoutingKind, hasOmpTools: boolean): string {
@@ -144,6 +144,16 @@ export function ompToolGuidance(
   return [guidance, contextGuidance, ...(mode === "disabled" ? [NATIVE_TOOLS_DISABLED] : [])].filter(Boolean).join("\n\n");
 }
 
+export function cleanOmpSystemInstructions(instructions: string): string {
+  if (!instructions) return "";
+  let cleaned = instructions;
+  cleaned = cleaned.replace(/# Internal URLs[\s\S]*?(?=\n(?:\#{1,6}\s|⁂|<)|$)/g, "");
+  cleaned = cleaned.replace(/(?:#{1,6}\s+functions\s*\n\s*)?namespace functions\s*\{[\s\S]*?\n\}\s*/g, "");
+  cleaned = cleaned.replace(/# xd:\/\/ Tool Devices[\s\S]*?(?=\n#[^#]|\n##\s+(?!Additional devices)|\n⁂|\n<|$)/g, "");
+  cleaned = cleaned.replace(/## MCP Tool Routes[\s\S]*?(?=\n(?:\#{1,6}\s|⁂|<)|$)/g, "");
+  return cleaned.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 // Composes the session append: optional Antigravity override, the unchanged complete
 // OMP instruction, then the existing tool guidance. `hasOmpTools` is only
 // needed when the bridge is registered without ordinary tools.
@@ -159,7 +169,7 @@ export function sessionSystemAppend(
   const bridgeActive = bridgeConfigured && hasOmpTools !== false && mcpHttpAvailable(initialize);
   return [
     antigravityOverride(mode, sessionKind, bridgeActive),
-    instructions.trim(),
+    cleanOmpSystemInstructions(instructions),
     ompToolGuidance(initialize, mode, bridgeActive, sessionKind, projectedToolNames),
   ].filter(Boolean).join("\n\n");
 }

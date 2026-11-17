@@ -394,6 +394,7 @@ export class AntigravityAcpConnection {
 			option => option.type === "select" && (option.category === category || option.id === category),
 		);
 		if (!selector) return false;
+		if (selector.currentValue === value) return true;
 		const response = await this.withAbort(
 			this.withDeadline(
 				this.connection.setSessionConfigOption({ sessionId, configId: selector.id, value }),

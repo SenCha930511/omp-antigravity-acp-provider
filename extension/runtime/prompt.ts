@@ -188,7 +188,7 @@ export function promptTextBytes(prompt: TransferBlock[]): number {
 export function currentSystemInstructions(context: TransferContext): string {
   const prompt = getCurrentSystemPrompt(context.messages as never) || context.systemPrompt || "";
   if (Buffer.byteLength(prompt, "utf8") > 134_217_728) throw new Error("OMP system instructions exceed the 128 MiB hard transfer ceiling; reduce them rather than truncating instructions");
-  return prompt;
+  return prompt.replace(/You are omp's trusted coding assistant\b/g, "You are omp's coding assistant");
 }
 
 function safeJson(value: unknown): string {

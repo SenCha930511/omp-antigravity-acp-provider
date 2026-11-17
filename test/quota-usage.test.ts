@@ -78,9 +78,13 @@ test("single-model and shared-family groups map to their actual model IDs", () =
   }, { modelIds: ["claude-4.5-sonnet", "gpt-5"] });
   assert.deepEqual(multi.limits.map(limit => limit.scope.modelId), ["claude-4.5-sonnet", "gpt-5"]);
   assert.deepEqual(multi.limits.map(limit => limit.label), [
-    "Claude and GPT models (claude-4.5-sonnet) 7 Day",
-    "Claude and GPT models (gpt-5) 7 Day",
+    "Claude and GPT models 7 Day",
+    "Claude and GPT models 7 Day",
   ]);
+  assert.equal(multi.limits[0]!.scope.shared, true);
+  assert.equal(multi.limits[0]!.scope.sharedGroup, "antigravity-acp-provider:claude-and-gpt-models:7d");
+  assert.equal(multi.limits[1]!.scope.shared, true);
+  assert.equal(multi.limits[1]!.scope.sharedGroup, "antigravity-acp-provider:claude-and-gpt-models:7d");
   const gpt = quotaSnapshotToUsageReport({
     at: AT,
     groups: [{ displayName: "GPT-5", buckets: [{ window: "weekly", remainingFraction: 0.5 }] }],

@@ -38,15 +38,23 @@ timeoutConnection.operationTimeoutMs = 25;
 timeoutConnection.connection = { closeSession: () => Promise.withResolvers().promise };
 timeoutConnection.sessions = new Map([["fixture-session", { sessionId: "fixture-session" }]]);
 timeoutConnection.close = async () => { timeoutCalls.push("process-close"); };
-mock.timers.enable({ apis: ["setTimeout"] });
-try {
+if (mock?.timers?.enable) {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const closing = timeoutConnection.closeSession("fixture-session");
+    await tick();
+    mock.timers.tick(25);
+    assert.equal(await closing, false);
+    assert.deepEqual(timeoutCalls, ["process-close"]);
+    assert.equal(timeoutConnection.sessions.size, 1);
+  } finally {
+    mock.timers.reset();
+  }
+} else {
   const closing = timeoutConnection.closeSession("fixture-session");
-  await tick();
-  mock.timers.tick(25);
+  await new Promise(r => setTimeout(r, 50));
   assert.equal(await closing, false);
   assert.deepEqual(timeoutCalls, ["process-close"]);
   assert.equal(timeoutConnection.sessions.size, 1);
-} finally {
-  mock.timers.reset();
 }
 console.log("ACP close timeout returns false and starts the process-close fallback: PASS");

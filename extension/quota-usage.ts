@@ -21,6 +21,8 @@ export interface QuotaUsageScope {
   modelId?: string;
   tier?: string;
   windowId?: string;
+  shared?: boolean;
+  sharedGroup?: string;
 }
 
 export interface QuotaUsageLimit {
@@ -137,14 +139,21 @@ export function quotaSnapshotToUsageReport(
         ? Math.min(1, Math.max(0, bucket.remainingFraction)) : 0;
       const usedFraction = 1 - remainingFraction;
       for (const modelId of matches.length ? matches : [undefined]) {
-        const scope: QuotaUsageScope = { provider, tier: group.displayName, windowId: window.id };
+        const isShared = matches.length > 1 || group.displayName.toLowerCase().includes("models");
+        const sharedGroup = isShared ? `${provider}:${groupSlug}:${window.id}` : undefined;
+        const scope: QuotaUsageScope = {
+          provider,
+          tier: group.displayName,
+          windowId: window.id,
+          ...(isShared ? { shared: true, sharedGroup } : {}),
+        };
         if (modelId) scope.modelId = modelId;
         const baseId = `${provider}:${groupSlug}${modelId ? `:${slug(modelId)}` : ""}:${window.id}`;
         const seen = usedIds.get(baseId) ?? 0;
         usedIds.set(baseId, seen + 1);
         limits.push({
           id: seen === 0 ? baseId : `${baseId}-${seen + 1}`,
-          label: `${group.displayName}${matches.length > 1 ? ` (${modelId})` : ""} ${window.label}`,
+          label: `${group.displayName} ${window.label}`,
           scope,
           window: { ...window, ...(Number.isFinite(resetsAt) ? { resetsAt } : {}) },
           amount: {
