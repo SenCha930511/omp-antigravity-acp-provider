@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  cleanOmpSystemInstructions,
   mcpHttpAvailable,
   normalizeInitializeResponse,
   sessionRoutingRequest,
@@ -290,9 +291,9 @@ test("disabled routing redirects the host prompt before the complete OMP text", 
   const routed = sessionRoutingRequest(original, initialize, "disabled", instructions);
   const append = appendOf(routed);
   assert.ok(!append.includes("Existing host instructions"), "inherited append content must not be replayed");
-  assert.ok(append.indexOf("Follow only the OMP instructions below.") < append.indexOf("CORE_POLICY"),
+  assert.ok(append.indexOf("You are operating as the coding assistant for Oh My Pi (OMP).") < append.indexOf("CORE_POLICY"),
     "the override must precede the unchanged OMP instruction");
-  assert.match(append, /Ignore any earlier Antigravity host instructions/);
+  assert.match(append, /operating as the coding assistant for Oh My Pi/);
   assert.doesNotMatch(append, /ACP host instructions/);
   assert.match(append, /use only OMP pi_\* tools and pi_task for reads, writes, searches, commands and subagent delegation/);
   assert.ok(append.indexOf("CORE_POLICY") < append.indexOf("OMP tools exposed by the authenticated pi-bridge"),
@@ -302,14 +303,14 @@ test("disabled routing redirects the host prompt before the complete OMP text", 
 
   const preferred = appendOf(sessionRoutingRequest(request, initialize, "prefer", instructions));
   assert.ok(preferred.startsWith(instructions), "prefer keeps the unchanged OMP instruction first");
-  assert.doesNotMatch(preferred, /Follow only the OMP instructions below/);
+  assert.doesNotMatch(preferred, /operating as the coding assistant for Oh My Pi/);
 });
 
 test("an ephemeral or tool-less session gets only the short Antigravity override", () => {
   const ephemeral = sessionRoutingRequest(request, initialize, "disabled", instructions, "ephemeral");
   const ephemeralAppend = appendOf(ephemeral);
-  assert.ok(ephemeralAppend.startsWith("Follow only the OMP instructions below."));
-  assert.match(ephemeralAppend, /Ignore any earlier Antigravity host instructions/);
+  assert.ok(ephemeralAppend.startsWith("You are operating as the coding assistant for Oh My Pi (OMP)."));
+  assert.match(ephemeralAppend, /Follow the OMP instructions below\./);
   assert.doesNotMatch(ephemeralAppend, /pi_\*|pi_task|subagent delegation/);
   assert.match(ephemeralAppend, /no tools may be called in this side turn/);
   assert.match(ephemeralAppend, /native tools are disabled/);
@@ -321,7 +322,7 @@ test("an ephemeral or tool-less session gets only the short Antigravity override
 
   const toolLess = sessionRoutingRequest(request, initialize, "disabled", instructions, "main", false);
   const toolLessAppend = appendOf(toolLess);
-  assert.ok(toolLessAppend.startsWith("Follow only the OMP instructions below."));
+  assert.ok(toolLessAppend.startsWith("You are operating as the coding assistant for Oh My Pi (OMP)."));
   assert.doesNotMatch(toolLessAppend, /pi_\*|pi_task|subagent delegation/);
   assert.match(toolLessAppend, /no OMP tools are exposed/);
   assert.deepEqual(toolLess._meta?.antigravity?.eagerMcpServers, [],
@@ -371,7 +372,7 @@ test("TierConnection hands each route to the base session method as _meta", asyn
     assert.equal(meta.custom, "keep", "caller metadata survives routing");
     const append = meta.antigravity?.systemPrompt?.append;
     assert.ok(typeof append === "string", "the routed request must carry a string system append");
-    assert.ok(append.startsWith("Follow only the OMP instructions below."));
+    assert.ok(append.startsWith("You are operating as the coding assistant for Oh My Pi (OMP)."));
     assert.match(append, /use only OMP pi_\* tools and pi_task/);
     assert.match(append, /pi_context_notes/);
     assert.match(append, /pi_new_context/);
@@ -389,7 +390,7 @@ test("TierConnection hands each route to the base session method as _meta", asyn
     assert.equal(resumed.args[3], undefined, "the signal slot must stay positional");
     const resumedAppend = metaOf(resumed.args).antigravity?.systemPrompt?.append;
     assert.ok(typeof resumedAppend === "string");
-    assert.ok(resumedAppend.startsWith("Follow only the OMP instructions below."));
+    assert.ok(resumedAppend.startsWith("You are operating as the coding assistant for Oh My Pi (OMP)."));
     assert.doesNotMatch(resumedAppend, /pi_task|subagent delegation/);
     assert.match(resumedAppend, /no tools may be called in this side turn/);
 
@@ -485,4 +486,48 @@ test("a runtime without system append keeps full instructions plus legacy pi_tas
   } finally {
     await runtime.close();
   }
+});
+
+test("cleanOmpSystemInstructions strips internal OMP tool/device schemas while preserving policy and user rules", () => {
+  const shortInstructions = "# OMP session instructions\n\nCORE_POLICY\n\nDelegate separable work when requested.";
+  assert.equal(cleanOmpSystemInstructions(shortInstructions), shortInstructions);
+
+  const bloatedInstructions = [
+    "You are omp's coding assistant.",
+    "# Engineering",
+    "- Boring design.",
+    "⁂ Runtime",
+    "# Internal URLs",
+    "- xd://read/urls",
+    "## functions",
+    "namespace functions {",
+    "type read = (_: { path: string });",
+    "}",
+    "# xd:// Tool Devices",
+    "## Additional devices",
+    "⁂ Tool Policy",
+    "# Ponytail",
+    "- Lazy senior developer.",
+  ].join("\n\n");
+
+  const cleaned = cleanOmpSystemInstructions(bloatedInstructions);
+  assert.match(cleaned, /You are omp's coding assistant\./);
+  assert.match(cleaned, /# Engineering/);
+  assert.match(cleaned, /# Ponytail/);
+  assert.doesNotMatch(cleaned, /namespace functions/);
+  assert.doesNotMatch(cleaned, /# xd:\/\/ Tool Devices/);
+  assert.doesNotMatch(cleaned, /# Internal URLs/);
+
+  // Preserve custom instructions/rules when following stripped internal blocks
+  const edgeCaseUrls = "# Internal URLs\n- xd://read/urls\n\n# Coding Standards\n- Always write clean code.";
+  assert.equal(cleanOmpSystemInstructions(edgeCaseUrls), "# Coding Standards\n- Always write clean code.");
+
+  const edgeCaseRoutes = "## MCP Tool Routes\n- xd://route\n\n# User Rules\n- Be safe.";
+  assert.equal(cleanOmpSystemInstructions(edgeCaseRoutes), "# User Rules\n- Be safe.");
+
+  const edgeCaseDevices = "# xd:// Tool Devices\n## Additional devices\n- dev\n\n# Coding Standards\n- Clean.";
+  assert.equal(cleanOmpSystemInstructions(edgeCaseDevices), "# Coding Standards\n- Clean.");
+
+  const edgeCaseBareFn = "namespace functions {\ntype read = (_: { path: string });\n}\n\n# Policy\n- Standard.";
+  assert.equal(cleanOmpSystemInstructions(edgeCaseBareFn), "# Policy\n- Standard.");
 });
