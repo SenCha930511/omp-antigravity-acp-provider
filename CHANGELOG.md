@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3 — 2026-11-20
+
+- Add a prompt-cloak rule for the OMP 19.0.0 commit-guidance clause. `agy` refuses that sentence with `RESOURCE_EXHAUSTED (code 429)` while quota remains, so disabled-mode sessions now reword it before the system append. Reported in [#34](https://github.com/SenCha930511/omp-antigravity-acp-provider/issues/34).
+
 ## 0.3.2 — 2026-11-17
 
 - Harden relay and turn-boundary delivery: carry a completed but unawaited relay result into the next OMP turn as history or a bounded `<tool_result>` envelope, settle batches at turn boundaries, preserve settled results across cancellation, refusal and non-quota failures, discard them on rewind, and keep late chunks from an expired auth attempt away from the replay writer. ACP tools now use `omp_*` names with `omp_await_result` as the relay control.
