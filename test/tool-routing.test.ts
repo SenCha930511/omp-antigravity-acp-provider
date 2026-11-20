@@ -535,6 +535,26 @@ test("cloak rewords the canonical smoke-test prompt a recalled memory carries", 
   assert.deepEqual(quiet.matched, []);
 });
 
+test("cloak rewords the OMP commit-guidance clause the 429 gate refuses", () => {
+  const clause = "it selects only the lines you and your subagents wrote and never touches other agents' staged or unstaged work";
+  const cloaked = cloakText(clause);
+  assert.deepEqual(cloaked.matched, ["omp-commit-guidance"]);
+  assert.equal(cloaked.text, "it picks only lines written by you or your subagents and leaves other agents' staged or unstaged work alone");
+  assert.equal(turnsAway(cloaked.text), false);
+  assert.equal(turnsAway(clause), true);
+  const append = appendOf(sessionRoutingRequest(request, initialize, "disabled", clause));
+  assert.doesNotMatch(append, /it selects only the lines you and your subagents wrote/);
+  assert.match(append, /it picks only lines written by you or your subagents/);
+  const line = "To commit your changes, use the eval `commit` namespace (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`), not `git add`/`git commit`: " + clause + ".";
+  const full = cloakText(line);
+  assert.deepEqual(full.matched, ["omp-commit-guidance"]);
+  assert.ok(!full.text.includes(clause), "the refused clause must not survive in the full line");
+  assert.ok(full.text.includes("it picks only lines written by you or your subagents"));
+  const folded = cloakText("It  selects only\u00a0the lines you and your subagents wrote and never touches other agents' staged or unstaged work.");
+  assert.deepEqual(folded.matched, ["omp-commit-guidance"]);
+  assert.ok(!folded.text.includes("selects only"));
+});
+
 test("cleanOmpSystemInstructions strips internal OMP tool/device schemas while preserving policy and user rules", () => {
   const shortInstructions = "# OMP session instructions\n\nCORE_POLICY\n\nDelegate separable work when requested.";
   assert.equal(cleanOmpSystemInstructions(shortInstructions), shortInstructions);
