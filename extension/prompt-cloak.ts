@@ -50,6 +50,12 @@ export const CLOAK_RULES: readonly CloakRule[] = [
   // user turn or with any other value pass.
   { id: "omp-eval-prompt", phrase: "reply with exactly: ok",
     says: matched => matched.replace(/^reply/iu, "Respond") },
+  // OMP 19.0.0's commit-guidance clause alone draws a 429 with quota left.
+  { id: "omp-commit-guidance",
+    phrase: "it selects only the lines you and your subagents wrote and never touches other agents' staged or unstaged work",
+    says: matched => matched
+      .replace(/selects\s+only\s+the\s+lines\s+you\s+and\s+your\s+subagents\s+wrote/iu, "picks only lines written by you or your subagents")
+      .replace(/never\s+touches\s+other\s+agents'\s+staged\s+or\s+unstaged\s+work/iu, "leaves other agents' staged or unstaged work alone") },
 ];
 
 const INVISIBLE_RE = /[\u00ad\u180e\u200b-\u200f\u2060-\u2064\ufeff]/gu;
