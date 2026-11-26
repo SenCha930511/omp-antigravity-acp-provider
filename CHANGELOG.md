@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4 — 2026-11-26
+
+- Keep the CLI `/usage` quota probe away from OMP's terminal. A profile without a login could make `agy -p /usage` open `/dev/tty` and consume the interactive session's keystrokes; the probe now runs detached with stdin ignored, and timeout, output-cap or abort stops signal its whole process group (SIGTERM, then SIGKILL for members that ignore it). The CLI login is synced into the isolated `antigravity-acp` profile before the probe, so CLI-only users get quota instead of an interactive sign-in, while an explicit logout still wins. Contributed by [@AurelioB](https://github.com/AurelioB) in [#38](https://github.com/SenCha930511/omp-antigravity-acp-provider/pull/38).
+
 ## 0.3.3 — 2026-11-20
 
 - Add a prompt-cloak rule for the OMP 19.0.0 commit-guidance clause. `agy` refuses that sentence with `RESOURCE_EXHAUSTED (code 429)` while quota remains, so disabled-mode sessions now reword it before the system append. Reported in [#34](https://github.com/SenCha930511/omp-antigravity-acp-provider/issues/34).
