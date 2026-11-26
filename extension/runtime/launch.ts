@@ -498,10 +498,10 @@ function wrapperCommand(file: string, platform: NodeJS.Platform, args: readonly 
   return { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/e:on", "/v:off", "/c", `call "${file}"`, ...args] };
 }
 
-// The wrapper only launches the CLI. Credential sync happens once in
-// prepareRuntime(), where GEMINI_HOME and an atomic, newer-than replacement are
-// known; a shell copy here would hardcode $HOME and could overwrite a newer ACP
-// token with an older CLI one.
+// The wrapper only launches the CLI. Credential sync happens in prepareRuntime()
+// and before CLI quota probes, where GEMINI_HOME and an atomic, newer-than
+// replacement are known; a shell copy here would hardcode $HOME and could
+// overwrite a newer ACP token with an older CLI one.
 function cliWrapperScript(agyPath: string, platform: NodeJS.Platform = process.platform): string {
   if (platform === "win32") {
     const escaped = agyPath.replace(/%/g, "%%");
