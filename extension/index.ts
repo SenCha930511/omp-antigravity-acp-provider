@@ -822,7 +822,15 @@ export async function registerOmpAdapter(pi: OmpHostApi, stateDir: string,
     const plan = selectedLaunchPlan ?? await inspectRuntimeLaunchPlan(stateDir, { signal }).catch(() => undefined);
     const source = plan ? quotaSourceForPlan(plan) : undefined;
     if (!plan || !source) return undefined;
-    if (source.kind === "cli") return fetchCliQuota(source.cliPath, signal);
+    if (source.kind === "cli") {
+      // The probe runs agy against the isolated antigravity-acp profile. A
+      // CLI-only login reaches that profile only through this token sync, which
+      // prepareRuntime runs after an ACP login check or during sign-in; without
+      // it here, every probe would start agy's interactive sign-in instead of
+      // reporting quota.
+      syncAntigravityOAuthToken();
+      return fetchCliQuota(source.cliPath, signal);
+    }
     // Quota keeps the local-login credential route: OMP's usage provider has no
     // credential parameter, so an OMP-stored API key is not forwarded here.
     if (!(await authReady())) return undefined;

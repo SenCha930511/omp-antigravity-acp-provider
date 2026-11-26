@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { AcpFailure } from "./acp-errors.ts";
 import { resolveCommandProbe } from "./runtime/launch.ts";
@@ -162,15 +162,83 @@ function parseCliResetTime(value: string): string | undefined {
 
 export async function fetchCliQuota(cliPath: string, signal?: AbortSignal): Promise<AntigravityQuotaSnapshot> {
   const launch = resolveCommandProbe(cliPath, ["--app_data_dir=antigravity-acp", "-p", "/usage"]);
-  const { stdout } = await execFileAsync(launch.command, launch.args, {
-    encoding: "utf8",
-    timeout: 30_000,
-    maxBuffer: 1024 * 1024,
-    windowsHide: true,
-    windowsVerbatimArguments: process.platform === "win32",
-    ...(signal ? { signal } : {}),
+  if (process.platform === "win32") {
+    const { stdout } = await execFileAsync(launch.command, launch.args, {
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+      ...(signal ? { signal } : {}),
+    });
+    return parseCliUsageQuota(stdout);
+  }
+  return parseCliUsageQuota(await runWithoutTerminal(launch.command, launch.args, 30_000, 1024 * 1024, signal));
+}
+
+// The usage probe runs in the background of an interactive OMP session. When its agy profile has no login,
+// `-p /usage` opens /dev/tty and waits for a pasted authorization code, reading the user's keystrokes and the
+// terminal's replies meant for OMP. A detached child starts a new session without a controlling terminal, so
+// that open fails. Bun 1.4's execFile ignores `detached` (Node's honors it); spawn honors it in both.
+function runWithoutTerminal(command: string, args: readonly string[], timeoutMs: number, maxBuffer: number, signal?: AbortSignal): Promise<string> {
+  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  if (signal?.aborted) {
+    reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+    return promise;
+  }
+  const child = spawn(command, args, { detached: true, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  let stdout = "";
+  let stderr = "";
+  let failure: Error | undefined;
+  let killTimer: NodeJS.Timeout | undefined;
+  const signalGroup = (name: NodeJS.Signals) => {
+    try {
+      process.kill(-child.pid!, name);
+    } catch {
+      child.kill(name);
+    }
+  };
+  const stop = (error: Error) => {
+    failure ??= error;
+    if (killTimer) return;
+    signalGroup("SIGTERM");
+    killTimer = setTimeout(() => signalGroup("SIGKILL"), 2_000);
+  };
+  const timer = setTimeout(() => stop(new Error(`${command} timed out after ${timeoutMs} ms`)), timeoutMs);
+  const onAbort = () => stop(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
+  signal?.addEventListener("abort", onAbort, { once: true });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+    if (stdout.length > maxBuffer) stop(new Error(`${command} stdout exceeded ${maxBuffer} bytes`));
   });
-  return parseCliUsageQuota(stdout);
+  child.stderr.on("data", (chunk: string) => {
+    stderr = (stderr + chunk).slice(-4096);
+  });
+  child.once("error", (error) => {
+    if (child.pid !== undefined) {
+      stop(error);
+      return;
+    }
+    // The process never started, so no "close" event follows.
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+    reject(error);
+  });
+  child.once("close", (code, closeSignal) => {
+    clearTimeout(timer);
+    if (killTimer) {
+      // The leader exited after SIGTERM; a member that ignored it must not outlive the probe.
+      clearTimeout(killTimer);
+      signalGroup("SIGKILL");
+    }
+    signal?.removeEventListener("abort", onAbort);
+    if (failure) reject(failure);
+    else if (code !== 0) reject(new Error(`${command} exited with ${code ?? closeSignal}: ${stderr.trim() || stdout.trim()}`.slice(0, 2000)));
+    else resolve(stdout);
+  });
+  return promise;
 }
 
 export function quotaExhaustion(text: string, now = Date.now()): { resetAt?: string } | undefined {
